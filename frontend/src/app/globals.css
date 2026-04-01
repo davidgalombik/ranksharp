@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans: -apple-system, "Segoe UI", sans-serif;
+  }
+}
+
+@keyframes progress {
+  0%   { transform: translateX(-100%); width: 60%; }
+  50%  { transform: translateX(80%);  width: 60%; }
+  100% { transform: translateX(-100%); width: 60%; }
+}

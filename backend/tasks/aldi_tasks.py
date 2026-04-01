@@ -1,0 +1,466 @@
+"""Celery tasks for Aldi trend document analysis and product idea generation."""
+import asyncio
+from datetime import datetime
+from sqlalchemy import create_engine, text
+from tasks.celery_app import app
+from config import settings
+from database.models import AldiUpload, AldiProductIdea, AldiUploadStatus, AldiSession
+import structlog
+
+log = structlog.get_logger()
+engine = create_engine(settings.database_url_sync)
+
+
+def _get_session():
+    from sqlalchemy.orm import sessionmaker
+    return sessionmaker(bind=engine)()
+
+
+# ── Task 1: Vision analysis ───────────────────────────────────────────────────
+
+@app.task(bind=True, max_retries=2)
+def analyse_aldi_upload(self, upload_id: int) -> int:
+    """Analyse an uploaded mood-board document with Claude Vision."""
+    session = _get_session()
+    try:
+        upload = session.get(AldiUpload, upload_id)
+        if not upload:
+            log.warning("aldi_upload_not_found", upload_id=upload_id)
+            return upload_id
+
+        # Update session status to analysing if needed
+        if upload.session_id:
+            sess_obj = session.get(AldiSession, upload.session_id)
+            if sess_obj and sess_obj.status == AldiUploadStatus.PENDING:
+                sess_obj.status = AldiUploadStatus.ANALYSING
+                sess_obj.updated_at = datetime.utcnow()
+
+        upload.status = AldiUploadStatus.ANALYSING
+        upload.updated_at = datetime.utcnow()
+        session.commit()
+
+        try:
+            result = asyncio.run(_vision_analyse(upload.file_path, upload.file_type))
+
+            if result:
+                upload.themes = result.get("themes", [])
+                upload.colour_palette = result.get("colour_palette", [])
+                upload.colour_hex = result.get("colour_hex", [])
+                upload.key_materials = result.get("key_materials", [])
+                upload.key_prints = result.get("key_prints", [])
+                upload.product_categories = result.get("product_categories", [])
+                upload.season_occasion = result.get("season_occasion")
+                upload.mood_descriptors = result.get("mood_descriptors", [])
+                upload.raw_analysis = result
+
+                if upload.session_id:
+                    # Session flow: mark upload DONE, check if all siblings done
+                    upload.status = AldiUploadStatus.DONE
+                else:
+                    # Legacy single-upload flow: go to GENERATING (chain handles ideas)
+                    upload.status = AldiUploadStatus.GENERATING
+                log.info("aldi_vision_done", upload_id=upload_id, themes=upload.themes)
+            else:
+                upload.status = AldiUploadStatus.FAILED
+                upload.error_message = "Vision analysis returned no data"
+
+        except Exception as exc:
+            log.error("aldi_vision_failed", upload_id=upload_id, error=str(exc))
+            upload.status = AldiUploadStatus.FAILED
+            upload.error_message = str(exc)
+            upload.updated_at = datetime.utcnow()
+            session.commit()
+            raise self.retry(exc=exc, countdown=30)
+
+        upload.updated_at = datetime.utcnow()
+        session.commit()
+
+        # If part of a session, check if all siblings are done/failed
+        if upload.session_id:
+            _maybe_trigger_session_ideas(session, upload.session_id)
+
+        return upload_id
+
+    finally:
+        session.close()
+
+
+# ── Task 2: Idea generation ───────────────────────────────────────────────────
+
+@app.task(bind=True, max_retries=2)
+def generate_aldi_ideas(self, upload_id: int) -> dict:
+    """Generate Aldi product ideas from trend analysis + similar DB products."""
+    session = _get_session()
+    try:
+        upload = session.get(AldiUpload, upload_id)
+        if not upload:
+            return {"status": "not_found", "upload_id": upload_id}
+        if upload.status != AldiUploadStatus.GENERATING:
+            return {"status": "skipped", "upload_id": upload_id}
+
+        try:
+            # Find similar products via embedding similarity
+            similar_products = _find_similar_products(session, upload)
+            log.info("aldi_similar_products", upload_id=upload_id, count=len(similar_products))
+
+            # Build snapshot map for idea enrichment
+            product_map = {p["id"]: p for p in similar_products}
+
+            trend_data = {
+                "themes": upload.themes,
+                "colour_palette": upload.colour_palette,
+                "key_materials": upload.key_materials,
+                "key_prints": upload.key_prints,
+                "product_categories": upload.product_categories,
+                "season_occasion": upload.season_occasion,
+                "mood_descriptors": upload.mood_descriptors,
+            }
+
+            ideas = asyncio.run(_generate_ideas(trend_data, similar_products))
+
+            if ideas:
+                # Clear any stale ideas (retry-safe)
+                session.execute(
+                    text("DELETE FROM aldi_product_ideas WHERE upload_id = :uid"),
+                    {"uid": upload_id},
+                )
+                session.flush()
+
+                for idea_data in ideas:
+                    inspired_ids = [
+                        pid for pid in idea_data.get("inspired_by_product_ids", [])
+                        if isinstance(pid, int)
+                    ]
+                    inspired_snapshots = [
+                        {
+                            "id": pid,
+                            "name": product_map[pid]["name"],
+                            "retailer_name": product_map[pid]["retailer_name"],
+                            "url": product_map[pid]["url"],
+                            "image_url": product_map[pid].get("primary_image_url"),
+                        }
+                        for pid in inspired_ids if pid in product_map
+                    ]
+                    idea = AldiProductIdea(
+                        upload_id=upload_id,
+                        position=idea_data.get("position", 0),
+                        name=idea_data.get("name", ""),
+                        description=idea_data.get("description", ""),
+                        category=idea_data.get("category", ""),
+                        price_point=idea_data.get("price_point", ""),
+                        rationale=idea_data.get("rationale", ""),
+                        inspired_by_product_ids=inspired_ids,
+                        inspired_by_products=inspired_snapshots,
+                    )
+                    session.add(idea)
+
+                upload.status = AldiUploadStatus.DONE
+                log.info("aldi_ideas_done", upload_id=upload_id, count=len(ideas))
+            else:
+                upload.status = AldiUploadStatus.FAILED
+                upload.error_message = "Idea generation returned no results"
+
+        except Exception as exc:
+            log.error("aldi_ideas_failed", upload_id=upload_id, error=str(exc))
+            upload.status = AldiUploadStatus.FAILED
+            upload.error_message = str(exc)
+            upload.updated_at = datetime.utcnow()
+            session.commit()
+            raise self.retry(exc=exc, countdown=30)
+
+        upload.updated_at = datetime.utcnow()
+        session.commit()
+        return {"status": "done", "upload_id": upload_id, "ideas": len(ideas or [])}
+
+    finally:
+        session.close()
+
+
+# ── Async helpers ─────────────────────────────────────────────────────────────
+
+async def _vision_analyse(file_path: str, file_type: str) -> dict | None:
+    from analysis.aldi_vision import MoodBoardAnalyser
+    return await MoodBoardAnalyser().analyse_file(file_path, file_type)
+
+
+async def _generate_ideas(trend_data: dict, similar_products: list) -> list | None:
+    from analysis.aldi_vision import MoodBoardAnalyser
+    return await MoodBoardAnalyser().generate_ideas(trend_data, similar_products, n=8)
+
+
+# ── Similarity search (sync) ──────────────────────────────────────────────────
+
+def _find_similar_products(session, upload: AldiUpload) -> list[dict]:
+    """
+    Build a keyword embedding from the trend attributes and find the 20 most
+    similar products in the DB using pgvector cosine distance.
+    """
+    from analysis.embeddings import EmbeddingGenerator
+
+    query_text = " | ".join(filter(None, [
+        " ".join(upload.themes or []),
+        "Colours: " + ", ".join(upload.colour_palette or []),
+        "Materials: " + ", ".join(upload.key_materials or []),
+        "Patterns: " + ", ".join(upload.key_prints or []),
+        "Categories: " + ", ".join(upload.product_categories or []),
+        "Season: " + (upload.season_occasion or ""),
+        " ".join(upload.mood_descriptors or []),
+    ]))
+
+    if not query_text.strip():
+        return []
+
+    gen = EmbeddingGenerator()
+    query_vec = gen._keyword_embedding(query_text)
+    vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
+
+    try:
+        result = session.execute(text(f"""
+            SELECT p.id, p.name, p.url, p.price, p.primary_image_url,
+                   p.is_best_seller,
+                   r.name AS retailer_name,
+                   pa.colours, pa.materials, pa.style_tags, pa.patterns
+            FROM products p
+            JOIN product_attributes pa ON pa.product_id = p.id
+            JOIN retailers r ON r.id = p.retailer_id
+            WHERE pa.embedding IS NOT NULL
+              AND p.is_active = TRUE
+            ORDER BY
+              (pa.embedding <=> '{vec_str}'::vector)
+              * (CASE WHEN p.is_best_seller THEN 0.7 ELSE 1.0 END)
+            LIMIT 20
+        """))
+        return [
+            {
+                "id": row.id,
+                "name": row.name,
+                "url": row.url,
+                "price": row.price,
+                "primary_image_url": row.primary_image_url,
+                "is_best_seller": row.is_best_seller,
+                "retailer_name": row.retailer_name,
+                "colours": row.colours or [],
+                "materials": row.materials or [],
+                "style_tags": row.style_tags or [],
+                "patterns": row.patterns or [],
+            }
+            for row in result.fetchall()
+        ]
+    except Exception as exc:
+        log.error("similar_products_failed", error=str(exc))
+        return []
+
+
+# ── Session helpers ───────────────────────────────────────────────────────────
+
+def _maybe_trigger_session_ideas(session, session_id: int) -> None:
+    """If all uploads in the session are done/failed, trigger idea generation."""
+    from sqlalchemy import select as sa_select
+    terminal = {AldiUploadStatus.DONE, AldiUploadStatus.FAILED}
+    uploads = session.execute(
+        sa_select(AldiUpload).where(AldiUpload.session_id == session_id)
+    ).scalars().all()
+
+    if not uploads:
+        return
+    if not all(u.status in terminal for u in uploads):
+        return  # Some still running
+
+    # Try to claim generation slot atomically
+    sess_obj = session.get(AldiSession, session_id)
+    if not sess_obj or sess_obj.status != AldiUploadStatus.ANALYSING:
+        return  # Already claimed or done
+
+    sess_obj.status = AldiUploadStatus.GENERATING
+    sess_obj.updated_at = datetime.utcnow()
+    session.commit()
+
+    # Dispatch session-level idea generation
+    generate_aldi_session_ideas.delay(session_id)
+    log.info("aldi_session_all_done", session_id=session_id, upload_count=len(uploads))
+
+
+def _find_similar_products_for_session(session, sess_obj: AldiSession) -> list[dict]:
+    """Find similar products using merged session trend data."""
+    from analysis.embeddings import EmbeddingGenerator
+
+    query_text = " | ".join(filter(None, [
+        " ".join(sess_obj.themes or []),
+        "Colours: " + ", ".join(sess_obj.colour_palette or []),
+        "Materials: " + ", ".join(sess_obj.key_materials or []),
+        "Patterns: " + ", ".join(sess_obj.key_prints or []),
+        "Categories: " + ", ".join(sess_obj.product_categories or []),
+        "Season: " + (sess_obj.season_occasion or ""),
+        " ".join(sess_obj.mood_descriptors or []),
+    ]))
+
+    if not query_text.strip():
+        return []
+
+    gen = EmbeddingGenerator()
+    query_vec = gen._keyword_embedding(query_text)
+    vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
+
+    try:
+        result = session.execute(text(f"""
+            SELECT p.id, p.name, p.url, p.price, p.primary_image_url,
+                   p.is_best_seller,
+                   r.name AS retailer_name,
+                   pa.colours, pa.materials, pa.style_tags, pa.patterns
+            FROM products p
+            JOIN product_attributes pa ON pa.product_id = p.id
+            JOIN retailers r ON r.id = p.retailer_id
+            WHERE pa.embedding IS NOT NULL
+              AND p.is_active = TRUE
+            ORDER BY
+              (pa.embedding <=> '{vec_str}'::vector)
+              * (CASE WHEN p.is_best_seller THEN 0.7 ELSE 1.0 END)
+            LIMIT 20
+        """))
+        return [
+            {
+                "id": row.id,
+                "name": row.name,
+                "url": row.url,
+                "price": row.price,
+                "primary_image_url": row.primary_image_url,
+                "is_best_seller": row.is_best_seller,
+                "retailer_name": row.retailer_name,
+                "colours": row.colours or [],
+                "materials": row.materials or [],
+                "style_tags": row.style_tags or [],
+                "patterns": row.patterns or [],
+            }
+            for row in result.fetchall()
+        ]
+    except Exception as exc:
+        log.error("similar_products_for_session_failed", error=str(exc))
+        return []
+
+
+# ── Task 3: Session idea generation ──────────────────────────────────────────
+
+@app.task(bind=True, max_retries=2)
+def generate_aldi_session_ideas(self, session_id: int) -> dict:
+    """Generate Aldi product ideas by merging analyses from all uploads in a session."""
+    from sqlalchemy import select as sa_select
+    db_session = _get_session()
+    try:
+        sess_obj = db_session.get(AldiSession, session_id)
+        if not sess_obj:
+            return {"status": "not_found", "session_id": session_id}
+        if sess_obj.status != AldiUploadStatus.GENERATING:
+            return {"status": "skipped", "session_id": session_id}
+
+        # Load all uploads in this session
+        uploads = db_session.execute(
+            sa_select(AldiUpload).where(AldiUpload.session_id == session_id)
+        ).scalars().all()
+
+        try:
+            # Merge analyses: deduplicated union of all per-doc fields
+            def _merge(lists):
+                seen = []
+                for item in [x for lst in lists for x in lst]:
+                    if item not in seen:
+                        seen.append(item)
+                return seen
+
+            done_uploads = [u for u in uploads if u.status == AldiUploadStatus.DONE]
+
+            merged_themes = _merge([u.themes or [] for u in done_uploads])
+            merged_colours = _merge([u.colour_palette or [] for u in done_uploads])
+            merged_hex = _merge([u.colour_hex or [] for u in done_uploads])
+            merged_materials = _merge([u.key_materials or [] for u in done_uploads])
+            merged_prints = _merge([u.key_prints or [] for u in done_uploads])
+            merged_categories = _merge([u.product_categories or [] for u in done_uploads])
+            merged_mood = _merge([u.mood_descriptors or [] for u in done_uploads])
+            # For season: take most common or first
+            seasons = [u.season_occasion for u in done_uploads if u.season_occasion]
+            merged_season = seasons[0] if seasons else None
+
+            # Store merged analysis on session
+            sess_obj.themes = merged_themes
+            sess_obj.colour_palette = merged_colours
+            sess_obj.colour_hex = merged_hex
+            sess_obj.key_materials = merged_materials
+            sess_obj.key_prints = merged_prints
+            sess_obj.product_categories = merged_categories
+            sess_obj.mood_descriptors = merged_mood
+            sess_obj.season_occasion = merged_season
+            db_session.flush()
+
+            # Find similar products
+            similar_products = _find_similar_products_for_session(db_session, sess_obj)
+            log.info("aldi_session_similar_products", session_id=session_id, count=len(similar_products))
+
+            product_map = {p["id"]: p for p in similar_products}
+
+            trend_data = {
+                "themes": merged_themes,
+                "colour_palette": merged_colours,
+                "key_materials": merged_materials,
+                "key_prints": merged_prints,
+                "product_categories": merged_categories,
+                "season_occasion": merged_season,
+                "mood_descriptors": merged_mood,
+            }
+
+            ideas = asyncio.run(_generate_ideas(trend_data, similar_products))
+
+            if ideas:
+                db_session.execute(
+                    text("DELETE FROM aldi_product_ideas WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+                db_session.flush()
+
+                for idea_data in ideas:
+                    inspired_ids = [
+                        pid for pid in idea_data.get("inspired_by_product_ids", [])
+                        if isinstance(pid, int)
+                    ]
+                    inspired_snapshots = [
+                        {
+                            "id": pid,
+                            "name": product_map[pid]["name"],
+                            "retailer_name": product_map[pid]["retailer_name"],
+                            "url": product_map[pid]["url"],
+                            "image_url": product_map[pid].get("primary_image_url"),
+                        }
+                        for pid in inspired_ids if pid in product_map
+                    ]
+                    idea = AldiProductIdea(
+                        session_id=session_id,
+                        upload_id=None,
+                        position=idea_data.get("position", 0),
+                        name=idea_data.get("name", ""),
+                        description=idea_data.get("description", ""),
+                        category=idea_data.get("category", ""),
+                        price_point=idea_data.get("price_point", ""),
+                        rationale=idea_data.get("rationale", ""),
+                        inspired_by_product_ids=inspired_ids,
+                        inspired_by_products=inspired_snapshots,
+                    )
+                    db_session.add(idea)
+
+                sess_obj.status = AldiUploadStatus.DONE
+                log.info("aldi_session_ideas_done", session_id=session_id, count=len(ideas))
+            else:
+                sess_obj.status = AldiUploadStatus.FAILED
+                sess_obj.error_message = "Idea generation returned no results"
+
+        except Exception as exc:
+            log.error("aldi_session_ideas_failed", session_id=session_id, error=str(exc))
+            sess_obj.status = AldiUploadStatus.FAILED
+            sess_obj.error_message = str(exc)
+            sess_obj.updated_at = datetime.utcnow()
+            db_session.commit()
+            raise self.retry(exc=exc, countdown=30)
+
+        sess_obj.updated_at = datetime.utcnow()
+        db_session.commit()
+        return {"status": "done", "session_id": session_id, "ideas": len(ideas or [])}
+
+    finally:
+        db_session.close()
