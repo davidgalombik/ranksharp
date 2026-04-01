@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     aws_region: str = "ap-southeast-2"
 
+    # CORS
+    allowed_origins: str = "http://localhost:3000"
+
     # Scraping
     scrape_concurrency: int = 5
     request_delay_min: float = 1.5
