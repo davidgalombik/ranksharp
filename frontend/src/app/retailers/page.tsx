@@ -146,8 +146,8 @@ export default function RetailersPage() {
                       <h3 className="font-medium text-stone-900 truncate">{r.name}</h3>
                       <p className="text-xs text-stone-400 truncate">{r.base_url}</p>
                     </div>
-                    <span className={clsx("px-1.5 py-0.5 rounded border text-xs font-medium flex-shrink-0", TIER_STYLES[r.tier])}>
-                      {TIER_LABELS[r.tier]}
+                    <span className={clsx("px-1.5 py-0.5 rounded border text-xs font-medium flex-shrink-0", TIER_STYLES[r.tier as keyof typeof TIER_STYLES])}>
+                      {TIER_LABELS[r.tier as keyof typeof TIER_LABELS]}
                     </span>
                   </div>
 
