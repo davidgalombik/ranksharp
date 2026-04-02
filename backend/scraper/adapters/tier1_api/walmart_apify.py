@@ -23,43 +23,43 @@ MAX_ITEMS_PER_URL = 48
 
 SEARCH_URLS = [
     # Candles & fragrance
-    "https://www.walmart.com/search?q=scented+candles&sort=best_seller",
-    "https://www.walmart.com/search?q=wax+melts&sort=best_seller",
-    "https://www.walmart.com/search?q=reed+diffuser&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=scented+candles",
+    "https://www.walmart.com/search?grid=true&query=wax+melts",
+    "https://www.walmart.com/search?grid=true&query=reed+diffuser",
     # Soft furnishings
-    "https://www.walmart.com/search?q=throw+pillows&sort=best_seller",
-    "https://www.walmart.com/search?q=throw+blankets&sort=best_seller",
-    "https://www.walmart.com/search?q=area+rugs&sort=best_seller",
-    "https://www.walmart.com/search?q=curtain+panels&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=throw+pillows",
+    "https://www.walmart.com/search?grid=true&query=throw+blankets",
+    "https://www.walmart.com/search?grid=true&query=area+rugs",
+    "https://www.walmart.com/search?grid=true&query=curtain+panels",
     # Storage & organisation
-    "https://www.walmart.com/search?q=storage+baskets&sort=best_seller",
-    "https://www.walmart.com/search?q=floating+shelves&sort=best_seller",
-    "https://www.walmart.com/search?q=desk+organizer&sort=best_seller",
-    "https://www.walmart.com/search?q=kitchen+canisters&sort=best_seller",
-    "https://www.walmart.com/search?q=bathroom+organizer&sort=best_seller",
-    "https://www.walmart.com/search?q=closet+organizer&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=storage+baskets",
+    "https://www.walmart.com/search?grid=true&query=floating+shelves",
+    "https://www.walmart.com/search?grid=true&query=desk+organizer",
+    "https://www.walmart.com/search?grid=true&query=kitchen+canisters",
+    "https://www.walmart.com/search?grid=true&query=bathroom+organizer",
+    "https://www.walmart.com/search?grid=true&query=closet+organizer",
     # Decorative objects
-    "https://www.walmart.com/search?q=decorative+vases&sort=best_seller",
-    "https://www.walmart.com/search?q=decorative+bowls&sort=best_seller",
-    "https://www.walmart.com/search?q=decorative+trays&sort=best_seller",
-    "https://www.walmart.com/search?q=picture+frames&sort=best_seller",
-    "https://www.walmart.com/search?q=wall+mirrors&sort=best_seller",
-    "https://www.walmart.com/search?q=wall+clocks&sort=best_seller",
-    "https://www.walmart.com/search?q=wall+art&sort=best_seller",
-    "https://www.walmart.com/search?q=decorative+lanterns&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=decorative+vases",
+    "https://www.walmart.com/search?grid=true&query=decorative+bowls",
+    "https://www.walmart.com/search?grid=true&query=decorative+trays",
+    "https://www.walmart.com/search?grid=true&query=picture+frames",
+    "https://www.walmart.com/search?grid=true&query=wall+mirrors",
+    "https://www.walmart.com/search?grid=true&query=wall+clocks",
+    "https://www.walmart.com/search?grid=true&query=wall+art",
+    "https://www.walmart.com/search?grid=true&query=decorative+lanterns",
     # Lighting
-    "https://www.walmart.com/search?q=table+lamps&sort=best_seller",
-    "https://www.walmart.com/search?q=floor+lamps&sort=best_seller",
-    "https://www.walmart.com/search?q=string+lights&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=table+lamps",
+    "https://www.walmart.com/search?grid=true&query=floor+lamps",
+    "https://www.walmart.com/search?grid=true&query=string+lights",
     # Plants & outdoors
-    "https://www.walmart.com/search?q=indoor+planters&sort=best_seller",
-    "https://www.walmart.com/search?q=artificial+plants&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=indoor+planters",
+    "https://www.walmart.com/search?grid=true&query=artificial+plants",
     # Kitchen & dining
-    "https://www.walmart.com/search?q=serving+boards&sort=best_seller",
-    "https://www.walmart.com/search?q=coffee+mugs&sort=best_seller",
-    "https://www.walmart.com/search?q=kitchen+towels&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=serving+boards",
+    "https://www.walmart.com/search?grid=true&query=coffee+mugs",
+    "https://www.walmart.com/search?grid=true&query=kitchen+towels",
     # Trending styles
-    "https://www.walmart.com/search?q=boho+home+decor&sort=best_seller",
+    "https://www.walmart.com/search?grid=true&query=boho+home+decor",
 ]
 
 
