@@ -109,6 +109,10 @@ class WalmartApifyAdapter(BaseAdapter):
                     run_input={
                         "startUrls": [{"url": url}],
                         "maxItems": MAX_ITEMS_PER_URL,
+                        "proxy": {
+                            "useApifyProxy": True,
+                            "apifyProxyGroups": ["RESIDENTIAL"],
+                        },
                     },
                     timeout_secs=300,
                 )
