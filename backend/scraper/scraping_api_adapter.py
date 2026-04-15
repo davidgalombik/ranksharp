@@ -94,9 +94,19 @@ class ScrapingAPIAdapter(BaseAdapter):
                     log.warning("scraping_api_fallback_failed", url=url, error=str(e))
                     return None
 
+        # Map country name/code to ISO 2-letter code for Smartproxy geo field
+        _GEO_MAP = {
+            "United States": "US", "US": "US",
+            "Australia": "AU", "AU": "AU",
+            "United Kingdom": "GB", "GB": "GB",
+            "Netherlands": "NL", "NL": "NL",
+        }
+        geo = _GEO_MAP.get(country, "US")
+        locale = "en-AU" if geo == "AU" else "en-US"
+
         payload: dict = {
-            "geo": "US",
-            "locale": "en-US",
+            "geo": geo,
+            "locale": locale,
             "js_render": True,   # full JS rendering to bypass Akamai/PerimeterX
             "format": ["html"],
             "source": "uni_scraper",   # must be top-level (not inside context)
