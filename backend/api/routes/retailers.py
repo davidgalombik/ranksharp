@@ -104,6 +104,29 @@ async def trigger_scrape(
     return {"task_id": task.id, "retailer": retailer.name, "status": "queued", "skip_analysis": skip_analysis}
 
 
+@router.delete("/locks")
+async def clear_all_scrape_locks():
+    """Clear all Redis scrape locks (use when a lock is stuck after a crash)."""
+    import redis as redis_lib
+    from config import settings
+    r = redis_lib.from_url(settings.redis_url, decode_responses=True)
+    keys = r.keys("scrape_lock:*")
+    if keys:
+        r.delete(*keys)
+    return {"cleared": keys}
+
+
+@router.delete("/locks/{slug}")
+async def clear_scrape_lock(slug: str):
+    """Clear the Redis scrape lock for a specific retailer slug."""
+    import redis as redis_lib
+    from config import settings
+    r = redis_lib.from_url(settings.redis_url, decode_responses=True)
+    key = f"scrape_lock:{slug}"
+    existed = r.delete(key)
+    return {"slug": slug, "cleared": bool(existed)}
+
+
 @router.post("/scrape-all")
 async def trigger_scrape_all(
     skip_analysis: bool = Query(False, description="Queue scrapes without triggering Claude analysis"),
