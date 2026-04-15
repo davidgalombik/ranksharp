@@ -167,7 +167,16 @@ class TargetApifyAdapter(BaseAdapter):
         classification = item.get("product_classification") or {}
         category = classification.get("product_type_name") or item.get("from_url")
 
-        return RawProduct(
+        # All search URLs use sortBy=bestselling — every result is a top seller.
+        # Also honour any explicit badge the actor returns.
+        badges = item.get("badges") or item.get("labels") or []
+        explicit_badge = any(
+            "best" in str(b).lower() and "sell" in str(b).lower()
+            for b in (badges if isinstance(badges, list) else [badges])
+        )
+        is_best_seller = explicit_badge or True  # all queries are bestselling-sorted
+
+        product = RawProduct(
             url=url,
             name=name,
             retailer_slug=self.RETAILER_SLUG,
@@ -185,3 +194,5 @@ class TargetApifyAdapter(BaseAdapter):
                 "total_ratings": item.get("total_ratings"),
             },
         )
+        product.is_best_seller = is_best_seller
+        return product

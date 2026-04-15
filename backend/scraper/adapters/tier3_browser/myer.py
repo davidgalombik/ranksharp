@@ -21,12 +21,16 @@ CATEGORY_URLS = [
     "https://www.myer.com.au/c/home-garden/home-decor/candles-and-diffusers",
     "https://www.myer.com.au/c/home-garden/home-decor/vases-and-pots",
     "https://www.myer.com.au/c/home-garden/home-decor/baskets",
-    "https://www.myer.com.au/c/best-sellers",  # best-seller flag auto-applied
+    # Category-scoped best sellers — avoids the sitewide /c/best-sellers page
+    # which pulls in clothing, electronics, beauty, etc.
+    "https://www.myer.com.au/c/home-garden/home-decor/best-sellers",      # best-seller flag auto-applied
+    "https://www.myer.com.au/c/home-garden/storage-organisation/best-sellers",  # best-seller flag auto-applied
 ]
 
 
 class MyerAdapter(BaseAdapter):
     RETAILER_SLUG = "myer"
+    REQUIRES_PROXY = True  # Myer blocks headless Chrome without a residential proxy
 
     def __init__(self, rc):
         super().__init__(rc)

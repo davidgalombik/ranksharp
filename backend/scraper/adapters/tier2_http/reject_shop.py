@@ -25,6 +25,11 @@ CATEGORY_PATHS = [
     "/c/cleaning",
 ]
 
+CATEGORY_LABELS: dict[str, str] = {
+    "/c/homeware": "Homeware",
+    "/c/cleaning": "Cleaning",
+}
+
 
 class RejectShopAdapter(BaseAdapter):
     RETAILER_SLUG = "reject-shop"
@@ -32,6 +37,7 @@ class RejectShopAdapter(BaseAdapter):
     def __init__(self, rc):
         super().__init__(rc)
         self._client = None
+        self._cat_cache: dict[str, str] = {}
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
@@ -64,6 +70,10 @@ class RejectShopAdapter(BaseAdapter):
                 if full not in urls:
                     urls.append(full)
                     added += 1
+                    for path, label in CATEGORY_LABELS.items():
+                        if path in category_url:
+                            self._cat_cache.setdefault(full, label)
+                            break
             if added == 0:
                 break
             # Reject Shop uses page param; stop after 10 pages max
@@ -105,6 +115,7 @@ class RejectShopAdapter(BaseAdapter):
                         description=d.get("description"),
                         price=price,
                         currency="AUD",
+                        category=self._cat_cache.get(url),
                         image_urls=imgs,
                         raw_attributes={},
                     )
@@ -120,5 +131,6 @@ class RejectShopAdapter(BaseAdapter):
             name=name_el.get_text(strip=True),
             retailer_slug=self.RETAILER_SLUG,
             currency="AUD",
+            category=self._cat_cache.get(url),
             raw_attributes={},
         )

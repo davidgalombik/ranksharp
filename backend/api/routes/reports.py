@@ -1,9 +1,9 @@
 """Report API routes."""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
-from database.models import TrendReport, Trend, TrendStatus
+from database.models import TrendReport, Trend, TrendExample, TrendStatus
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
@@ -75,10 +75,53 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/generate")
 async def generate_report():
     """Manually trigger the weekly trend analysis + report generation."""
-    from tasks.analysis_tasks import run_trend_analysis
-    # Use the 'reports' queue so the task is not blocked behind product-analysis jobs
-    task = run_trend_analysis.apply_async(queue="reports")
+    from tasks.analysis_tasks import run_trend_analysis_task
+    task = run_trend_analysis_task.apply_async(queue="reports")
     return {"task_id": task.id, "status": "queued"}
+
+
+@router.delete("/clear")
+async def clear_all(db: AsyncSession = Depends(get_db)):
+    """Delete all trend sets across all generations and weeks."""
+    await db.execute(delete(TrendExample))
+    await db.execute(delete(Trend))
+    await db.execute(delete(TrendReport))
+    await db.commit()
+    return {"status": "cleared"}
+
+
+@router.post("/regenerate")
+async def regenerate_report():
+    """Generate a fresh set of trends without deleting the previous generation (Try Again)."""
+    from tasks.analysis_tasks import regenerate_trend_analysis_task
+    task = regenerate_trend_analysis_task.apply_async(queue="reports")
+    return {"task_id": task.id, "status": "queued"}
+
+
+@router.get("/task/{task_id}")
+async def get_task_status(task_id: str):
+    """Poll the status of a trend analysis Celery task."""
+    from celery.result import AsyncResult
+    from tasks.celery_app import app as celery_app
+
+    result = AsyncResult(task_id, app=celery_app)
+    state = result.state  # PENDING | STARTED | PROGRESS | SUCCESS | FAILURE
+
+    if state == "PROGRESS":
+        info = result.info or {}
+        return {
+            "task_id": task_id,
+            "state": "PROGRESS",
+            "pct": info.get("pct", 0),
+            "step": info.get("step", ""),
+        }
+    elif state == "SUCCESS":
+        return {"task_id": task_id, "state": "SUCCESS", "pct": 100, "step": "Complete!"}
+    elif state == "FAILURE":
+        return {"task_id": task_id, "state": "FAILURE", "pct": 0, "step": "Analysis failed"}
+    else:
+        # PENDING or STARTED
+        return {"task_id": task_id, "state": state, "pct": 2, "step": "Queued…"}
 
 
 async def _build_report_out(report: TrendReport, db: AsyncSession) -> ReportOut:

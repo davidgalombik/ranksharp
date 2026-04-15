@@ -99,9 +99,9 @@ class ScrapingAPIAdapter(BaseAdapter):
             "locale": "en-US",
             "js_render": True,   # full JS rendering to bypass Akamai/PerimeterX
             "format": ["html"],
+            "source": "uni_scraper",   # must be top-level (not inside context)
             "context": {
                 "url": url,
-                "source": "uni_scraper",
             },
         }
         if wait_for_selector:
@@ -119,24 +119,30 @@ class ScrapingAPIAdapter(BaseAdapter):
                 )
 
                 if resp.status_code == 200:
-                    data = resp.json()
-                    # v1 response: {"results": [{"content": "<html>...", "status_code": 200}]}
+                    content_type = resp.headers.get("content-type", "")
+
+                    # Smartproxy v1 returns raw HTML directly (not JSON-wrapped)
+                    if "text/html" in content_type or resp.text.lstrip().startswith("<"):
+                        html = resp.text
+                        log.info("scraping_api_fetched", url=url, status=200, bytes=len(html))
+                        return html if html else None
+
+                    # Fallback: try JSON envelope {"results": [{"content": "..."}]}
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        log.warning("scraping_api_bad_response", url=url, body=resp.text[:200])
+                        return None
                     results = data.get("results", [])
                     if results:
                         first = results[0]
-                        # content may be nested under "content" or directly as html
                         content = (
                             first.get("content")
                             or first.get("html")
                             or (first.get("results", [{}])[0].get("content") if isinstance(first.get("results"), list) else None)
                         )
                         status = first.get("status_code", 0)
-                        log.info(
-                            "scraping_api_fetched",
-                            url=url,
-                            status=status,
-                            bytes=len(content or ""),
-                        )
+                        log.info("scraping_api_fetched", url=url, status=status, bytes=len(content or ""))
                         return content if content else None
                     log.warning("scraping_api_empty_result", url=url, response=str(data)[:300])
                     return None

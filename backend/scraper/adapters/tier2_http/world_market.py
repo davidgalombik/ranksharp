@@ -20,14 +20,27 @@ HEADERS = {
 }
 
 CATEGORY_PATHS = [
-    "/c/kitchen-storage/",
-    "/c/kitchen-food-storage/",
-    "/c/storage-organization/",
-    "/c/home-decor/",
-    "/c/baskets-bins/",
-    "/c/candles-holders/",
-    "/c/vases-and-bowls/",
+    "/c/best-sellers/",
+    "/c/decor-and-pillows/decorative-accessories/",
+    "/c/new-and-trending/new-decor-and-pillows/",
+    "/c/new-and-trending/new-kitchen/",
+    "/c/kitchen/kitchen-storage-and-organization/",
+    "/c/kitchen/kitchen-storage-and-organization/food-storage/",
+    "/c/kitchen/cookware/",
+    "/c/kitchen/bakeware/",
 ]
+
+# Human-readable label derived from the last meaningful path segment
+CATEGORY_LABELS: dict[str, str] = {
+    "/c/best-sellers/": "Best Sellers",
+    "/c/decor-and-pillows/decorative-accessories/": "Decorative Accessories",
+    "/c/new-and-trending/new-decor-and-pillows/": "New Decor",
+    "/c/new-and-trending/new-kitchen/": "New Kitchen",
+    "/c/kitchen/kitchen-storage-and-organization/": "Kitchen Storage",
+    "/c/kitchen/kitchen-storage-and-organization/food-storage/": "Food Storage",
+    "/c/kitchen/cookware/": "Cookware",
+    "/c/kitchen/bakeware/": "Bakeware",
+}
 
 
 class WorldMarketAdapter(BaseAdapter):
@@ -36,6 +49,7 @@ class WorldMarketAdapter(BaseAdapter):
     def __init__(self, rc):
         super().__init__(rc)
         self._client = None
+        self._cat_cache: dict[str, str] = {}
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
@@ -51,30 +65,26 @@ class WorldMarketAdapter(BaseAdapter):
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=8))
     async def get_product_urls(self, category_url: str) -> list[str]:
+        import re as _re
+        path = category_url.replace(self.base_url, "")
+        cat_label = CATEGORY_LABELS.get(path, path.rstrip("/").split("/")[-1].replace("-", " ").title())
+
         urls = []
-        for page in range(1, 6):
-            params = {"start": (page - 1) * 48, "sz": 48} if page > 1 else {}
+        for page in range(1, 8):
+            params = {"start": (page - 1) * 60, "sz": 60} if page > 1 else {}
             resp = await self._client.get(category_url, params=params)
             if resp.status_code != 200:
                 break
-            soup = BeautifulSoup(resp.text, "lxml")
-            links = soup.select(
-                "a[href*='/p/'], a.product-tile__name-link, a[class*='product-link']"
-            )
-            if not links:
-                links = soup.select("a[href*='/products/'], a[href*='/product/']")
-            if not links:
-                break
+            # Product links are in the format /p/{slug}-{id}.html
+            found = _re.findall(r'/p/[a-z0-9-]+-\d+\.html', resp.text)
             added = 0
-            for a in links:
-                href = a.get("href", "")
-                full = href if href.startswith("http") else self.base_url + href
+            for href in dict.fromkeys(found):
+                full = self.base_url + href
                 if full not in urls:
                     urls.append(full)
                     added += 1
+                self._cat_cache.setdefault(full, cat_label)
             if added == 0:
-                break
-            if not soup.select_one("a.js-page-next, [class*='pagination-next']:not(.disabled)"):
                 break
         return urls
 
@@ -85,45 +95,74 @@ class WorldMarketAdapter(BaseAdapter):
             return None
         soup = BeautifulSoup(resp.text, "lxml")
 
+        # og:image is the most reliable product image source on worldmarket.com.
+        # JSON-LD schema does not include the image field on most product pages.
+        og_img = soup.find("meta", property="og:image")
+        og_img_url = og_img.get("content", "").strip() if og_img else ""
+        # Exclude nav/library assets (not product photos) and .tif files (browsers can't render them)
+        if og_img_url and (
+            any(x in og_img_url for x in ["MegaNavigation", "nav-flyout", "World_Market-Library"])
+            or og_img_url.lower().endswith(".tif")
+        ):
+            og_img_url = ""
+
+        name = ""
+        sku = None
+        price = None
+        description = None
+
         for s in soup.select('script[type="application/ld+json"]'):
             try:
                 d = json.loads(s.string or "")
                 if isinstance(d, list):
                     d = next((x for x in d if x.get("@type") == "Product"), None)
                 if d and d.get("@type") == "Product":
+                    name = d.get("name", "")
+                    sku = d.get("sku")
+                    description = d.get("description")
                     offers = d.get("offers", {})
                     if isinstance(offers, list):
                         offers = offers[0] if offers else {}
-                    price = None
                     if raw := offers.get("price"):
                         try:
                             price = float(str(raw).replace(",", ""))
                         except (ValueError, TypeError):
                             pass
-                    imgs = d.get("image", [])
-                    if isinstance(imgs, str):
-                        imgs = [imgs]
-                    return RawProduct(
-                        url=url,
-                        name=d.get("name", ""),
-                        retailer_slug=self.RETAILER_SLUG,
-                        external_id=d.get("sku"),
-                        description=d.get("description"),
-                        price=price,
-                        currency="USD",
-                        image_urls=imgs,
-                        raw_attributes={},
-                    )
+                    # JSON-LD image uses the dw/image/v2 service (proper JPEG).
+                    # Prefer it over og:image; bump sw= to 800 for full-size.
+                    jld_imgs = d.get("image", [])
+                    if isinstance(jld_imgs, str):
+                        jld_imgs = [jld_imgs]
+                    for img in jld_imgs:
+                        if img and not any(x in img for x in ["MegaNavigation", "nav-flyout", "World_Market-Library"]):
+                            # Increase image size: replace any sw=N with sw=800
+                            import re as _re
+                            img = _re.sub(r'([\?&])sw=\d+', r'\1sw=800', img)
+                            if 'sw=' not in img:
+                                img += ('&' if '?' in img else '?') + 'sw=800'
+                            og_img_url = img  # always prefer JSON-LD image
+                            break
+                    break
             except (json.JSONDecodeError, TypeError, StopIteration):
                 pass
 
-        name_el = soup.select_one("h1.product-name, h1[itemprop='name'], h1")
-        if not name_el:
-            return None
+        if not name:
+            name_el = soup.select_one("h1.product-name, h1[itemprop='name'], h1")
+            if not name_el:
+                return None
+            name = name_el.get_text(strip=True)
+
+        img_urls = [og_img_url] if og_img_url else []
+
         return RawProduct(
             url=url,
-            name=name_el.get_text(strip=True),
+            name=name,
             retailer_slug=self.RETAILER_SLUG,
+            external_id=sku,
+            description=description,
+            price=price,
             currency="USD",
+            category=self._cat_cache.get(url),
+            image_urls=img_urls,
             raw_attributes={},
         )

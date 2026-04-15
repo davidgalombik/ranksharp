@@ -39,6 +39,7 @@ python-dotenv==1.0.1
 tenacity==9.0.0
 structlog==24.4.0
 pillow>=9.1.0,<11
+pillow-heif>=0.18.0
 
 # Scheduling
 celery[redis]==5.4.0

@@ -2,20 +2,43 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
+import { useState, useRef } from "react";
 import clsx from "clsx";
 
-const links = [
-  { href: "/", label: "Dashboard" },
-  { href: "/reports", label: "Reports" },
-  { href: "/trends", label: "Trends" },
-  { href: "/products", label: "Products" },
+const topLinks = [
+  { href: "/", label: "Dashboard", exact: true },
+  { href: "/products", label: "Current Products", exact: true },
   { href: "/retailers", label: "Retailers" },
-  { href: "/aldi", label: "Aldi Trends" },
-  { href: "/progress", label: "Scrape Progress" },
+  { href: "/products/historical", label: "Historical Products", exact: true },
 ];
+
+const trendsDropdown = [
+  { href: "/trends", label: "Product Trends" },
+  { href: "/fragrance-trends", label: "Fragrance" },
+  { href: "/instore", label: "In-store" },
+  { href: "/aldi", label: "Aldi Trends" },
+];
+
+const TRENDS_PREFIXES = trendsDropdown.map((l) => l.href);
 
 export default function Navigation() {
   const path = usePathname();
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const isTrendsActive = TRENDS_PREFIXES.some(
+    (prefix) => path === prefix || path.startsWith(prefix + "/")
+  );
+
+  function handleMouseEnter() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    setOpen(true);
+  }
+
+  function handleMouseLeave() {
+    closeTimer.current = setTimeout(() => setOpen(false), 120);
+  }
+
   return (
     <header className="bg-white border-b border-stone-200 sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
@@ -29,21 +52,97 @@ export default function Navigation() {
             priority
           />
         </Link>
-        <nav className="flex gap-1">
-          {links.map(({ href, label }) => (
-            <Link
-              key={href}
-              href={href}
+
+        <nav className="flex gap-1 items-center">
+          {/* Dashboard */}
+          <Link
+            href="/"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            Dashboard
+          </Link>
+
+          {/* Current Products */}
+          <Link
+            href="/products"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/products" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            Current Products
+          </Link>
+
+          {/* Trends dropdown */}
+          <div
+            className="relative"
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+          >
+            <button
               className={clsx(
-                "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
-                (href === "/" ? path === "/" : path.startsWith(href))
-                  ? "bg-stone-900 text-white"
-                  : "text-stone-600 hover:bg-stone-100"
+                "flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+                isTrendsActive ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
               )}
             >
-              {label}
-            </Link>
-          ))}
+              Trends
+              <svg
+                className={clsx("w-3.5 h-3.5 transition-transform", open && "rotate-180")}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+
+            {open && (
+              <div className="absolute left-0 top-full mt-1 w-44 bg-white border border-stone-200 rounded-xl shadow-lg py-1 z-50">
+                {trendsDropdown.map(({ href, label }) => (
+                  <Link
+                    key={href}
+                    href={href}
+                    onClick={() => setOpen(false)}
+                    className={clsx(
+                      "block px-4 py-2 text-sm font-medium transition-colors",
+                      path === href || path.startsWith(href + "/")
+                        ? "bg-stone-100 text-stone-900"
+                        : "text-stone-600 hover:bg-stone-50 hover:text-stone-900"
+                    )}
+                  >
+                    {label}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Retailers */}
+          <Link
+            href="/retailers"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/retailers" || path.startsWith("/retailers/")
+                ? "bg-stone-900 text-white"
+                : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            Retailers
+          </Link>
+
+          {/* Historical Products */}
+          <Link
+            href="/products/historical"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/products/historical"
+                ? "bg-stone-900 text-white"
+                : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            Historical Products
+          </Link>
         </nav>
       </div>
     </header>

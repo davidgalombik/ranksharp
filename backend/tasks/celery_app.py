@@ -17,18 +17,14 @@ app.conf.update(
         "tasks.scrape_tasks.*": {"queue": "scrape"},
         "tasks.analysis_tasks.*": {"queue": "analysis"},
         "tasks.aldi_tasks.*": {"queue": "aldi"},
+        "tasks.instore_tasks.*": {"queue": "aldi"},
         "tasks.report_tasks.*": {"queue": "reports"},
     },
     beat_schedule={
-        # Every Sunday at 01:00 UTC — trigger all scrapers
-        "weekly-scrape-all": {
-            "task": "tasks.scrape_tasks.scrape_all_retailers",
-            "schedule": crontab(hour=1, minute=0, day_of_week=0),
-        },
-        # Every Sunday at 08:00 UTC — run trend analysis after scrape + analysis
-        "weekly-trend-analysis": {
-            "task": "tasks.analysis_tasks.run_trend_analysis",
-            "schedule": crontab(hour=8, minute=0, day_of_week=0),
+        # Every 10 minutes — reset any products stuck in RUNNING and re-queue them
+        "reset-stuck-analyses": {
+            "task": "tasks.analysis_tasks.reset_stuck_analyses",
+            "schedule": crontab(minute="*/10"),
         },
     },
     worker_prefetch_multiplier=1,
@@ -36,4 +32,4 @@ app.conf.update(
 )
 
 # Explicitly include task modules so Celery registers them on startup
-app.conf.update(include=["tasks.scrape_tasks", "tasks.analysis_tasks", "tasks.aldi_tasks"])
+app.conf.update(include=["tasks.scrape_tasks", "tasks.analysis_tasks", "tasks.aldi_tasks", "tasks.instore_tasks"])

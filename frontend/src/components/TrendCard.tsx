@@ -180,12 +180,27 @@ export default function TrendCard({ trend }: { trend: Trend }) {
           )}
 
           {/* Footer stats */}
-          <div className="pt-2 border-t border-stone-100 flex items-center justify-between text-xs text-stone-500">
-            <span>{trend.product_count.toLocaleString()} products</span>
-            <span>{trend.retailer_count} retailers</span>
-            {trend.avg_price != null && (
-              <span>${trend.avg_price.toFixed(0)} avg</span>
+          <div className="pt-2 border-t border-stone-100 space-y-1.5">
+            {/* Retailer names */}
+            {trend.retailer_names && trend.retailer_names.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {trend.retailer_names.map((r) => (
+                  <span
+                    key={r}
+                    className="px-2 py-0.5 bg-stone-100 rounded-full text-xs text-stone-600 font-medium"
+                  >
+                    {r}
+                  </span>
+                ))}
+              </div>
             )}
+            <div className="flex items-center justify-between text-xs text-stone-400">
+              <span>{trend.product_count.toLocaleString()} products</span>
+              <span>{trend.retailer_names.length} retailers</span>
+              {trend.avg_price != null && (
+                <span>${trend.avg_price.toFixed(0)} avg</span>
+              )}
+            </div>
           </div>
         </div>
       </article>

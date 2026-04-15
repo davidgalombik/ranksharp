@@ -8,16 +8,13 @@ class LenoxAdapter(ShopifyAdapter):
     """
     RETAILER_SLUG = "lenox"
     COLLECTION_HANDLES = [
-        "best-sellers",  # best-seller flag auto-applied
+        "best-sellers",   # best-seller flag auto-applied
         "serveware",
         "bowls",
-        "vases-decorative-accents",
         "kitchen",
         "home-decor",
         "holiday",
-        "frames-albums",
-        "entertaining",
-        "gifts",
         "dinnerware",
-        "all",
+        # "vases-decorative-accents", "frames-albums", "entertaining", "gifts" — empty collections
+        # "all" removed — it has no label, causing 92% of products to get category=NULL
     ]

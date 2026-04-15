@@ -196,7 +196,19 @@ class AmazonApifyAdapter(BaseAdapter):
         breadcrumbs = item.get("breadCrumbs") or ""
         category = breadcrumbs.split(">")[-1].strip() if breadcrumbs else None
 
-        return RawProduct(
+        # Best seller: explicit badge from actor, Amazon's Choice, or high purchase volume
+        monthly_vol = item.get("monthlyPurchaseVolume") or ""
+        high_volume = bool(monthly_vol and any(
+            marker in str(monthly_vol) for marker in ["K+", "k+", "1,000", "2,000", "5,000", "10,000"]
+        ))
+        is_best_seller = bool(
+            item.get("isBestSeller")
+            or item.get("bestSeller")
+            or item.get("isAmazonChoice")
+            or high_volume
+        )
+
+        product = RawProduct(
             url=url,
             name=name,
             retailer_slug=self.RETAILER_SLUG,
@@ -212,8 +224,11 @@ class AmazonApifyAdapter(BaseAdapter):
                 "stars": item.get("stars"),
                 "reviews_count": item.get("reviewsCount"),
                 "is_amazon_choice": item.get("isAmazonChoice"),
+                "is_best_seller": item.get("isBestSeller") or item.get("bestSeller"),
                 "monthly_purchase_volume": item.get("monthlyPurchaseVolume"),
                 "in_stock": item.get("inStock"),
                 "breadcrumbs": breadcrumbs,
             },
         )
+        product.is_best_seller = is_best_seller
+        return product

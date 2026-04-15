@@ -35,7 +35,7 @@ CATEGORY_URLS = [
     "https://www.wayfair.com/storage-organization/cat/bins-baskets-c45272.html",
     "https://www.wayfair.com/storage-organization/cat/shelf-organizers-c1862684.html",
     "https://www.wayfair.com/kitchen-tabletop/cat/food-storage-containers-c47067.html",
-    "https://www.wayfair.com/decor-pillows/cat/decorative-accessories-c215090.html",
+    "https://www.wayfair.com/decor-pillows/cat/vases-c215093.html",
     "https://www.wayfair.com/lighting/cat/candles-holders-c215337.html",
     "https://www.wayfair.com/decor-pillows/cat/vases-c215335.html",
 ]
@@ -181,7 +181,16 @@ class WayfairApifyAdapter(BaseAdapter):
         # Extra attributes the actor returns in a flat dict
         attributes = item.get("attributes") or {}
 
-        return RawProduct(
+        # Best seller: check explicit actor fields and attributes dict
+        is_best_seller = bool(
+            item.get("isBestSeller")
+            or item.get("is_best_seller")
+            or item.get("bestSeller")
+            or attributes.get("isBestSeller")
+            or attributes.get("is_best_seller")
+        )
+
+        product = RawProduct(
             url=url,
             name=name,
             retailer_slug=self.RETAILER_SLUG,
@@ -205,6 +214,8 @@ class WayfairApifyAdapter(BaseAdapter):
                 "regular_price": item.get("regular_price"),
             },
         )
+        product.is_best_seller = is_best_seller
+        return product
 
     @staticmethod
     def _parse_price(raw) -> Optional[float]:

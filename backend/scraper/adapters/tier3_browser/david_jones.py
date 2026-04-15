@@ -21,6 +21,14 @@ CATEGORY_URLS = [
     "https://www.davidjones.com/home/new-in",
 ]
 
+CATEGORY_LABELS: dict[str, str] = {
+    "https://www.davidjones.com/home/kitchen/storage-organisation": "Kitchen Storage",
+    "https://www.davidjones.com/home/kitchen": "Kitchen",
+    "https://www.davidjones.com/home/dining": "Dining",
+    "https://www.davidjones.com/home/living": "Living",
+    "https://www.davidjones.com/home/new-in": "New In",
+}
+
 
 class DavidJonesAdapter(BaseAdapter):
     RETAILER_SLUG = "david-jones"
@@ -30,6 +38,8 @@ class DavidJonesAdapter(BaseAdapter):
         self._playwright = None
         self._browser = None
         self._context = None
+        # Maps product_url → category label
+        self._cat_cache: dict[str, str] = {}
 
     async def before_scrape(self):
         self._playwright = await async_playwright().start()
@@ -103,11 +113,14 @@ class DavidJonesAdapter(BaseAdapter):
                 if not links:
                     break
 
+                cat_label = CATEGORY_LABELS.get(category_url, category_url.rstrip("/").split("/")[-1].replace("-", " ").title())
                 added = 0
                 for href in links:
                     if href not in urls:
                         urls.append(href)
                         added += 1
+                    if href not in self._cat_cache:
+                        self._cat_cache[href] = cat_label
 
                 if added == 0:
                     break
@@ -167,6 +180,7 @@ class DavidJonesAdapter(BaseAdapter):
                             description=d.get("description"),
                             price=price,
                             currency="AUD",
+                            category=self._cat_cache.get(product_url),
                             image_urls=imgs,
                             raw_attributes={},
                         )
@@ -187,10 +201,24 @@ class DavidJonesAdapter(BaseAdapter):
                 except ValueError:
                     pass
 
+            # Use og:image + productimages URLs — more reliable than class-based selectors
+            # that can pick up promotional banners (e.g. DJ Premiere credit card badge).
             imgs = await page.evaluate("""
-                () => Array.from(document.querySelectorAll('[class*="product"] img, [class*="gallery"] img'))
-                     .map(img => img.src || img.dataset.src)
-                     .filter(Boolean)
+                () => {
+                    // 1. og:image meta tag
+                    const og = document.querySelector('meta[property="og:image"]');
+                    const ogUrl = og ? og.content : null;
+                    // 2. All img tags pointing to /productimages/ CDN
+                    const productImgs = Array.from(document.querySelectorAll('img[src*="/productimages/"]'))
+                        .map(img => img.src)
+                        .filter(Boolean);
+                    const seen = new Set();
+                    const results = [];
+                    for (const url of [ogUrl, ...productImgs]) {
+                        if (url && !seen.has(url)) { seen.add(url); results.push(url); }
+                    }
+                    return results.slice(0, 5);
+                }
             """)
 
             return RawProduct(
@@ -199,6 +227,7 @@ class DavidJonesAdapter(BaseAdapter):
                 retailer_slug=self.RETAILER_SLUG,
                 price=price,
                 currency="AUD",
+                category=self._cat_cache.get(product_url),
                 image_urls=imgs,
                 raw_attributes={},
             )

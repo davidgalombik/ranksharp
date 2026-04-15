@@ -36,9 +36,14 @@ class Settings(BaseSettings):
     # Copy token from apify.com/account/integrations
     apify_api_token: str = ""
 
+    # Firecrawl (for JS-heavy sites: TJMaxx, Container Store, Williams-Sonoma)
+    # Get API key from firecrawl.dev/app
+    firecrawl_api_key: str = ""
+
     # Storage
     raw_data_path: str = "/app/raw_data"
     aldi_upload_dir: str = "/app/raw_data/aldi_uploads"
+    instore_upload_dir: str = "/app/raw_data/instore_uploads"
     aws_s3_bucket: str = ""
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

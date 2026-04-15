@@ -18,8 +18,29 @@ CATEGORY_URLS = [
     "https://www.officeworks.com.au/shop/officeworks/c/home-organisation",
     "https://www.officeworks.com.au/shop/officeworks/c/desk-organisation",
     "https://www.officeworks.com.au/shop/officeworks/c/storage-filing",
-    "https://www.officeworks.com.au/shop/officeworks/c/home-office-furniture",
+    "https://www.officeworks.com.au/shop/officeworks/c/home-office",
 ]
+
+CATEGORY_LABELS: dict[str, str] = {
+    "home-organisation": "Home Organisation",
+    "desk-organisation": "Desk Organisation",
+    "storage-filing": "Storage & Filing",
+    "home-office": "Home Office",
+}
+
+# URL slug words that indicate non-home products — skip these to avoid timeouts
+_EXCLUDE_SLUG_WORDS = frozenset([
+    "laptop", "notebook", "macbook", "ipad", "tablet", "monitor", "keyboard",
+    "mouse", "headphone", "speaker", "printer", "scanner", "webcam", "camera",
+    "phone", "mobile", "airpod", "earphone", "charger", "cable", "adapter",
+    "whiteboard", "marker", "pen", "pencil", "stapler", "shredder", "laminator",
+    "chair", "desk", "table", "drawer",
+])
+
+def _is_home_product_url(url: str) -> bool:
+    slug = url.rstrip("/").split("/p/")[-1].lower()
+    words = set(re.split(r'[-_]', slug))
+    return not bool(words & _EXCLUDE_SLUG_WORDS)
 
 
 class OfficeworksAdapter(BaseAdapter):
@@ -30,6 +51,7 @@ class OfficeworksAdapter(BaseAdapter):
         self._playwright = None
         self._browser = None
         self._context = None
+        self._cat_cache: dict[str, str] = {}
 
     async def before_scrape(self):
         self._playwright = await async_playwright().start()
@@ -97,11 +119,18 @@ class OfficeworksAdapter(BaseAdapter):
                 if not links:
                     break
 
+                # Derive label from category URL slug
+                cat_label = next(
+                    (label for slug, label in CATEGORY_LABELS.items() if slug in category_url),
+                    None
+                )
                 added = 0
                 for href in links:
-                    if href not in urls:
+                    if href not in urls and _is_home_product_url(href):
                         urls.append(href)
                         added += 1
+                        if cat_label:
+                            self._cat_cache.setdefault(href, cat_label)
 
                 if added == 0:
                     break
@@ -155,6 +184,7 @@ class OfficeworksAdapter(BaseAdapter):
                             description=d.get("description"),
                             price=price,
                             currency="AUD",
+                            category=self._cat_cache.get(product_url),
                             image_urls=imgs,
                             raw_attributes={},
                         )
@@ -186,6 +216,7 @@ class OfficeworksAdapter(BaseAdapter):
                 retailer_slug=self.RETAILER_SLUG,
                 price=price,
                 currency="AUD",
+                category=self._cat_cache.get(product_url),
                 image_urls=imgs,
                 raw_attributes={},
             )

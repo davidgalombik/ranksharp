@@ -1,6 +1,6 @@
 """Celery tasks for AI product analysis and trend generation."""
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select, create_engine
 from tasks.celery_app import app
 from config import settings
@@ -16,9 +16,11 @@ def _get_session():
     return sessionmaker(bind=engine)()
 
 
-@app.task(bind=True, max_retries=3, queue="analysis", rate_limit="10/m")
+@app.task(bind=True, max_retries=3, queue="analysis", rate_limit="10/m",
+          soft_time_limit=120, time_limit=150)
 def analyse_product(self, product_id: int):
     """Run vision + NLP + embedding analysis on a single product."""
+    from celery.exceptions import SoftTimeLimitExceeded
     session = _get_session()
     try:
         product = session.get(Product, product_id)
@@ -48,6 +50,12 @@ def analyse_product(self, product_id: int):
             product.analysed_at = datetime.utcnow()
             session.commit()
             return {"status": "success", "product_id": product_id}
+
+        except SoftTimeLimitExceeded:
+            log.warning("analysis_timeout", product_id=product_id)
+            product.analysis_status = ScrapeStatus.FAILED
+            session.commit()
+            return {"status": "timeout", "product_id": product_id}
 
         except Exception as exc:
             log.error("analysis_failed", product_id=product_id, error=str(exc))
@@ -98,7 +106,7 @@ async def _analyse(product: Product) -> dict:
         "style_tags": style_tags,
         "materials": n.get("materials", []),
         "patterns": n.get("patterns", []),
-        "fragrance": n.get("fragrance"),
+        "fragrance": (n.get("fragrance") or "")[:500] or None,
         "season": v.get("season") or n.get("season"),
         "occasion": n.get("occasion"),
         "room": v.get("room") or n.get("room"),
@@ -143,18 +151,94 @@ def analyse_pending_products(retailer_id: int | None = None):
         session.close()
 
 
-@app.task(queue="analysis")
-def run_trend_analysis():
-    """Run the weekly trend clustering and report generation."""
-    asyncio.run(_run_trend_analysis())
+@app.task(bind=True, queue="reports")
+def run_trend_analysis_task(self):
+    """Run the trend clustering and report generation (manual trigger only)."""
+    asyncio.run(_run_trend_analysis(self))
 
 
-async def _run_trend_analysis():
-    from database.db import AsyncSessionLocal
+@app.task(bind=True, queue="reports")
+def regenerate_trend_analysis_task(self):
+    """Re-run trend analysis adding a new generation (Try Again)."""
+    asyncio.run(_run_trend_analysis(self))
+
+
+async def _run_trend_analysis(task):
+    from database.db import AsyncSessionLocal, async_engine
     from analysis.trend_engine import TrendEngine
 
+    await async_engine.dispose()
+
     async with AsyncSessionLocal() as session:
-        engine_instance = TrendEngine(session)
-        report = await engine_instance.run_weekly_analysis()
+        engine_instance = TrendEngine(session, task=task)
+        report = await engine_instance.regenerate_analysis()
         if report:
-            log.info("trend_report_generated", report_id=report.id, trends=len(report.trend_ids))
+            log.info(
+                "trend_analysis_complete",
+                report_id=report.id,
+                generation_count=report.generation_count,
+                trends=len(report.trend_ids),
+            )
+
+
+@app.task(bind=True, queue="reports")
+def run_fragrance_trend_analysis_task(self):
+    """Run the fragrance trend clustering and report generation (manual trigger only)."""
+    asyncio.run(_run_fragrance_trend_analysis(self))
+
+
+@app.task(bind=True, queue="reports")
+def regenerate_fragrance_trend_analysis_task(self):
+    """Re-run fragrance trend analysis adding a new generation (Try Again)."""
+    asyncio.run(_run_fragrance_trend_analysis(self))
+
+
+async def _run_fragrance_trend_analysis(task):
+    from database.db import AsyncSessionLocal, async_engine
+    from analysis.fragrance_trend_engine import FragranceTrendEngine
+
+    await async_engine.dispose()
+
+    async with AsyncSessionLocal() as session:
+        engine_instance = FragranceTrendEngine(session, task=task)
+        report = await engine_instance.regenerate_analysis()
+        if report:
+            log.info(
+                "fragrance_analysis_complete",
+                report_id=report.id,
+                generation_count=report.generation_count,
+                trends=len(report.trend_ids),
+            )
+
+
+@app.task(queue="analysis")
+def reset_stuck_analyses():
+    """
+    Reset products stuck in RUNNING back to PENDING so they get retried.
+    A product is considered stuck if it has been RUNNING for more than 10 minutes.
+    Runs periodically via Celery beat.
+    """
+    session = _get_session()
+    try:
+        cutoff = datetime.utcnow() - timedelta(minutes=10)
+        stuck = session.execute(
+            select(Product).where(
+                Product.analysis_status == ScrapeStatus.RUNNING,
+                Product.analysed_at == None,  # noqa: E711
+            )
+        ).scalars().all()
+
+        reset_ids = []
+        for product in stuck:
+            product.analysis_status = ScrapeStatus.PENDING
+            reset_ids.append(product.id)
+
+        if reset_ids:
+            session.commit()
+            log.warning("stuck_analyses_reset", count=len(reset_ids), product_ids=reset_ids[:10])
+            for pid in reset_ids:
+                analyse_product.delay(pid)
+
+        return {"reset": len(reset_ids)}
+    finally:
+        session.close()

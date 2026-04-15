@@ -225,7 +225,7 @@ export default async function TrendDetailPage({ params }: { params: { id: string
       <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
         {[
           { label: "Products",  value: trend.product_count.toLocaleString() },
-          { label: "Retailers", value: trend.retailer_count },
+          { label: "Retailers", value: trend.retailer_names.length },
           { label: "Avg price", value: trend.avg_price ? `$${trend.avg_price.toFixed(0)}` : "–" },
           { label: "Markets",   value: trend.markets?.length ? trend.markets.join(", ") : "–" },
         ].map(({ label, value }) => (

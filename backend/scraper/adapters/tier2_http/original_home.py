@@ -12,6 +12,34 @@ from typing import Optional
 from scraper.base_adapter import BaseAdapter, RawProduct
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+# Generic page titles returned when a product is unavailable/redirects to a collection
+_GENERIC_NAMES = frozenset([
+    "explore our latest collection",
+    "shop our collection",
+    "our collection",
+    "collection",
+    "page not found",
+    "404",
+])
+
+
+def _extract_img_urls(raw):
+    if not raw: return []
+    if isinstance(raw, str): return [raw]
+    if isinstance(raw, dict):
+        u = raw.get("url") or raw.get("contentUrl") or raw.get("src")
+        return [u] if u else []
+    if isinstance(raw, list):
+        out = []
+        for x in raw:
+            if isinstance(x, str): out.append(x)
+            elif isinstance(x, dict):
+                u = x.get("url") or x.get("contentUrl") or x.get("src")
+                if u: out.append(u)
+        return out
+    return []
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -20,20 +48,22 @@ HEADERS = {
     "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
 }
 
-# WooCommerce category slugs
-COLLECTION_SLUGS = [
-    "candle-holders",
-    "glassware",
-    "kitchenware",
-    "baskets-trays",
-    "scented-candles",
-    "natural-candles",
-    "pillar-candles",
-    "dinner-candles",
-    "table-linen",
-    "throws-cushions",
-    "new-products",
-]
+# WooCommerce category slugs → display labels
+COLLECTION_LABELS: dict[str, str] = {
+    "candle-holders": "Candle Holders",
+    "glassware": "Glassware",
+    "kitchenware": "Kitchenware",
+    "baskets-trays": "Baskets & Trays",
+    "scented-candles": "Scented Candles",
+    "natural-candles": "Natural Candles",
+    "pillar-candles": "Pillar Candles",
+    "dinner-candles": "Dinner Candles",
+    "table-linen": "Table Linen",
+    "throws-cushions": "Throws & Cushions",
+    "new-products": "New Products",
+}
+
+COLLECTION_SLUGS = list(COLLECTION_LABELS.keys())
 
 
 class OriginalHomeAdapter(BaseAdapter):
@@ -42,6 +72,7 @@ class OriginalHomeAdapter(BaseAdapter):
     def __init__(self, rc):
         super().__init__(rc)
         self._client = None
+        self._cat_cache: dict[str, str] = {}
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
@@ -85,6 +116,9 @@ class OriginalHomeAdapter(BaseAdapter):
                 if "/product/" in full and full not in urls and "originalhome.nl" in full:
                     urls.append(full)
                     added += 1
+                    # Extract slug from category_url e.g. /collection/candle-holders/
+                    slug = category_url.rstrip("/").split("/")[-1]
+                    self._cat_cache.setdefault(full, COLLECTION_LABELS.get(slug, slug))
             if added == 0:
                 break
             # Check for next page
@@ -106,6 +140,9 @@ class OriginalHomeAdapter(BaseAdapter):
                 if isinstance(d, list):
                     d = next((x for x in d if x.get("@type") == "Product"), None)
                 if d and d.get("@type") == "Product":
+                    product_name = d.get("name", "")
+                    if product_name.strip().lower() in _GENERIC_NAMES:
+                        return None
                     offers = d.get("offers", {})
                     if isinstance(offers, list):
                         offers = offers[0] if offers else {}
@@ -115,17 +152,16 @@ class OriginalHomeAdapter(BaseAdapter):
                             price = float(str(raw).replace(",", ".").replace(" ", ""))
                         except (ValueError, TypeError):
                             pass
-                    imgs = d.get("image", [])
-                    if isinstance(imgs, str):
-                        imgs = [imgs]
+                    imgs = _extract_img_urls(d.get("image"))
                     return RawProduct(
                         url=url,
-                        name=d.get("name", ""),
+                        name=product_name,
                         retailer_slug=self.RETAILER_SLUG,
                         external_id=d.get("sku"),
                         description=d.get("description"),
                         price=price,
                         currency="EUR",
+                        category=self._cat_cache.get(url),
                         image_urls=imgs,
                         raw_attributes={},
                     )
@@ -135,6 +171,8 @@ class OriginalHomeAdapter(BaseAdapter):
         # Fallback: WooCommerce HTML
         name_el = soup.select_one("h1.product_title, h1.entry-title, h1")
         if not name_el:
+            return None
+        if name_el.get_text(strip=True).lower() in _GENERIC_NAMES:
             return None
         price_el = soup.select_one(".price .woocommerce-Price-amount")
         price = None
@@ -148,17 +186,24 @@ class OriginalHomeAdapter(BaseAdapter):
                 )
             except (ValueError, TypeError):
                 pass
-        imgs = [
-            img.get("src", "")
-            for img in soup.select(".woocommerce-product-gallery img")
-            if img.get("src")
-        ]
+        imgs = []
+        for img in soup.select(
+            ".woocommerce-product-gallery img, "
+            ".wp-post-image, "
+            "img.attachment-woocommerce_single, "
+            ".product-gallery img"
+        ):
+            src = (img.get("data-large_image") or img.get("data-src")
+                   or img.get("src") or "")
+            if src and "placeholder" not in src.lower() and src.startswith("http"):
+                imgs.append(src)
         return RawProduct(
             url=url,
             name=name_el.get_text(strip=True),
             retailer_slug=self.RETAILER_SLUG,
             price=price,
             currency="EUR",
+            category=self._cat_cache.get(url),
             image_urls=imgs,
             raw_attributes={},
         )

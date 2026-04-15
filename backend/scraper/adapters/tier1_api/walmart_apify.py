@@ -159,36 +159,43 @@ class WalmartApifyAdapter(BaseAdapter):
         return all_items
 
     def _map_item(self, item: dict) -> Optional[RawProduct]:
-        name = item.get("name") or item.get("title")
-        url = item.get("url")
-        if not name or not url:
+        name = item.get("name")
+        canonical_url = item.get("canonicalUrl")
+        if not name or not canonical_url:
             return None
 
-        # Price
+        # Build full URL from canonical path
+        url = (
+            canonical_url
+            if canonical_url.startswith("http")
+            else f"https://www.walmart.com{canonical_url}"
+        )
+
+        # Price — nested under priceInfo.currentPrice.price
         price = None
-        raw_price = item.get("price") or item.get("currentPrice")
+        price_info = item.get("priceInfo") or {}
+        current_price = price_info.get("currentPrice") or {}
+        raw_price = current_price.get("price")
         if isinstance(raw_price, (int, float)):
             price = float(raw_price)
-        elif isinstance(raw_price, str):
-            try:
-                price = float(raw_price.replace("$", "").replace(",", "").strip())
-            except ValueError:
-                pass
 
-        # Images
-        images = item.get("images") or []
-        if isinstance(images, str):
-            images = [images]
+        # Images — nested under imageInfo.allImages[].url
+        image_info = item.get("imageInfo") or {}
+        all_images = image_info.get("allImages") or []
+        image_urls = [img["url"] for img in all_images if img.get("url")]
+        if not image_urls and image_info.get("thumbnailUrl"):
+            image_urls = [image_info["thumbnailUrl"]]
 
         # Description
-        description = item.get("description") or item.get("shortDescription")
+        description = item.get("shortDescription")
 
-        # Category from breadcrumbs
-        categories = item.get("categories") or []
-        category = categories[-1] if categories else None
+        # Category — nested path list, take last name
+        category_data = item.get("category") or {}
+        path = category_data.get("path") or []
+        category = path[-1]["name"] if path else None
 
         # External ID
-        item_id = item.get("itemId") or item.get("id")
+        item_id = item.get("usItemId") or item.get("id")
         external_id = str(item_id) if item_id else None
 
         return RawProduct(
@@ -201,11 +208,11 @@ class WalmartApifyAdapter(BaseAdapter):
             currency="USD",
             category=category,
             brand=item.get("brand"),
-            image_urls=images,
+            image_urls=image_urls,
             raw_attributes={
                 "item_id": external_id,
-                "rating": item.get("rating") or item.get("ratings"),
-                "review_count": item.get("reviewCount") or item.get("numberOfReviews"),
+                "rating": item.get("averageRating"),
+                "review_count": item.get("numberOfReviews"),
                 "in_stock": item.get("availabilityStatus") == "IN_STOCK",
             },
         )

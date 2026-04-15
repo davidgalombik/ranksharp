@@ -42,7 +42,12 @@ CATEGORY_PATHS_BY_SLUG = {
         "https://www.williams-sonoma.com/shop/entertaining/candles/",
     ],
     "pottery-barn-au": [
-        "https://www.potterybarn.com.au/shop/best-sellers/",  # best-seller flag auto-applied
+        # Category-scoped best sellers — avoids the sitewide /shop/best-sellers/ page
+        # which includes furniture, bedding, rugs, and other out-of-scope categories
+        "https://www.potterybarn.com.au/shop/best-sellers/storage/",             # best-seller flag auto-applied
+        "https://www.potterybarn.com.au/shop/best-sellers/decorating/",          # best-seller flag auto-applied
+        "https://www.potterybarn.com.au/shop/best-sellers/vases/",               # best-seller flag auto-applied
+        "https://www.potterybarn.com.au/shop/best-sellers/candles-and-holders/", # best-seller flag auto-applied
         "https://www.potterybarn.com.au/shop/storage/",
         "https://www.potterybarn.com.au/shop/decorating/",
     ],

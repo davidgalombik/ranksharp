@@ -2,23 +2,45 @@
 import { useEffect, useState } from "react";
 import { api, type Retailer } from "@/lib/api";
 import clsx from "clsx";
+import ScrapeProgressPanel from "@/components/ScrapeProgressPanel";
 
-const TIER_STYLES = {
-  api: "bg-emerald-50 text-emerald-700 border-emerald-200",
-  http: "bg-amber-50 text-amber-700 border-amber-200",
-  browser: "bg-rose-50 text-rose-700 border-rose-200",
-} as Record<string, string>;
+function techLabel(adapterClass: string, tier: string): string {
+  const a = (adapterClass || "").toLowerCase();
+  if (a.includes("apify")) return "Apify";
+  if (a.includes("firecrawl")) return "Firecrawl";
+  if (a.includes("smartproxy")) return "SmartProxy";
+  if (tier === "api") return "API";
+  if (tier === "http") return "HTTP";
+  return "Browser";
+}
 
-const TIER_LABELS = { api: "API", http: "HTTP", browser: "Browser" };
+const TECH_COLOUR: Record<string, string> = {
+  Apify:      "text-violet-700 bg-violet-50 border-violet-200",
+  Firecrawl:  "text-orange-700 bg-orange-50 border-orange-200",
+  SmartProxy: "text-sky-700 bg-sky-50 border-sky-200",
+  API:        "text-emerald-700 bg-emerald-50 border-emerald-200",
+  HTTP:       "text-amber-700 bg-amber-50 border-amber-200",
+  Browser:    "text-rose-700 bg-rose-50 border-rose-200",
+};
 
 const STATUS_DOT = {
   success: "bg-emerald-500",
   running: "bg-amber-500 animate-pulse",
-  failed: "bg-rose-500",
+  failed:  "bg-rose-500",
   pending: "bg-stone-300",
 } as Record<string, string>;
 
+const COUNTRY_ORDER = ["US", "AU", "GB"];
+const COUNTRY_LABEL: Record<string, string> = {
+  US: "🇺🇸 United States",
+  AU: "🇦🇺 Australia",
+  GB: "🇬🇧 United Kingdom",
+};
+
+type Tab = "retailers" | "progress";
+
 export default function RetailersPage() {
+  const [tab, setTab] = useState<Tab>("retailers");
   const [retailers, setRetailers] = useState<Retailer[]>([]);
   const [loading, setLoading] = useState(true);
   const [scraping, setScraping] = useState<Record<number, boolean>>({});
@@ -68,24 +90,42 @@ export default function RetailersPage() {
     api.retailers.list().then(setRetailers);
   }
 
-  const grouped = retailers.reduce(
-    (acc, r) => {
-      const key = r.country;
-      if (!acc[key]) acc[key] = [];
-      acc[key].push(r);
-      return acc;
-    },
-    {} as Record<string, Retailer[]>
-  );
+  const grouped = retailers.reduce((acc, r) => {
+    if (!acc[r.country]) acc[r.country] = [];
+    acc[r.country].push(r);
+    return acc;
+  }, {} as Record<string, Retailer[]>);
+
+  const sortedCountries = [
+    ...COUNTRY_ORDER.filter((c) => grouped[c]),
+    ...Object.keys(grouped).filter((c) => !COUNTRY_ORDER.includes(c)).sort(),
+  ];
 
   if (loading) return <div className="text-center py-20 text-stone-400">Loading...</div>;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-stone-900">
-          Retailers ({retailers.length})
-        </h1>
+      {/* Header + tabs */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-bold text-stone-900">Retailers</h1>
+          <div className="flex rounded-lg border border-stone-200 overflow-hidden text-sm font-medium">
+            {(["retailers", "progress"] as Tab[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={clsx(
+                  "px-4 py-1.5 transition-colors",
+                  tab === t
+                    ? "bg-stone-900 text-white"
+                    : "bg-white text-stone-600 hover:bg-stone-50"
+                )}
+              >
+                {t === "retailers" ? "Overview" : "Scrape Progress"}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-stone-600 cursor-pointer select-none">
             <input
@@ -118,80 +158,111 @@ export default function RetailersPage() {
         </div>
       </div>
 
-      {/* Legend */}
-      <div className="flex gap-4 text-xs">
-        {Object.entries(TIER_LABELS).map(([k, v]) => (
-          <span key={k} className={clsx("px-2 py-1 rounded border text-xs font-medium", TIER_STYLES[k])}>
-            {v}
-          </span>
-        ))}
-      </div>
+      {/* Scrape Progress tab */}
+      {tab === "progress" && <ScrapeProgressPanel />}
 
-      {Object.entries(grouped)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([country, countryRetailers]) => (
-          <section key={country}>
-            <h2 className="text-sm font-semibold text-stone-500 uppercase tracking-wider mb-3">
-              {country === "US" ? "🇺🇸 United States" : country === "AU" ? "🇦🇺 Australia" : country === "GB" ? "🇬🇧 United Kingdom" : `🌍 ${country}`}
-              <span className="ml-2 font-normal">({countryRetailers.length})</span>
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {countryRetailers.map((r) => (
-                <div
-                  key={r.id}
-                  className="bg-white rounded-xl border border-stone-200 p-4 space-y-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <h3 className="font-medium text-stone-900 truncate">{r.name}</h3>
-                      <p className="text-xs text-stone-400 truncate">{r.base_url}</p>
-                    </div>
-                    <span className={clsx("px-1.5 py-0.5 rounded border text-xs font-medium flex-shrink-0", TIER_STYLES[r.tier as keyof typeof TIER_STYLES])}>
-                      {TIER_LABELS[r.tier as keyof typeof TIER_LABELS]}
-                    </span>
-                  </div>
+      {/* Tables per country — Retailers tab only */}
+      {tab === "retailers" && sortedCountries.map((country) => (
+        <section key={country}>
+          <h2 className="text-sm font-semibold text-stone-500 uppercase tracking-wider mb-3">
+            {COUNTRY_LABEL[country] ?? `🌍 ${country}`}
+            <span className="ml-2 font-normal">({grouped[country].length})</span>
+          </h2>
 
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-stone-600">
-                      {r.product_count.toLocaleString()} products
-                    </span>
-                    {r.last_scrape_status && (
-                      <span className="flex items-center gap-1.5 text-xs text-stone-500">
-                        <span className={clsx("w-2 h-2 rounded-full", STATUS_DOT[r.last_scrape_status] || STATUS_DOT.pending)} />
-                        {r.last_scrape_status}
-                      </span>
-                    )}
-                  </div>
+          <div className="rounded-xl border border-stone-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-stone-50 border-b border-stone-200 text-xs font-semibold text-stone-500 uppercase tracking-wider">
+                  <th className="text-left px-4 py-3">Retailer</th>
+                  <th className="text-left px-4 py-3">Tier</th>
+                  <th className="text-right px-4 py-3">Products</th>
+                  <th className="text-right px-4 py-3">Unanalysed</th>
+                  <th className="text-left px-4 py-3">Last Scraped</th>
+                  <th className="text-left px-4 py-3">Status</th>
+                  <th className="text-right px-4 py-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100 bg-white">
+                {grouped[country].map((r) => (
+                  <tr key={r.id} className="hover:bg-stone-50 transition-colors">
+                    {/* Name */}
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-stone-900">{r.name}</div>
+                      <div className="text-xs text-stone-400 truncate max-w-[180px]">{r.base_url}</div>
+                    </td>
 
-                  {r.last_scrape && (
-                    <p className="text-xs text-stone-400">
-                      Last scraped: {new Date(r.last_scrape).toLocaleDateString()}
-                    </p>
-                  )}
+                    {/* Tier */}
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const label = techLabel(r.adapter_class, r.tier);
+                        return (
+                          <span className={clsx("px-1.5 py-0.5 rounded border text-xs font-medium", TECH_COLOUR[label])}>
+                            {label}
+                          </span>
+                        );
+                      })()}
+                    </td>
 
-                  <button
-                    onClick={() => triggerScrape(r)}
-                    disabled={scraping[r.id] || !r.is_active}
-                    className="w-full mt-1 px-3 py-1.5 text-xs font-medium border border-stone-200 rounded-lg hover:bg-stone-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {scraping[r.id] ? "Queuing..." : "Scrape now"}
-                  </button>
-                  {r.pending_analysis_count > 0 && (
-                    <button
-                      onClick={() => triggerAnalyse(r)}
-                      disabled={analysing[r.id]}
-                      className="w-full px-3 py-1.5 text-xs font-medium border border-violet-200 text-violet-700 bg-violet-50 rounded-lg hover:bg-violet-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {analysing[r.id]
-                        ? "Queuing..."
-                        : `Analyse ${r.pending_analysis_count} unanalysed`}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </section>
-        ))}
+                    {/* Products */}
+                    <td className="px-4 py-3 text-right text-stone-700 font-medium tabular-nums">
+                      {r.product_count.toLocaleString()}
+                    </td>
+
+                    {/* Unanalysed */}
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {r.pending_analysis_count > 0 ? (
+                        <span className="text-violet-600 font-medium">{r.pending_analysis_count.toLocaleString()}</span>
+                      ) : (
+                        <span className="text-stone-300">—</span>
+                      )}
+                    </td>
+
+                    {/* Last scraped */}
+                    <td className="px-4 py-3 text-stone-500 text-xs">
+                      {r.last_scrape ? new Date(r.last_scrape).toLocaleDateString() : <span className="text-stone-300">Never</span>}
+                    </td>
+
+                    {/* Status */}
+                    <td className="px-4 py-3">
+                      {r.last_scrape_status ? (
+                        <span className="flex items-center gap-1.5 text-xs text-stone-500">
+                          <span className={clsx("w-2 h-2 rounded-full flex-shrink-0", STATUS_DOT[r.last_scrape_status] || STATUS_DOT.pending)} />
+                          {r.last_scrape_status}
+                        </span>
+                      ) : (
+                        <span className="text-stone-300 text-xs">—</span>
+                      )}
+                    </td>
+
+                    {/* Actions */}
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        {r.pending_analysis_count > 0 && (
+                          <button
+                            onClick={() => triggerAnalyse(r)}
+                            disabled={analysing[r.id]}
+                            className="px-2.5 py-1 text-xs font-medium border border-violet-200 text-violet-700 bg-violet-50 rounded-lg hover:bg-violet-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {analysing[r.id] ? "Queuing..." : "Analyse"}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => triggerScrape(r)}
+                          disabled={scraping[r.id] || !r.is_active}
+                          className="px-2.5 py-1 text-xs font-medium border border-stone-200 rounded-lg hover:bg-stone-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {scraping[r.id] ? "Queuing..." : "Scrape"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
+

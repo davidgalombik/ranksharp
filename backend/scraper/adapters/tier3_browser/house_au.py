@@ -14,6 +14,23 @@ import structlog
 
 log = structlog.get_logger()
 
+
+def _extract_img_urls(raw):
+    if not raw: return []
+    if isinstance(raw, str): return [raw]
+    if isinstance(raw, dict):
+        u = raw.get("url") or raw.get("contentUrl") or raw.get("src")
+        return [u] if u else []
+    if isinstance(raw, list):
+        out = []
+        for x in raw:
+            if isinstance(x, str): out.append(x)
+            elif isinstance(x, dict):
+                u = x.get("url") or x.get("contentUrl") or x.get("src")
+                if u: out.append(u)
+        return out
+    return []
+
 CATEGORY_URLS = [
     "https://www.house.com.au/collections/best-sellers",  # best-seller flag auto-applied
     "https://www.house.com.au/collections/kitchen-storage",
@@ -136,9 +153,7 @@ class HouseAUAdapter(BaseAdapter):
                                 price = float(str(raw).replace(",", ""))
                             except (ValueError, TypeError):
                                 pass
-                        imgs = d.get("image", [])
-                        if isinstance(imgs, str):
-                            imgs = [imgs]
+                        imgs = _extract_img_urls(d.get("image"))
                         return RawProduct(
                             url=product_url,
                             name=d.get("name", ""),
@@ -169,11 +184,18 @@ class HouseAUAdapter(BaseAdapter):
                     cents = variants[0].get("price")
                     if cents:
                         price = cents / 100.0
-                imgs = [
-                    img.get("src", "")
-                    for img in shopify_data.get("media", [])
-                    if img.get("src")
-                ]
+                imgs = []
+                # Try 'images' first (standard Shopify), then 'media'
+                for key in ("images", "media"):
+                    for item in shopify_data.get(key, []):
+                        src = item.get("src") or item.get("originalSrc") or item.get("url") or ""
+                        if src and "placeholder" not in src.lower():
+                            imgs.append(src)
+                    if imgs:
+                        break
+                # Also try featured_image
+                if not imgs and shopify_data.get("featured_image"):
+                    imgs = [shopify_data["featured_image"]]
                 return RawProduct(
                     url=product_url,
                     name=shopify_data.get("title", ""),

@@ -10,6 +10,7 @@ Runs weekly after all products have been analysed. Steps:
 6. Persist Trend + TrendExample records
 """
 import json
+import random
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -19,7 +20,8 @@ from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import normalize
 import structlog
 from anthropic import AsyncAnthropic
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -29,6 +31,14 @@ from database.models import (
 )
 
 log = structlog.get_logger()
+
+# Keywords that identify candle/fragrance products — these belong exclusively
+# to the Fragrance tab and must be excluded from the general Trends analysis.
+FRAGRANCE_EXCLUSION_KEYWORDS = [
+    "candle", "diffuser", "fragrance", "scent", "wax melt", "reed",
+    "incense", "aromatherapy", "room spray", "wax", "wick", "votive",
+    "taper", "pillar candle", "soy", "beeswax", "home fragrance",
+]
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -46,36 +56,56 @@ Identify 5–10 distinct, meaningful trends from the data provided. Each trend m
 cluster — that a retail buyer or product designer would find insightful and actionable.
 
 WHAT MAKES A STRONG TREND
-- Supported by products from at least 2 different retailers (3+ = strong, 5+ = very strong)
+- Supported by products from at least 3 different retailers (5+ = strong, 7+ = very strong)
 - Has a clear, nameable characteristic: colour palette, material, surface pattern, aesthetic style, \
   form/silhouette, functional concept, or seasonal theme
 - Distinguishable from the other trends you identify in the same analysis
 - Backed by real product evidence — do not invent trends not visible in the data
 
 TREND CATEGORIES
-- colour    → A specific palette appearing across product categories (e.g. "warm terracotta across ceramics and textiles")
-- material  → A material gaining traction (e.g. "ribbed stoneware", "woven rattan in storage")
-- pattern   → Surface/visual pattern (e.g. "organic hand-painted marks", "tonal stripe")
-- style     → Aesthetic movement (e.g. "quiet luxury minimalism", "coastal grandmother", "japandi")
-- shape     → Silhouette or form (e.g. "curved organic forms replacing angular", "oversized statement vessels")
-- seasonal  → Upcoming season driver (e.g. "autumnal harvest warmth")
-- functional→ Usage/behavioural shift (e.g. "visible kitchen organisation", "layered scent rituals")
+Use the most specific category that fits. Multiple sub-signals within a category can be combined into one trend if they tell a coherent story.
+
+- colour       → Dominant hues and tonal shifts (e.g. warm neutrals vs. cool greys, earthy terracottas, deep greens); \
+mono vs. two-tone vs. pattern; colour blocking or contrast detailing
+- pattern      → Pattern types across surfaces — geometric, organic, textural, hand-painted marks, tonal stripe, none
+- material     → Primary material gaining traction (solid wood, MDF, metal, rattan, concrete, resin, recycled); \
+material combinations (e.g. wood + metal, cane + linen); sustainability credentials (FSC, recycled content, biodegradable)
+- finish       → Surface finish direction — matte, gloss, brushed, ribbed, woven, lacquered, raw; \
+visual texture vs. physical texture; grain direction and visibility in natural materials; \
+fluted, hammered, embossed, woven, smooth
+- shape        → Silhouette evolution (curved, angular, minimal, sculptural); proportions — squat vs. tall, \
+wide vs. narrow, oversized vs. compact; modular vs. fixed/monolithic; stackability and nestability
+- hardware     → Handle and knob styles (fluted, tab pull, finger pull, integrated, no hardware); \
+hinge and joint visibility (exposed vs. concealed); decorative vs. functional detailing; \
+edge profiles — rounded, chamfered, sharp, lipped
+- functional   → Internal organisation (dividers, inserts, removable trays, adjustable shelving); \
+lid types (hinged, removable, sliding, open top); ventilation or visibility (open, slatted, perforated, solid, glazed); \
+broader usage/behavioural shifts (visible kitchen organisation, layered scent rituals)
+- style        → Aesthetic movement or design language (e.g. quiet luxury minimalism, coastal grandmother, japandi, \
+maximalist revival, organic modernism)
+- seasonal     → Upcoming season driver (e.g. autumnal harvest warmth, summer coastal refresh)
 
 CROSS-MARKET INTELLIGENCE
 Where a trend appears in both US and AU/GB markets, that signals strong global momentum. \
 Where it appears in only one market, note it — it may be leading or lagging. \
 Price tier helps identify whether a trend is mass-market or premium-first.
 
-EVIDENCE THRESHOLD
-Only include a trend if supported by ≥3 products from ≥2 retailers. \
-5 strong trends are better than 10 weak ones. Skip a pattern if the evidence is thin.
+SCOPE RESTRICTION — CRITICAL
+This dataset contains ONLY home décor, storage, and lifestyle products. \
+Candles, fragrance, diffusers, wax melts, incense, room sprays, and all scented products are handled \
+by a separate dedicated analysis and are NOT present in this dataset. \
+Do NOT identify any fragrance, scent, candle, or aromatherapy trends. \
+If you encounter any such products, ignore them entirely.
 
-FIRST-RUN NOTE
-If no prior week context is provided, that is normal — treat all trends as NEW. \
-Momentum detection requires at least two weeks of data.
+EVIDENCE THRESHOLD
+Only include a trend if supported by ≥3 products from ≥3 retailers. \
+5 strong trends are better than 10 weak ones. Skip a pattern if the evidence is thin. \
+Trends seen in only 1–2 retailers are too narrow — they may be retailer-specific promotions, not true cross-market trends.
 
 OUTPUT FORMAT
 Respond ONLY with valid JSON — no prose before or after the JSON block.
+Each run you will be given a specific analytical focus angle — honour it by weighting your trend selection toward that dimension, \
+while still identifying any truly compelling trends outside it.
 
 {
   "trends": [
@@ -84,7 +114,7 @@ Respond ONLY with valid JSON — no prose before or after the JSON block.
       "description": "<1–2 sentences for a retail buyer: what this trend IS, what products it covers>",
       "rationale": "<3–5 sentences: WHY this trend is emerging now — cultural driver, consumer behaviour, \
 season, or macro shift. Reference specific product names and retailers by name. Be specific, not generic.>",
-      "category": "<colour | material | pattern | style | shape | seasonal | functional>",
+      "category": "<colour | pattern | material | finish | shape | hardware | functional | style | seasonal>",
       "dominant_colours": ["<top 3–5 colours>"],
       "dominant_materials": ["<top 3–5 materials>"],
       "dominant_patterns": ["<top 3 patterns — empty list if not applicable>"],
@@ -100,21 +130,79 @@ season, or macro shift. Reference specific product names and retailers by name. 
 
 
 # ---------------------------------------------------------------------------
+# Analytical lenses — one is chosen at random each run to steer Claude
+# toward a different dimension of the same product dataset.
+# ---------------------------------------------------------------------------
+
+ANALYSIS_LENSES = [
+    (
+        "COLOUR & MATERIAL INNOVATION: Focus especially on colour palettes and material stories. "
+        "Look for emerging colour combinations, novel finishes, and material pairings gaining traction "
+        "across multiple retailers. Prioritise trends defined primarily by HOW things look and feel."
+    ),
+    (
+        "FUNCTIONAL & LIFESTYLE SHIFTS: Focus especially on HOW consumers use and organise their homes. "
+        "Look for behavioural trends — visible storage, multi-room flexibility, ritual-led products, "
+        "workspace integration. Prioritise trends defined by what products DO rather than how they look."
+    ),
+    (
+        "STYLE AESTHETICS & FORM: Focus especially on aesthetic movements and silhouette/shape shifts. "
+        "Look for design language evolution — new minimalism, maximalist revival, cultural fusions, "
+        "organic vs geometric forms. Prioritise trends defined by the overall visual language and form."
+    ),
+    (
+        "CROSS-MARKET & GLOBAL MOMENTUM: Focus especially on signals appearing simultaneously across "
+        "US, AU, and GB markets. Trends confirmed in multiple geographies signal genuine global momentum. "
+        "Also flag any market-specific emerging signal that could spread — leading indicators matter."
+    ),
+    (
+        "NICHE & COUNTERINTUITIVE SIGNALS: Look BEYOND the most dominant clusters. Find the smaller, "
+        "more specific, or counterintuitive patterns that could indicate the next big thing before it peaks. "
+        "Challenge obvious interpretations. Prioritise specificity over breadth — narrow and real beats broad and vague."
+    ),
+    (
+        "PRICE TIER & ACCESSIBILITY: Focus on how design trends move across price tiers. Which aesthetics "
+        "are premium-first this cycle? Are any luxury signals trickling down to mid-market? Are there "
+        "budget-segment design innovations that punch above their tier? Price tier context is key."
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
 class TrendEngine:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, task=None):
         self.db = db
         self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.min_cluster_size = settings.trend_cluster_min_size
+        self._task = task  # optional Celery task for progress reporting
+
+    def _progress(self, pct: int, step: str):
+        """Report progress back to Celery if a task handle is available."""
+        if self._task:
+            try:
+                self._task.update_state(
+                    state="PROGRESS",
+                    meta={"pct": pct, "step": step},
+                )
+            except Exception:
+                pass  # never let progress reporting break the pipeline
 
     # ------------------------------------------------------------------ #
     #  Public entry point                                                  #
     # ------------------------------------------------------------------ #
 
-    async def run_weekly_analysis(self, week_start: Optional[datetime] = None) -> Optional[TrendReport]:
-        """Full weekly trend analysis pipeline."""
+    async def regenerate_analysis(self, week_start: Optional[datetime] = None) -> Optional[TrendReport]:
+        """Generate a fresh set of trends without deleting the previous generation.
+
+        - Keeps all existing Trend/TrendExample rows intact.
+        - Passes every previously found trend name as an exclusion so Claude
+          identifies genuinely different trends.
+        - Saves new trends with generation = max_existing + 1.
+        - Updates TrendReport.generation_count.
+        """
         if week_start is None:
             today = datetime.utcnow().date()
             week_start = datetime.combine(
@@ -122,62 +210,129 @@ class TrendEngine:
                 datetime.min.time()
             )
 
-        log.info("trend_analysis_start", week_start=week_start.isoformat())
+        log.info("trend_regenerate_start", week_start=week_start.isoformat())
+        self._progress(3, "Loading existing trends for exclusion…")
 
-        # 1. Load all analysed products from this week
+        # Collect ALL trend names across ALL generations for this week as exclusions
+        prev_trends_result = await self.db.execute(
+            select(
+                Trend.name,
+                Trend.category,
+                Trend.dominant_colours,
+                Trend.dominant_materials,
+                Trend.dominant_styles,
+                Trend.generation,
+            ).where(Trend.week_start == week_start)
+        )
+        prev_rows = prev_trends_result.all()
+        previously_found_trends: list[dict] = [
+            {
+                "name": row[0],
+                "category": row[1] or "",
+                "colours": row[2] or [],
+                "materials": row[3] or [],
+                "styles": row[4] or [],
+            }
+            for row in prev_rows
+        ]
+        max_generation = max((row[5] for row in prev_rows), default=0)
+        next_generation = max_generation + 1
+
+        log.info(
+            "trend_regenerate_exclusions",
+            excluded_count=len(previously_found_trends),
+            next_generation=next_generation,
+        )
+        self._progress(5, f"Generating set {next_generation} (excluding {len(previously_found_trends)} prior trends)…")
+
+        # Run the same clustering + Claude pipeline
         products_with_attrs = await self._load_products_with_attributes(week_start)
-        log.info("products_loaded", count=len(products_with_attrs))
-
         if len(products_with_attrs) < self.min_cluster_size * 2:
             log.warning("insufficient_products", count=len(products_with_attrs))
             return None
 
-        # 2. Build a fast lookup by product ID
-        items_by_id: dict[int, dict] = {
-            item["product"].id: item for item in products_with_attrs
-        }
-
-        # 3. Build embedding matrix + cluster (for structure, not final truth)
+        self._progress(15, f"Loaded {len(products_with_attrs):,} products — clustering…")
+        items_by_id: dict[int, dict] = {item["product"].id: item for item in products_with_attrs}
         embeddings, product_ids = self._build_embedding_matrix(products_with_attrs)
         clusters = self._cluster(embeddings, product_ids, products_with_attrs)
-        log.info("clusters_identified", count=len(clusters))
+        self._progress(30, f"Found {len(clusters)} clusters — sending to Claude…")
 
-        # 4. Load prior week trends for momentum detection
         prior_trends = await self._load_prior_trends(week_start)
+        self._progress(40, "Analysing with Claude (this takes ~60s)…")
 
-        # 5. Single holistic Claude call → list of trend dicts
         trend_dicts = await self._holistic_analysis(
-            clusters, items_by_id, week_start, prior_trends
+            clusters, items_by_id, week_start, prior_trends, previously_found_trends
         )
-        log.info("trends_from_claude", count=len(trend_dicts))
-
         if not trend_dicts:
-            log.warning("no_trends_returned")
+            log.warning("no_trends_returned_on_regeneration")
             return None
 
-        # 6. Persist Trend records
-        trends: list[Trend] = []
+        self._progress(85, f"Claude returned {len(trend_dicts)} trends — saving…")
+
+        # Save new trends with next_generation
+        new_trends: list[Trend] = []
         for td in trend_dicts:
             trend = self._build_trend_record(td, week_start, prior_trends, items_by_id)
             if trend:
+                trend.generation = next_generation
                 self.db.add(trend)
-                trends.append((trend, td))
+                new_trends.append((trend, td))
 
-        await self.db.flush()  # populate trend.id
+        await self.db.flush()
 
-        # 7. Create TrendExample records
-        for trend, td in trends:
-            await self._create_examples(trend, td, items_by_id)
+        # Pre-populate used_product_ids from ALL previous generations so no
+        # example product is reused across sets.
+        prior_example_ids_result = await self.db.execute(
+            select(TrendExample.product_id)
+            .join(Trend, TrendExample.trend_id == Trend.id)
+            .where(Trend.week_start == week_start)
+            .where(Trend.generation < next_generation)
+        )
+        used_product_ids: set[int] = set(prior_example_ids_result.scalars().all())
+        used_image_urls: set[str] = set()
+        log.info("example_products_excluded", count=len(used_product_ids), generation=next_generation)
 
-        # 8. Generate weekly report
-        committed_trends = [t for t, _ in trends]
-        report = await self._generate_report(week_start, committed_trends, len(products_with_attrs))
-        self.db.add(report)
+        for trend, td in new_trends:
+            await self._create_examples(trend, td, items_by_id, used_product_ids, used_image_urls)
+
+        self._progress(95, "Updating report…")
+
+        # Update TrendReport: append new trend IDs, bump generation_count
+        report_result = await self.db.execute(
+            select(TrendReport).where(TrendReport.week_start == week_start)
+        )
+        report = report_result.scalar_one_or_none()
+        committed_trends = [t for t, _ in new_trends]
+        new_ids = [t.id for t in committed_trends]
+
+        if report:
+            report.trend_ids = (report.trend_ids or []) + new_ids
+            report.generation_count = next_generation
+        else:
+            # No report yet — generate one fresh
+            report_values = await self._generate_report(week_start, committed_trends, len(products_with_attrs))
+            report_values["generation_count"] = next_generation
+            upsert_stmt = (
+                pg_insert(TrendReport)
+                .values(**report_values)
+                .on_conflict_do_update(
+                    constraint="trend_reports_week_start_key",
+                    set_={k: v for k, v in report_values.items() if k != "week_start"},
+                )
+            )
+            await self.db.execute(upsert_stmt)
+
         await self.db.commit()
 
+        report_result = await self.db.execute(
+            select(TrendReport).where(TrendReport.week_start == week_start)
+        )
+        report = report_result.scalar_one_or_none()
+
         log.info(
-            "trend_analysis_complete",
-            trends=len(committed_trends),
+            "trend_regenerate_complete",
+            new_trends=len(committed_trends),
+            generation=next_generation,
             week_start=week_start.isoformat(),
         )
         return report
@@ -189,16 +344,24 @@ class TrendEngine:
     async def _load_products_with_attributes(self, week_start: datetime) -> list[dict]:
         week_end = week_start + timedelta(days=7)
 
+        # Build exclusion filter: skip any product whose name or category
+        # matches a fragrance/candle keyword — those belong in the Fragrance tab.
+        fragrance_matches = [
+            cond
+            for kw in FRAGRANCE_EXCLUSION_KEYWORDS
+            for cond in (Product.name.ilike(f"%{kw}%"), Product.category.ilike(f"%{kw}%"))
+        ]
+        not_fragrance = ~or_(*fragrance_matches)
+
         result = await self.db.execute(
             select(Product, ProductAttributes, Retailer)
             .join(ProductAttributes, Product.id == ProductAttributes.product_id)
             .join(Retailer, Product.retailer_id == Retailer.id)
             .where(
                 and_(
-                    Product.analysed_at >= week_start,
-                    Product.analysed_at < week_end,
-                    Product.last_seen_at >= week_start - timedelta(days=30),
+                    Product.is_active == True,
                     ProductAttributes.embedding.isnot(None),
+                    not_fragrance,
                 )
             )
         )
@@ -238,7 +401,7 @@ class TrendEngine:
         n = len(embeddings)
         k = max(3, min(20, n // self.min_cluster_size))
 
-        kmeans = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=5)
+        kmeans = MiniBatchKMeans(n_clusters=k, random_state=random.randint(0, 99999), n_init=5)
         labels = kmeans.fit_predict(embeddings)
 
         clusters_by_label: dict[int, list[dict]] = defaultdict(list)
@@ -317,15 +480,16 @@ class TrendEngine:
         items_by_id: dict[int, dict],
         week_start: datetime,
         prior_trends: list[Trend],
+        previously_found: list[dict] | None = None,
     ) -> list[dict]:
         """Build a single structured payload and ask Claude to identify trends."""
-        payload = self._build_analysis_payload(clusters, items_by_id, week_start, prior_trends)
+        payload = self._build_analysis_payload(clusters, items_by_id, week_start, prior_trends, previously_found or [])
         log.debug("trend_payload_built", chars=len(payload))
 
         try:
             response = await self.client.messages.create(
                 model=settings.nlp_model,
-                max_tokens=4096,
+                max_tokens=8192,
                 system=HOLISTIC_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": payload}],
             )
@@ -336,7 +500,36 @@ class TrendEngine:
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw)
 
-            data = json.loads(raw)
+            # Attempt full parse first
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                # Response may have been truncated — try to recover any complete
+                # trend objects by extracting everything up to the last valid "},"
+                # pattern inside the trends array.
+                log.warning("holistic_analysis_partial_json", chars=len(raw))
+                bracket = raw.find('"trends"')
+                if bracket != -1:
+                    # Find the opening "[" of the trends array
+                    arr_start = raw.find("[", bracket)
+                    if arr_start != -1:
+                        # Walk backwards from the end to find the last complete "}"
+                        truncated = raw[arr_start:]
+                        last_brace = truncated.rfind("}")
+                        if last_brace != -1:
+                            repaired = '{"trends": ' + truncated[:last_brace + 1] + "]}"
+                            try:
+                                data = json.loads(repaired)
+                                log.warning("holistic_analysis_repaired", trends=len(data.get("trends", [])))
+                            except json.JSONDecodeError:
+                                raise
+                        else:
+                            raise
+                    else:
+                        raise
+                else:
+                    raise
+
             trend_list = data.get("trends", [])
             log.info("claude_trends_parsed", count=len(trend_list))
             return trend_list
@@ -351,6 +544,7 @@ class TrendEngine:
         items_by_id: dict[int, dict],
         week_start: datetime,
         prior_trends: list[Trend],
+        previously_found: list[dict] | None = None,
     ) -> str:
         """Assemble the structured text payload sent to Claude."""
         lines: list[str] = []
@@ -363,6 +557,12 @@ class TrendEngine:
         lines.append(f"RETAILERS: {len(all_retailers)} ({', '.join(sorted(all_retailers))})")
         lines.append(f"MARKETS: {', '.join(sorted(all_countries))}")
         lines.append(f"PRIOR WEEK TRENDS AVAILABLE: {'Yes — ' + str(len(prior_trends)) + ' trends' if prior_trends else 'No (first run or no prior data)'}")
+        lines.append("")
+
+        # Apply all analytical lenses — consider every dimension simultaneously
+        lines.append("=== ANALYTICAL LENSES — apply ALL of the following simultaneously ===")
+        for i, lens in enumerate(ANALYSIS_LENSES, 1):
+            lines.append(f"{i}. {lens}")
         lines.append("")
 
         # Cluster summaries
@@ -385,7 +585,9 @@ class TrendEngine:
             lines.append(f"  Season: {cluster['dominant_season']} | Room: {cluster['dominant_room']} | "
                          f"Avg price: {'${:.2f}'.format(cluster['avg_price']) if cluster['avg_price'] else 'N/A'}")
 
-            # Pick best 5 samples from this cluster (prefer price + image + description)
+            # Pick 5 samples from this cluster: use the full cluster as the pool
+            # so each Try Again genuinely surfaces different products. Weight toward
+            # data-complete items by sorting, but sample from the entire cluster.
             sorted_items = sorted(
                 cluster["items"],
                 key=lambda x: (
@@ -395,7 +597,8 @@ class TrendEngine:
                 ),
                 reverse=True,
             )
-            sample_ids = [item["product"].id for item in sorted_items[:5]]
+            sampled = random.sample(sorted_items, min(5, len(sorted_items)))
+            sample_ids = [item["product"].id for item in sampled]
             sample_ids_per_cluster.append(sample_ids)
             lines.append(f"  Sample product IDs: {sample_ids}")
             lines.append("")
@@ -442,6 +645,33 @@ class TrendEngine:
                 )
             lines.append("")
 
+        # Trends already identified in previous runs — must not repeat name, theme, OR attributes
+        if previously_found:
+            lines.append("=== ALREADY IDENTIFIED TRENDS — DO NOT REPEAT ANY OF THESE ===")
+            lines.append(
+                "These trends were found in a previous run on this SAME product dataset. "
+                "You MUST generate COMPLETELY DIFFERENT trends this time. "
+                "Avoid not just these exact names but their underlying themes, colour families, "
+                "material categories, and aesthetic styles:"
+            )
+            for t in previously_found:
+                parts = []
+                if t.get("category"):
+                    parts.append(f"type={t['category']}")
+                if t.get("colours"):
+                    parts.append(f"colours: {', '.join(t['colours'][:4])}")
+                if t.get("materials"):
+                    parts.append(f"materials: {', '.join(t['materials'][:4])}")
+                if t.get("styles"):
+                    parts.append(f"styles: {', '.join(t['styles'][:3])}")
+                detail = f" [{'; '.join(parts)}]" if parts else ""
+                lines.append(f"- \"{t['name']}\"{detail}")
+            lines.append(
+                "Think of the data from a fresh perspective — what patterns have NOT yet been named? "
+                "Every trend you identify must be meaningfully distinct from the above list."
+            )
+            lines.append("")
+
         lines.append("Please identify 5–10 trends from the above data and respond in the JSON format specified.")
 
         return "\n".join(lines)
@@ -461,7 +691,13 @@ class TrendEngine:
         name = (td.get("name") or "").strip()
         description = (td.get("description") or "").strip()
         rationale = (td.get("rationale") or "").strip()
+        VALID_CATEGORIES = {
+            "colour", "pattern", "material", "finish", "shape",
+            "hardware", "functional", "style", "seasonal",
+        }
         category = (td.get("category") or "style").strip().lower()
+        if category not in VALID_CATEGORIES:
+            category = "style"  # safe fallback
 
         if not name or not description:
             log.warning("trend_missing_required_fields", td=td)
@@ -482,8 +718,20 @@ class TrendEngine:
                 prices.append(item["product"].price)
 
         # Fall back to Claude-reported retailer spread if we can't infer
-        retailer_count = td.get("retailer_spread") or len(retailer_names_set) or 1
+        # Always derive retailer_count from the actual example products, not Claude's
+        # self-reported retailer_spread (which is often inflated/guessed).
+        retailer_count = len(retailer_names_set) or 1
         avg_price = round(sum(prices) / len(prices), 2) if prices else None
+
+        # Hard minimum: discard trends spanning fewer than 3 retailers
+        if len(retailer_names_set) < 3:
+            log.info(
+                "trend_filtered_insufficient_retailers",
+                name=name,
+                retailer_count=len(retailer_names_set),
+                retailers=sorted(retailer_names_set),
+            )
+            return None
 
         # Momentum vs prior week
         status = TrendStatus.NEW
@@ -545,12 +793,31 @@ class TrendEngine:
         trend: Trend,
         td: dict,
         items_by_id: dict[int, dict],
+        used_product_ids: set[int] | None = None,
+        used_image_urls: set[str] | None = None,
     ):
-        """Create TrendExample rows for the products Claude cited."""
-        example_ids: list[int] = [
+        """Create TrendExample rows for the products Claude cited.
+
+        Products already assigned to an earlier trend are excluded (by product ID
+        and by primary image URL) so the same image never appears on two trend cards.
+        """
+        if used_product_ids is None:
+            used_product_ids = set()
+        if used_image_urls is None:
+            used_image_urls = set()
+
+        def _primary_image(pid: int) -> str | None:
+            p = items_by_id[pid]["product"]
+            urls = p.image_urls or []
+            return urls[0] if urls else p.primary_image_url
+
+        example_ids: list[int] = list(dict.fromkeys(
             pid for pid in td.get("example_product_ids", [])
-            if isinstance(pid, int) and pid in items_by_id
-        ]
+            if isinstance(pid, int)
+            and pid in items_by_id
+            and pid not in used_product_ids
+            and (_primary_image(pid) is None or _primary_image(pid) not in used_image_urls)
+        ))
 
         # Score each by data completeness for hero selection
         def completeness(pid: int) -> float:
@@ -567,7 +834,20 @@ class TrendEngine:
 
         sorted_ids = sorted(example_ids, key=completeness, reverse=True)
 
-        for rank, pid in enumerate(sorted_ids[:10]):
+        # Select top 10 by completeness, but ensure at least 2 retailers represented
+        selected = sorted_ids[:10]
+        selected_retailer_names = {
+            items_by_id[pid]["retailer"].name for pid in selected
+        }
+        if len(selected_retailer_names) < 2 and len(sorted_ids) > 10:
+            # Inject the best-scored product from a different retailer
+            first_retailer = items_by_id[sorted_ids[0]]["retailer"].name
+            for pid in sorted_ids[10:]:
+                if items_by_id[pid]["retailer"].name != first_retailer:
+                    selected = sorted_ids[:9] + [pid]
+                    break
+
+        for rank, pid in enumerate(selected):
             ex = TrendExample(
                 trend_id=trend.id,
                 product_id=pid,
@@ -575,6 +855,10 @@ class TrendEngine:
                 is_hero=(rank == 0),
             )
             self.db.add(ex)
+            used_product_ids.add(pid)
+            img = _primary_image(pid)
+            if img:
+                used_image_urls.add(img)
 
     # ------------------------------------------------------------------ #
     #  Weekly report                                                       #
@@ -585,7 +869,8 @@ class TrendEngine:
         week_start: datetime,
         trends: list[Trend],
         total_products: int,
-    ) -> TrendReport:
+    ) -> dict:
+        """Build the TrendReport column values as a plain dict (caller does the upsert)."""
         retailer_count = len({r for t in trends for r in (t.retailer_names or [])})
         rising = [t for t in trends if t.status == TrendStatus.RISING]
         new_trends = [t for t in trends if t.status == TrendStatus.NEW]
@@ -602,11 +887,11 @@ class TrendEngine:
                 f"{len(new_trends)} new trend{'s' if len(new_trends) > 1 else ''} emerged this week."
             )
 
-        return TrendReport(
-            week_start=week_start,
-            title=f"Home Décor & Storage Trend Report — Week of {week_start.strftime('%d %b %Y')}",
-            summary=summary,
-            trend_ids=[t.id for t in trends],
-            total_products_analysed=total_products,
-            retailers_covered=retailer_count,
-        )
+        return {
+            "week_start": week_start,
+            "title": f"Home Décor & Storage Trend Report — Week of {week_start.strftime('%d %b %Y')}",
+            "summary": summary,
+            "trend_ids": [t.id for t in trends],
+            "total_products_analysed": total_products,
+            "retailers_covered": retailer_count,
+        }

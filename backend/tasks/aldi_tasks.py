@@ -1,5 +1,6 @@
 """Celery tasks for Aldi trend document analysis and product idea generation."""
 import asyncio
+import random
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from tasks.celery_app import app
@@ -99,8 +100,8 @@ def generate_aldi_ideas(self, upload_id: int) -> dict:
             return {"status": "skipped", "upload_id": upload_id}
 
         try:
-            # Find similar products via embedding similarity
-            similar_products = _find_similar_products(session, upload)
+            # Find similar products via embedding similarity — fetch 50, sample 20 inside generate_ideas
+            similar_products = _find_similar_products(session, upload, limit=125)
             log.info("aldi_similar_products", upload_id=upload_id, count=len(similar_products))
 
             # Build snapshot map for idea enrichment
@@ -116,7 +117,13 @@ def generate_aldi_ideas(self, upload_id: int) -> dict:
                 "mood_descriptors": upload.mood_descriptors,
             }
 
-            ideas = asyncio.run(_generate_ideas(trend_data, similar_products))
+            # Pass existing idea names so regeneration produces different results
+            from sqlalchemy import select as sa_select
+            existing_ideas = session.execute(
+                sa_select(AldiProductIdea.name).where(AldiProductIdea.upload_id == upload_id)
+            ).scalars().all()
+
+            ideas = asyncio.run(_generate_ideas(trend_data, similar_products, previous_idea_names=list(existing_ideas)))
 
             if ideas:
                 # Clear any stale ideas (retry-safe)
@@ -126,11 +133,22 @@ def generate_aldi_ideas(self, upload_id: int) -> dict:
                 )
                 session.flush()
 
+                used_inspired_ids: set[int] = set()
                 for idea_data in ideas:
+                    # Only keep IDs that Claude actually referenced AND exist in product_map
+                    # (guards against hallucinated sequential IDs when products list was empty)
                     inspired_ids = [
                         pid for pid in idea_data.get("inspired_by_product_ids", [])
-                        if isinstance(pid, int)
+                        if isinstance(pid, int) and pid not in used_inspired_ids and pid in product_map
                     ]
+                    # Backfill to minimum 3 from unused products in the pool
+                    if len(inspired_ids) < 3:
+                        for p in similar_products:
+                            if len(inspired_ids) >= 3:
+                                break
+                            if p["id"] not in used_inspired_ids and p["id"] not in inspired_ids:
+                                inspired_ids.append(p["id"])
+                    used_inspired_ids.update(inspired_ids)
                     inspired_snapshots = [
                         {
                             "id": pid,
@@ -183,17 +201,23 @@ async def _vision_analyse(file_path: str, file_type: str) -> dict | None:
     return await MoodBoardAnalyser().analyse_file(file_path, file_type)
 
 
-async def _generate_ideas(trend_data: dict, similar_products: list) -> list | None:
+async def _generate_ideas(trend_data: dict, similar_products: list, previous_idea_names: list[str] | None = None) -> list | None:
     from analysis.aldi_vision import MoodBoardAnalyser
-    return await MoodBoardAnalyser().generate_ideas(trend_data, similar_products, n=8)
+    return await MoodBoardAnalyser().generate_ideas(trend_data, similar_products, n=10, previous_idea_names=previous_idea_names)
 
 
 # ── Similarity search (sync) ──────────────────────────────────────────────────
 
-def _find_similar_products(session, upload: AldiUpload) -> list[dict]:
+def _find_similar_products(session, upload: AldiUpload, limit: int = 125) -> list[dict]:
     """
-    Build a keyword embedding from the trend attributes and find the 20 most
+    Build a keyword embedding from the trend attributes and find the most
     similar products in the DB using pgvector cosine distance.
+
+    Fetches a pool of limit*3 from the DB (the closest neighbourhood), then
+    randomly samples `limit` from that pool.  This ensures every run — initial
+    or regenerated — receives a different set of products while still staying
+    within the relevant similarity zone.  generate_ideas then samples 20 from
+    the returned pool for further variety.
     """
     from analysis.embeddings import EmbeddingGenerator
 
@@ -213,6 +237,7 @@ def _find_similar_products(session, upload: AldiUpload) -> list[dict]:
     gen = EmbeddingGenerator()
     query_vec = gen._keyword_embedding(query_text)
     vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
+    fetch_limit = limit * 3  # fetch a wide neighbourhood, then sample
 
     try:
         result = session.execute(text(f"""
@@ -228,9 +253,9 @@ def _find_similar_products(session, upload: AldiUpload) -> list[dict]:
             ORDER BY
               (pa.embedding <=> '{vec_str}'::vector)
               * (CASE WHEN p.is_best_seller THEN 0.7 ELSE 1.0 END)
-            LIMIT 20
+            LIMIT {fetch_limit}
         """))
-        return [
+        pool = [
             {
                 "id": row.id,
                 "name": row.name,
@@ -246,6 +271,7 @@ def _find_similar_products(session, upload: AldiUpload) -> list[dict]:
             }
             for row in result.fetchall()
         ]
+        return random.sample(pool, min(limit, len(pool))) if len(pool) > limit else pool
     except Exception as exc:
         log.error("similar_products_failed", error=str(exc))
         return []
@@ -280,8 +306,13 @@ def _maybe_trigger_session_ideas(session, session_id: int) -> None:
     log.info("aldi_session_all_done", session_id=session_id, upload_count=len(uploads))
 
 
-def _find_similar_products_for_session(session, sess_obj: AldiSession) -> list[dict]:
-    """Find similar products using merged session trend data."""
+def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: int = 125) -> list[dict]:
+    """Find similar products using merged session trend data.
+
+    Fetches a pool of limit*3 from the DB then randomly samples `limit` from it,
+    so every call (including each Try Again regeneration) returns a different set
+    of products from within the relevant similarity neighbourhood.
+    """
     from analysis.embeddings import EmbeddingGenerator
 
     query_text = " | ".join(filter(None, [
@@ -300,6 +331,7 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession) -> list[d
     gen = EmbeddingGenerator()
     query_vec = gen._keyword_embedding(query_text)
     vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
+    fetch_limit = limit * 3  # fetch a wide neighbourhood, then sample
 
     try:
         result = session.execute(text(f"""
@@ -315,9 +347,9 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession) -> list[d
             ORDER BY
               (pa.embedding <=> '{vec_str}'::vector)
               * (CASE WHEN p.is_best_seller THEN 0.7 ELSE 1.0 END)
-            LIMIT 20
+            LIMIT {fetch_limit}
         """))
-        return [
+        pool = [
             {
                 "id": row.id,
                 "name": row.name,
@@ -333,6 +365,7 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession) -> list[d
             }
             for row in result.fetchall()
         ]
+        return random.sample(pool, min(limit, len(pool))) if len(pool) > limit else pool
     except Exception as exc:
         log.error("similar_products_for_session_failed", error=str(exc))
         return []
@@ -390,8 +423,8 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
             sess_obj.season_occasion = merged_season
             db_session.flush()
 
-            # Find similar products
-            similar_products = _find_similar_products_for_session(db_session, sess_obj)
+            # Find similar products — fetch 50, sample 20 inside generate_ideas
+            similar_products = _find_similar_products_for_session(db_session, sess_obj, limit=125)
             log.info("aldi_session_similar_products", session_id=session_id, count=len(similar_products))
 
             product_map = {p["id"]: p for p in similar_products}
@@ -406,7 +439,12 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                 "mood_descriptors": merged_mood,
             }
 
-            ideas = asyncio.run(_generate_ideas(trend_data, similar_products))
+            # Pass existing idea names so regeneration produces different results
+            existing_ideas = db_session.execute(
+                sa_select(AldiProductIdea.name).where(AldiProductIdea.session_id == session_id)
+            ).scalars().all()
+
+            ideas = asyncio.run(_generate_ideas(trend_data, similar_products, previous_idea_names=list(existing_ideas)))
 
             if ideas:
                 db_session.execute(
@@ -415,11 +453,22 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                 )
                 db_session.flush()
 
+                used_inspired_ids: set[int] = set()
                 for idea_data in ideas:
+                    # Only keep IDs that Claude actually referenced AND exist in product_map
+                    # (guards against hallucinated sequential IDs when products list was empty)
                     inspired_ids = [
                         pid for pid in idea_data.get("inspired_by_product_ids", [])
-                        if isinstance(pid, int)
+                        if isinstance(pid, int) and pid not in used_inspired_ids and pid in product_map
                     ]
+                    # Backfill to minimum 3 from unused products in the pool
+                    if len(inspired_ids) < 3:
+                        for p in similar_products:
+                            if len(inspired_ids) >= 3:
+                                break
+                            if p["id"] not in used_inspired_ids and p["id"] not in inspired_ids:
+                                inspired_ids.append(p["id"])
+                    used_inspired_ids.update(inspired_ids)
                     inspired_snapshots = [
                         {
                             "id": pid,
@@ -433,6 +482,7 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                     idea = AldiProductIdea(
                         session_id=session_id,
                         upload_id=None,
+                        generation=1,
                         position=idea_data.get("position", 0),
                         name=idea_data.get("name", ""),
                         description=idea_data.get("description", ""),
@@ -461,6 +511,139 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
         sess_obj.updated_at = datetime.utcnow()
         db_session.commit()
         return {"status": "done", "session_id": session_id, "ideas": len(ideas or [])}
+
+    finally:
+        db_session.close()
+
+
+# ── Task 4: Regenerate ideas (Try Again) ─────────────────────────────────────
+
+@app.task(bind=True, max_retries=2, queue="aldi")
+def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
+    """Generate a fresh set of ideas for an existing session (Try Again).
+
+    - Does NOT delete previous generations.
+    - Excludes ALL previously generated idea names AND all previously used
+      inspired_by_product_ids across every generation so results are truly fresh.
+    - Saves new ideas with generation = max_existing_generation + 1.
+    """
+    from sqlalchemy import select as sa_select
+    db_session = _get_session()
+    try:
+        sess_obj = db_session.get(AldiSession, session_id)
+        if not sess_obj:
+            return {"status": "not_found", "session_id": session_id}
+
+        # Collect all existing idea names and inspired_by IDs across ALL generations
+        existing_ideas_rows = db_session.execute(
+            sa_select(AldiProductIdea.name, AldiProductIdea.inspired_by_product_ids,
+                      AldiProductIdea.generation)
+            .where(AldiProductIdea.session_id == session_id)
+        ).all()
+
+        previous_idea_names = [row.name for row in existing_ideas_rows]
+        used_inspired_ids: set[int] = set()
+        for row in existing_ideas_rows:
+            for pid in (row.inspired_by_product_ids or []):
+                if isinstance(pid, int):
+                    used_inspired_ids.add(pid)
+
+        max_generation = max((row.generation for row in existing_ideas_rows), default=0)
+        next_generation = max_generation + 1
+
+        log.info(
+            "aldi_regenerate_start",
+            session_id=session_id,
+            next_generation=next_generation,
+            excluded_names=len(previous_idea_names),
+            excluded_ids=len(used_inspired_ids),
+        )
+
+        try:
+            # Find similar products
+            similar_products = _find_similar_products_for_session(db_session, sess_obj, limit=125)
+            product_map = {p["id"]: p for p in similar_products}
+
+            trend_data = {
+                "themes": sess_obj.themes or [],
+                "colour_palette": sess_obj.colour_palette or [],
+                "key_materials": sess_obj.key_materials or [],
+                "key_prints": sess_obj.key_prints or [],
+                "product_categories": sess_obj.product_categories or [],
+                "season_occasion": sess_obj.season_occasion,
+                "mood_descriptors": sess_obj.mood_descriptors or [],
+            }
+
+            ideas = asyncio.run(
+                _generate_ideas(trend_data, similar_products, previous_idea_names=previous_idea_names)
+            )
+
+            if ideas:
+                # Deduplicate inspired_by ACROSS all generations using the existing used set.
+                # Also filter out any hallucinated IDs not present in product_map.
+                new_used: set[int] = set()
+                for idea_data in ideas:
+                    # Only keep IDs that exist in product_map and aren't already used
+                    inspired_ids = [
+                        pid for pid in idea_data.get("inspired_by_product_ids", [])
+                        if isinstance(pid, int) and pid not in used_inspired_ids
+                        and pid not in new_used and pid in product_map
+                    ]
+                    # Backfill to minimum 3 from unused products
+                    if len(inspired_ids) < 3:
+                        for p in similar_products:
+                            if len(inspired_ids) >= 3:
+                                break
+                            if (p["id"] not in used_inspired_ids
+                                    and p["id"] not in new_used
+                                    and p["id"] not in inspired_ids):
+                                inspired_ids.append(p["id"])
+                    new_used.update(inspired_ids)
+
+                    inspired_snapshots = [
+                        {
+                            "id": pid,
+                            "name": product_map[pid]["name"],
+                            "retailer_name": product_map[pid]["retailer_name"],
+                            "url": product_map[pid]["url"],
+                            "image_url": product_map[pid].get("primary_image_url"),
+                        }
+                        for pid in inspired_ids if pid in product_map
+                    ]
+                    idea = AldiProductIdea(
+                        session_id=session_id,
+                        upload_id=None,
+                        generation=next_generation,
+                        position=idea_data.get("position", 0),
+                        name=idea_data.get("name", ""),
+                        description=idea_data.get("description", ""),
+                        category=idea_data.get("category", ""),
+                        price_point=idea_data.get("price_point", ""),
+                        rationale=idea_data.get("rationale", ""),
+                        inspired_by_product_ids=inspired_ids,
+                        inspired_by_products=inspired_snapshots,
+                    )
+                    db_session.add(idea)
+
+                sess_obj.status = AldiUploadStatus.DONE
+                log.info("aldi_regenerate_done", session_id=session_id,
+                         generation=next_generation, count=len(ideas))
+            else:
+                sess_obj.status = AldiUploadStatus.FAILED
+                sess_obj.error_message = "Idea regeneration returned no results"
+
+        except Exception as exc:
+            log.error("aldi_regenerate_failed", session_id=session_id, error=str(exc))
+            sess_obj.status = AldiUploadStatus.FAILED
+            sess_obj.error_message = str(exc)
+            sess_obj.updated_at = datetime.utcnow()
+            db_session.commit()
+            raise self.retry(exc=exc, countdown=30)
+
+        sess_obj.updated_at = datetime.utcnow()
+        db_session.commit()
+        return {"status": "done", "session_id": session_id, "generation": next_generation,
+                "ideas": len(ideas or [])}
 
     finally:
         db_session.close()

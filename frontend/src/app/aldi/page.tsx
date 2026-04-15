@@ -17,6 +17,7 @@ interface InspiredProduct {
 
 interface AldiIdea {
   id: number;
+  generation: number;
   position: number;
   name: string;
   description: string;
@@ -60,6 +61,8 @@ interface AldiSession {
   error_message?: string | null;
   uploads?: AldiUploadDoc[];
   ideas?: AldiIdea[];
+  generation_count?: number;
+  latest_generation?: number;
 }
 
 // ── Status helpers ────────────────────────────────────────────────────────────
@@ -358,12 +361,31 @@ function IdeaCard({ idea }: { idea: AldiIdea }) {
 
 // ── Session detail view ────────────────────────────────────────────────────────
 
-function SessionDetailView({ session }: { session: AldiSession }) {
+function SessionDetailView({
+  session,
+  onTryAgain,
+}: {
+  session: AldiSession;
+  onTryAgain: () => void;
+}) {
   const [activeDocIdx, setActiveDocIdx] = useState(0);
   const uploads = session.uploads || [];
-  const ideas = session.ideas || [];
+  const allIdeas = session.ideas || [];
   const isProcessing = ["pending", "analysing", "generating"].includes(session.status);
+  const isGenerating = session.status === "generating";
   const activeDoc = uploads[activeDocIdx];
+
+  // Generation state
+  const latestGen = session.latest_generation ?? (allIdeas.length > 0 ? Math.max(...allIdeas.map((i) => i.generation)) : 1);
+  const [activeGen, setActiveGen] = useState<number>(latestGen);
+
+  // When a new generation arrives, auto-switch to it
+  useEffect(() => {
+    setActiveGen(latestGen);
+  }, [latestGen]);
+
+  const ideas = isProcessing ? allIdeas : allIdeas.filter((i) => i.generation === activeGen);
+  const genNums = Array.from(new Set(allIdeas.map((i) => i.generation))).sort((a, b) => a - b);
 
   // Progress tracking
   const total = uploads.length;
@@ -371,7 +393,6 @@ function SessionDetailView({ session }: { session: AldiSession }) {
   const failed = uploads.filter((u) => u.status === "failed").length;
   const progressPct = total > 0 ? Math.round((analysed / total) * 100) : 0;
   const isAnalysing = session.status === "analysing" || session.status === "pending";
-  const isGenerating = session.status === "generating";
 
   const docStatusIcon = (status: string) => {
     if (status === "done") return "✓";
@@ -496,19 +517,52 @@ function SessionDetailView({ session }: { session: AldiSession }) {
 
       {/* Right: combined ideas */}
       <div>
-        <h3 className="font-semibold text-stone-800 mb-1">
-          {isProcessing
-            ? isGenerating
-              ? "Generating combined ideas…"
-              : `${ideas.length > 0 ? ideas.length + " " : ""}Product Ideas`
-            : `${ideas.length} Combined Product Ideas`}
-        </h3>
+        {/* Header row: title + Try Again button */}
+        <div className="flex items-center justify-between mb-1 gap-2">
+          <h3 className="font-semibold text-stone-800">
+            {isProcessing
+              ? isGenerating
+                ? "Generating ideas…"
+                : `${allIdeas.length > 0 ? allIdeas.length + " " : ""}Product Ideas`
+              : `${ideas.length} Product Ideas`}
+          </h3>
+          {session.status === "done" && (
+            <button
+              onClick={onTryAgain}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-800 rounded-lg text-xs font-medium transition-colors"
+            >
+              <span>🔄</span>
+              <span>Try Again</span>
+            </button>
+          )}
+        </div>
+
         {isProcessing && (
           <p className="text-xs text-stone-400 mb-3">
             {isGenerating
-              ? "Claude is reviewing all documents and generating 8 tailored product ideas…"
+              ? "Claude is reviewing all documents and generating 10 tailored product ideas…"
               : `Waiting for all ${total} document${total > 1 ? "s" : ""} to finish before generating ideas. ${analysed} of ${total} done so far.`}
           </p>
+        )}
+
+        {/* Generation tabs (shown when multiple generations exist) */}
+        {!isProcessing && genNums.length > 1 && (
+          <div className="flex gap-1.5 flex-wrap mb-3">
+            {genNums.map((gen) => (
+              <button
+                key={gen}
+                onClick={() => setActiveGen(gen)}
+                className={clsx(
+                  "px-3 py-1 rounded-lg text-xs font-medium transition-colors border",
+                  activeGen === gen
+                    ? "bg-amber-500 border-amber-500 text-white"
+                    : "bg-white border-stone-200 text-stone-600 hover:border-amber-300 hover:text-amber-700"
+                )}
+              >
+                {gen === latestGen ? `Set ${gen} ✨` : `Set ${gen}`}
+              </button>
+            ))}
+          </div>
         )}
 
         {isProcessing ? (
@@ -570,6 +624,18 @@ export default function AldiPage() {
     }
   }, []);
 
+  const startPolling = useCallback((id: number) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    let attempts = 0;
+    pollRef.current = setInterval(async () => {
+      attempts++;
+      const status = await fetchDetail(id);
+      if (status === "done" || status === "failed" || attempts > 60) {
+        clearInterval(pollRef.current!);
+      }
+    }, 3000);
+  }, [fetchDetail]);
+
   useEffect(() => {
     if (selectedId === null) {
       setSelectedDetail(null);
@@ -578,24 +644,29 @@ export default function AldiPage() {
     }
 
     fetchDetail(selectedId);
-
-    if (pollRef.current) clearInterval(pollRef.current);
-    let attempts = 0;
-    pollRef.current = setInterval(async () => {
-      attempts++;
-      const status = await fetchDetail(selectedId);
-      if (status === "done" || status === "failed" || attempts > 60) {
-        clearInterval(pollRef.current!);
-      }
-    }, 3000);
+    startPolling(selectedId);
 
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [selectedId, fetchDetail]);
+  }, [selectedId, fetchDetail, startPolling]);
 
   const handleSessionCreated = (s: AldiSession) => {
     setSessions((prev) => [s, ...prev]);
     setSelectedId(s.id);
   };
+
+  const handleTryAgain = useCallback(async (sessionId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/aldi/sessions/${sessionId}/regenerate`, { method: "POST" });
+      if (!res.ok) return;
+      // Optimistically update session status to generating
+      setSelectedDetail((prev) => prev ? { ...prev, status: "generating" } : prev);
+      setSessions((prev) => prev.map((s) => s.id === sessionId ? { ...s, status: "generating" } : s));
+      // Restart polling to pick up the new generation
+      startPolling(sessionId);
+    } catch {
+      // ignore
+    }
+  }, [startPolling]);
 
   const handleDelete = async (id: number) => {
     await fetch(`${API_BASE}/api/aldi/sessions/${id}`, { method: "DELETE" });
@@ -655,7 +726,7 @@ export default function AldiPage() {
                     <StatusBadge status={selectedDetail.status} />
                   </div>
                 </div>
-                <SessionDetailView session={selectedDetail} />
+                <SessionDetailView session={selectedDetail} onTryAgain={() => handleTryAgain(selectedDetail.id)} />
               </>
             ) : (
               <div className="bg-white rounded-xl border border-stone-200 p-12 text-center text-stone-400">

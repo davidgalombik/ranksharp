@@ -1,6 +1,6 @@
 """Retailer management API routes."""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Retailer, ScrapeJob, Product, ScrapeStatus
@@ -19,6 +19,7 @@ class RetailerOut(BaseModel):
     base_url: str
     country: str
     tier: str
+    adapter_class: str = ""
     is_active: bool
     product_count: int = 0
     pending_analysis_count: int = 0
@@ -66,6 +67,7 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
             base_url=r.base_url,
             country=r.country,
             tier=r.tier.value,
+            adapter_class=r.adapter_class or "",
             is_active=r.is_active,
             product_count=product_count,
             pending_analysis_count=pending_analysis_count,
@@ -73,6 +75,19 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
             last_scrape_status=last_job.status.value if last_job else None,
         ))
     return output
+
+
+@router.get("/{slug}/categories")
+async def get_retailer_categories(slug: str, db: AsyncSession = Depends(get_db)):
+    """Return distinct product categories for a given retailer slug."""
+    result = await db.execute(
+        select(distinct(Product.category))
+        .join(Retailer, Product.retailer_id == Retailer.id)
+        .where(Retailer.slug == slug, Product.is_active == True, Product.category.isnot(None), Product.category != "")
+        .order_by(Product.category)
+    )
+    categories = [row[0] for row in result.all()]
+    return categories
 
 
 @router.post("/{retailer_id}/scrape")

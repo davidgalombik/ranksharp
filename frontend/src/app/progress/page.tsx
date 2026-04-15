@@ -15,6 +15,7 @@ interface ScrapeJob {
   retailer_slug: string;
   retailer_country: string;
   tier: string;
+  adapter_class: string;
   status: string;
   started_at: string | null;
   finished_at: string | null;
@@ -78,11 +79,24 @@ const STATUS = {
   },
 } as Record<string, { label: string; dot: string; row: string; badge: string }>;
 
-const TIER_COLOUR = {
-  api: "text-emerald-700 bg-emerald-50 border-emerald-200",
-  http: "text-amber-700 bg-amber-50 border-amber-200",
-  browser: "text-rose-700 bg-rose-50 border-rose-200",
-} as Record<string, string>;
+function techLabel(adapterClass: string, tier: string): string {
+  const a = adapterClass.toLowerCase();
+  if (a.includes("apify")) return "Apify";
+  if (a.includes("firecrawl")) return "Firecrawl";
+  if (a.includes("smartproxy")) return "SmartProxy";
+  if (tier === "api") return "API";
+  if (tier === "http") return "HTTP";
+  return "Browser";
+}
+
+const TECH_COLOUR: Record<string, string> = {
+  Apify: "text-violet-700 bg-violet-50 border-violet-200",
+  Firecrawl: "text-orange-700 bg-orange-50 border-orange-200",
+  SmartProxy: "text-sky-700 bg-sky-50 border-sky-200",
+  API: "text-emerald-700 bg-emerald-50 border-emerald-200",
+  HTTP: "text-amber-700 bg-amber-50 border-amber-200",
+  Browser: "text-rose-700 bg-rose-50 border-rose-200",
+};
 
 const COUNTRY_FLAG = (c: string) =>
   c === "US" ? "🇺🇸" : c === "AU" ? "🇦🇺" : c === "GB" ? "🇬🇧" : c === "NL" ? "🇳🇱" : "🌍";
@@ -210,14 +224,19 @@ function RetailerRow({
             <span className="font-medium text-stone-900 text-sm truncate">
               {COUNTRY_FLAG(job.retailer_country)} {job.retailer_name}
             </span>
-            <span
-              className={clsx(
-                "px-1.5 py-0.5 rounded border text-xs font-medium",
-                TIER_COLOUR[job.tier] || ""
-              )}
-            >
-              {job.tier.toUpperCase()}
-            </span>
+            {(() => {
+              const label = techLabel(job.adapter_class, job.tier);
+              return (
+                <span
+                  className={clsx(
+                    "px-1.5 py-0.5 rounded border text-xs font-medium",
+                    TECH_COLOUR[label] || ""
+                  )}
+                >
+                  {label}
+                </span>
+              );
+            })()}
             <span className={clsx("px-2 py-0.5 rounded-full text-xs font-medium", cfg.badge)}>
               {cfg.label}
               {job.status === "running" && job.started_at && (

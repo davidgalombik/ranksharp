@@ -13,6 +13,23 @@ import structlog
 
 log = structlog.get_logger()
 
+
+def _extract_img_urls(raw):
+    if not raw: return []
+    if isinstance(raw, str): return [raw]
+    if isinstance(raw, dict):
+        u = raw.get("url") or raw.get("contentUrl") or raw.get("src")
+        return [u] if u else []
+    if isinstance(raw, list):
+        out = []
+        for x in raw:
+            if isinstance(x, str): out.append(x)
+            elif isinstance(x, dict):
+                u = x.get("url") or x.get("contentUrl") or x.get("src")
+                if u: out.append(u)
+        return out
+    return []
+
 CATEGORY_URLS = [
     "https://www.worldmarket.com/category/home/bestsellers.do",  # best-seller flag auto-applied
     "https://www.worldmarket.com/category/food/food-storage.do",
@@ -146,9 +163,7 @@ class WorldMarketAdapter(BaseAdapter):
                                 price = float(str(raw).replace(",", ""))
                             except (ValueError, TypeError):
                                 pass
-                        imgs = d.get("image", [])
-                        if isinstance(imgs, str):
-                            imgs = [imgs]
+                        imgs = _extract_img_urls(d.get("image"))
                         return RawProduct(
                             url=product_url,
                             name=d.get("name", ""),
@@ -167,11 +182,31 @@ class WorldMarketAdapter(BaseAdapter):
             if not name.strip():
                 return None
 
+            imgs = await page.evaluate("""
+                () => {
+                    const selectors = [
+                        'img[src*="worldmarket"]',
+                        '.product-image-container img',
+                        '.product-detail img',
+                        '[data-testid*="product"] img',
+                        '.product-gallery img'
+                    ];
+                    for (const sel of selectors) {
+                        const found = Array.from(document.querySelectorAll(sel))
+                            .map(img => img.src || img.dataset.src || '')
+                            .filter(src => src && !src.includes('placeholder'));
+                        if (found.length) return found.slice(0, 5);
+                    }
+                    return [];
+                }
+            """)
+
             return RawProduct(
                 url=product_url,
                 name=name.strip(),
                 retailer_slug=self.RETAILER_SLUG,
                 currency="USD",
+                image_urls=imgs,
                 raw_attributes={},
             )
 

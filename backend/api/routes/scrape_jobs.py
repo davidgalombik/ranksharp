@@ -18,6 +18,7 @@ class ScrapeJobOut(BaseModel):
     retailer_slug: str
     retailer_country: str
     tier: str
+    adapter_class: str
     status: str
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
@@ -89,6 +90,7 @@ async def get_active_progress(db: AsyncSession = Depends(get_db)):
             retailer_slug=retailer.slug,
             retailer_country=retailer.country,
             tier=retailer.tier.value,
+            adapter_class=retailer.adapter_class or "",
             status=job.status.value if job else "never_run",
             started_at=job.started_at if job else None,
             finished_at=job.finished_at if job else None,
@@ -159,11 +161,44 @@ async def stop_all_scrapes(db: AsyncSession = Depends(get_db)):
 @router.post("/{job_id}/cancel")
 async def cancel_scrape_job(job_id: int, db: AsyncSession = Depends(get_db)):
     """Cancel a single pending or running scrape job."""
+    import redis as redis_lib
+    from config import settings
+    from tasks.celery_app import app as celery_app
+
     job = await db.get(ScrapeJob, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status not in (ScrapeStatus.PENDING, ScrapeStatus.RUNNING):
         raise HTTPException(status_code=400, detail="Job is not running or pending")
+
+    # Get the retailer slug so we can delete the Redis lock
+    retailer = await db.get(Retailer, job.retailer_id)
+    retailer_slug = retailer.slug if retailer else None
+
+    # 1. Revoke the active Celery task for this retailer
+    try:
+        inspect = celery_app.control.inspect(timeout=2)
+        active = inspect.active() or {}
+        reserved = inspect.reserved() or {}
+        for worker_tasks in list(active.values()) + list(reserved.values()):
+            for task in worker_tasks:
+                if "scrape" in task.get("name", ""):
+                    # Match by retailer slug in task args/kwargs
+                    task_args = str(task.get("args", "")) + str(task.get("kwargs", ""))
+                    if retailer_slug and retailer_slug in task_args:
+                        celery_app.control.revoke(task["id"], terminate=True, signal="SIGTERM")
+    except Exception:
+        pass  # Best-effort
+
+    # 2. Delete the Redis scrape lock so the retailer can be re-scraped
+    if retailer_slug:
+        try:
+            r = redis_lib.from_url(settings.celery_broker_url)
+            r.delete(f"scrape_lock:{retailer_slug}")
+        except Exception:
+            pass
+
+    # 3. Mark job as cancelled in DB
     job.status = ScrapeStatus.FAILED
     job.error_message = "Cancelled by user"
     job.finished_at = datetime.utcnow()
@@ -201,6 +236,7 @@ async def get_retailer_history(retailer_id: int, db: AsyncSession = Depends(get_
             retailer_slug=retailer.slug,
             retailer_country=retailer.country,
             tier=retailer.tier.value,
+            adapter_class=retailer.adapter_class or "",
             status=j.status.value,
             started_at=j.started_at,
             finished_at=j.finished_at,

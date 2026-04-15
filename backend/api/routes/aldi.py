@@ -34,6 +34,7 @@ ALLOWED_EXTENSIONS = {
 
 class AldiIdeaOut(BaseModel):
     id: int
+    generation: int = 1
     position: int
     name: str
     description: str
@@ -113,6 +114,8 @@ class AldiSessionDetailOut(AldiSessionOut):
     error_message: Optional[str] = None
     uploads: list[AldiUploadSummary] = []
     ideas: list[AldiIdeaOut] = []
+    generation_count: int = 1
+    latest_generation: int = 1
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -365,7 +368,11 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Session not found")
 
     uploads_sorted = sorted(sess_obj.uploads, key=lambda x: x.id)
-    ideas_sorted = sorted(sess_obj.ideas, key=lambda x: x.position)
+    ideas_sorted = sorted(sess_obj.ideas, key=lambda x: (x.generation, x.position))
+
+    generations = [i.generation for i in sess_obj.ideas] if sess_obj.ideas else [1]
+    generation_count = max(generations) if generations else 1
+    latest_generation = max(generations) if generations else 1
 
     return AldiSessionDetailOut(
         id=sess_obj.id,
@@ -403,6 +410,7 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         ideas=[
             AldiIdeaOut(
                 id=i.id,
+                generation=i.generation,
                 position=i.position,
                 name=i.name,
                 description=i.description,
@@ -413,7 +421,28 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
             )
             for i in ideas_sorted
         ],
+        generation_count=generation_count,
+        latest_generation=latest_generation,
     )
+
+
+@router.post("/sessions/{session_id}/regenerate")
+async def regenerate_session_ideas(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Trigger a new round of idea generation for an existing session (Try Again)."""
+    from database.models import AldiSession
+    sess_obj = await db.get(AldiSession, session_id)
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess_obj.status not in (AldiUploadStatus.DONE, AldiUploadStatus.FAILED):
+        raise HTTPException(status_code=409, detail="Session is still processing")
+
+    # Mark session as generating again
+    sess_obj.status = AldiUploadStatus.GENERATING
+    await db.commit()
+
+    from tasks.aldi_tasks import regenerate_aldi_session_ideas
+    task = regenerate_aldi_session_ideas.delay(session_id)
+    return {"task_id": task.id, "status": "queued", "session_id": session_id}
 
 
 @router.delete("/sessions/{session_id}")

@@ -106,6 +106,8 @@ class Product(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_best_seller: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_patent: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_new: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Processing state
     analysis_status: Mapped[ScrapeStatus] = mapped_column(SAEnum(ScrapeStatus), default=ScrapeStatus.PENDING)
@@ -122,6 +124,7 @@ class Product(Base):
     scrape_job: Mapped[Optional["ScrapeJob"]] = relationship(back_populates="products")
     attributes: Mapped[Optional["ProductAttributes"]] = relationship(back_populates="product", uselist=False)
     trend_examples: Mapped[list["TrendExample"]] = relationship(back_populates="product")
+    fragrance_trend_examples: Mapped[list["FragranceTrendExample"]] = relationship(back_populates="product")
 
 
 class ProductAttributes(Base):
@@ -142,7 +145,7 @@ class ProductAttributes(Base):
     # Text attributes (from NLP model)
     materials: Mapped[list] = mapped_column(JSON, default=list)     # ["ceramic", "linen", "rattan"]
     patterns: Mapped[list] = mapped_column(JSON, default=list)      # ["striped", "floral", "geometric"]
-    fragrance: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    fragrance: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     season: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     occasion: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     room: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -201,11 +204,13 @@ class Trend(Base):
     markets: Mapped[list] = mapped_column(JSON, default=list)           # ["US", "AU", "GB"]
     price_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # budget|mid|premium|luxury
 
+    generation: Mapped[int] = mapped_column(Integer, default=1)  # which Try Again run produced this trend
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_trend_week_start", "week_start"),
         Index("ix_trend_category", "category"),
+        Index("ix_trend_generation", "week_start", "generation"),
     )
 
     examples: Mapped[list["TrendExample"]] = relationship(back_populates="trend")
@@ -324,6 +329,7 @@ class AldiProductIdea(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     upload_id: Mapped[Optional[int]] = mapped_column(ForeignKey("aldi_uploads.id"), nullable=True)
     session_id: Mapped[Optional[int]] = mapped_column(ForeignKey("aldi_sessions.id"), nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
     position: Mapped[int] = mapped_column(Integer, default=0)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -349,6 +355,78 @@ class AldiProductIdea(Base):
     )
 
 
+class FragranceTrend(Base):
+    """An identified candle/fragrance trend."""
+    __tablename__ = "fragrance_trends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[TrendStatus] = mapped_column(SAEnum(TrendStatus), default=TrendStatus.NEW)
+
+    product_count: Mapped[int] = mapped_column(Integer, default=0)
+    retailer_count: Mapped[int] = mapped_column(Integer, default=0)
+    retailer_names: Mapped[list] = mapped_column(JSON, default=list)
+    avg_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    momentum_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    prev_trend_id: Mapped[Optional[int]] = mapped_column(ForeignKey("fragrance_trends.id"), nullable=True)
+
+    dominant_colours: Mapped[list] = mapped_column(JSON, default=list)
+    dominant_materials: Mapped[list] = mapped_column(JSON, default=list)
+    container_styles: Mapped[list] = mapped_column(JSON, default=list)
+    scent_families: Mapped[list] = mapped_column(JSON, default=list)
+    sustainability_signals: Mapped[list] = mapped_column(JSON, default=list)
+    markets: Mapped[list] = mapped_column(JSON, default=list)
+    price_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_fragrance_trend_week_start", "week_start"),
+        Index("ix_fragrance_trend_category", "category"),
+        Index("ix_fragrance_trend_generation", "week_start", "generation"),
+    )
+
+    examples: Mapped[list["FragranceTrendExample"]] = relationship(back_populates="trend")
+
+
+class FragranceTrendExample(Base):
+    """Product examples that best represent a fragrance trend."""
+    __tablename__ = "fragrance_trend_examples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trend_id: Mapped[int] = mapped_column(ForeignKey("fragrance_trends.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    relevance_score: Mapped[float] = mapped_column(Float, default=1.0)
+    is_hero: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    __table_args__ = (
+        UniqueConstraint("trend_id", "product_id"),
+    )
+
+    trend: Mapped["FragranceTrend"] = relationship(back_populates="examples")
+    product: Mapped["Product"] = relationship(back_populates="fragrance_trend_examples")
+
+
+class FragranceTrendReport(Base):
+    """Fragrance trend report metadata."""
+    __tablename__ = "fragrance_trend_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    trend_ids: Mapped[list] = mapped_column(JSON, default=list)
+    total_products_analysed: Mapped[int] = mapped_column(Integer, default=0)
+    retailers_covered: Mapped[int] = mapped_column(Integer, default=0)
+    generation_count: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class TrendReport(Base):
     """Weekly trend report metadata."""
     __tablename__ = "trend_reports"
@@ -362,4 +440,52 @@ class TrendReport(Base):
     pdf_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     total_products_analysed: Mapped[int] = mapped_column(Integer, default=0)
     retailers_covered: Mapped[int] = mapped_column(Integer, default=0)
+    generation_count: Mapped[int] = mapped_column(Integer, default=1)  # how many Try Again runs
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# ── In-store Products feature ─────────────────────────────────────────────────
+
+class InStoreStatus(str, enum.Enum):
+    PENDING = "pending"
+    ANALYSING = "analysing"
+    GENERATING = "generating"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class InStoreSession(Base):
+    __tablename__ = "instore_sessions"
+    id = mapped_column(Integer, primary_key=True)
+    name = mapped_column(String, nullable=True)
+    status = mapped_column(SAEnum(InStoreStatus, name="instorestatus"), default=InStoreStatus.PENDING, nullable=False)
+    error_message = mapped_column(Text, nullable=True)
+    trend_report = mapped_column(JSON, nullable=True)          # latest generation (backward compat)
+    generation_count = mapped_column(Integer, default=1)       # how many generations have been run
+    trend_report_all = mapped_column(JSON, default=list)       # all generations [{generation, lens, created_at, trends}]
+    created_at = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    products = relationship("InStoreProduct", back_populates="session", cascade="all, delete-orphan", lazy="select")
+
+
+class InStoreProduct(Base):
+    __tablename__ = "instore_products"
+    id = mapped_column(Integer, primary_key=True)
+    session_id = mapped_column(Integer, ForeignKey("instore_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    filename = mapped_column(String, nullable=False)
+    file_path = mapped_column(String, nullable=False)
+    file_type = mapped_column(String, nullable=False)
+    status = mapped_column(SAEnum(InStoreStatus, name="instorestatus"), default=InStoreStatus.PENDING, nullable=False)
+    error_message = mapped_column(Text, nullable=True)
+    product_name = mapped_column(String, nullable=True)
+    category = mapped_column(String, nullable=True)
+    price = mapped_column(String, nullable=True)
+    colours = mapped_column(JSON, nullable=True)
+    materials = mapped_column(JSON, nullable=True)
+    style_tags = mapped_column(JSON, nullable=True)
+    patterns = mapped_column(JSON, nullable=True)
+    mood = mapped_column(JSON, nullable=True)
+    raw_analysis = mapped_column(JSON, nullable=True)
+    created_at = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    session = relationship("InStoreSession", back_populates="products")

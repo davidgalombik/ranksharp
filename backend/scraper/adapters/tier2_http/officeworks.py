@@ -27,6 +27,13 @@ CATEGORY_PATHS = [
     "/shop/officeworks/c/home-office",
 ]
 
+CATEGORY_LABELS: dict[str, str] = {
+    "/shop/officeworks/c/home-organisation": "Home Organisation",
+    "/shop/officeworks/c/desk-organisation": "Desk Organisation",
+    "/shop/officeworks/c/storage-filing": "Storage & Filing",
+    "/shop/officeworks/c/home-office": "Home Office",
+}
+
 
 class OfficeworksAdapter(BaseAdapter):
     RETAILER_SLUG = "officeworks"
@@ -34,6 +41,7 @@ class OfficeworksAdapter(BaseAdapter):
     def __init__(self, rc):
         super().__init__(rc)
         self._client = None
+        self._cat_cache: dict[str, str] = {}
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
@@ -68,6 +76,11 @@ class OfficeworksAdapter(BaseAdapter):
                 if full not in urls:
                     urls.append(full)
                     added += 1
+                    # Derive category label from the category URL path
+                    for path, label in CATEGORY_LABELS.items():
+                        if path in category_url:
+                            self._cat_cache.setdefault(full, label)
+                            break
             if added == 0:
                 break
             if not soup.select_one("[aria-label='Next page'], .pagination-next"):
@@ -107,6 +120,7 @@ class OfficeworksAdapter(BaseAdapter):
                         description=d.get("description"),
                         price=price,
                         currency="AUD",
+                        category=self._cat_cache.get(url),
                         image_urls=imgs,
                         raw_attributes={},
                     )
@@ -121,5 +135,6 @@ class OfficeworksAdapter(BaseAdapter):
             name=name_el.get_text(strip=True),
             retailer_slug=self.RETAILER_SLUG,
             currency="AUD",
+            category=self._cat_cache.get(url),
             raw_attributes={},
         )

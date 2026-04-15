@@ -34,10 +34,13 @@ class ShopifyAdapter(BaseAdapter):
     """
     RETAILER_SLUG = ""
     COLLECTION_HANDLES: list[str] = []  # override to scope to specific collections
+    EXCLUDED_CATEGORIES: set[str] = set()  # override to skip unwanted product categories
 
     def __init__(self, retailer_config: dict):
         super().__init__(retailer_config)
         self._client: Optional[httpx.AsyncClient] = None
+        # Maps product handle → collection label (e.g. "storage" → "Storage")
+        self._handle_to_collection: dict[str, str] = {}
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
@@ -65,6 +68,12 @@ class ShopifyAdapter(BaseAdapter):
         Paginate through Shopify's products.json endpoint using cursor-based pagination.
         Returns a list of synthetic shopify:// URIs containing the product handle + base_url.
         """
+        # Derive a human-readable label from the collection handle in the URL
+        # e.g. ".../collections/home-decor/products.json" → "Home Decor"
+        import re as _re
+        coll_match = _re.search(r'/collections/([^/]+)/products', category_url)
+        coll_label = coll_match.group(1).replace("-", " ").title() if coll_match else None
+
         handles = []
         url = category_url
         params: dict = {"limit": 250}
@@ -84,6 +93,9 @@ class ShopifyAdapter(BaseAdapter):
                 handle = p.get("handle")
                 if handle:
                     handles.append(f"shopify://{self.base_url.rstrip('/')}/{handle}")
+                    # Store by handle — _parse_shopify_product looks up by handle
+                    if coll_label and handle not in self._handle_to_collection:
+                        self._handle_to_collection[handle] = coll_label
 
             # Shopify cursor-based pagination via Link header
             link_header = resp.headers.get("Link", "")
@@ -117,11 +129,19 @@ class ShopifyAdapter(BaseAdapter):
         if not p:
             return None
 
-        return self._parse_shopify_product(p, base)
+        return self._parse_shopify_product(p, base)  # may return None if category excluded
 
-    def _parse_shopify_product(self, p: dict, base_url: str) -> RawProduct:
+    def _parse_shopify_product(self, p: dict, base_url: str) -> Optional[RawProduct]:
         handle = p.get("handle", "")
         product_url = f"{base_url}/products/{handle}"
+        # Collection label is more reliable than Shopify's product_type (often blank/generic)
+        category = self._handle_to_collection.get(handle) or p.get("product_type") or None
+
+        # Skip categories excluded by this adapter
+        if self.EXCLUDED_CATEGORIES and category:
+            if category.strip().lower() in {c.lower() for c in self.EXCLUDED_CATEGORIES}:
+                log.debug("shopify_category_excluded", handle=handle, category=category)
+                return None
 
         # Images
         images = [img.get("src", "") for img in p.get("images", []) if img.get("src")]
@@ -155,7 +175,7 @@ class ShopifyAdapter(BaseAdapter):
             description=description,
             price=price,
             currency="USD",
-            category=p.get("product_type"),
+            category=category,
             brand=p.get("vendor"),
             image_urls=images,
             raw_attributes={

@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import pathlib
+import random
 import structlog
 from typing import Optional
 from anthropic import AsyncAnthropic
@@ -37,10 +38,74 @@ If text labels or section headings appear (e.g. 'Key Prints — US Only', 'Key M
 Be specific and commercially actionable.
 Return ONLY the JSON object, no prose, no markdown fences."""
 
+# ---------------------------------------------------------------------------
+# Analytical lenses — one chosen at random each generation run
+# ---------------------------------------------------------------------------
+
+IDEA_LENSES = [
+    (
+        "DESIGN & AESTHETICS: Lead with the visual and design story. Focus on products where "
+        "the look and feel is the hero — colour, surface treatment, shape, print. Each idea "
+        "should feel genuinely on-trend and visually distinctive. Prioritise ideas that would "
+        "photograph well and drive impulse purchase based on appearance alone."
+    ),
+    (
+        "FUNCTIONAL & LIFESTYLE FIT: Lead with what each product DOES for the customer and "
+        "how it fits into their daily life. Focus on functional benefits, multi-use versatility, "
+        "storage solutions, and lifestyle utility. Prioritise ideas that solve a real problem "
+        "or make a daily ritual easier, more organised, or more enjoyable."
+    ),
+    (
+        "MATERIALS & COMPOSITION: Lead with material choice and construction. Consider primary "
+        "materials (solid wood, MDF, metal, rattan, concrete, resin, recycled materials), "
+        "material combinations (e.g. wood + metal, cane + linen), surface finish direction "
+        "(matte, gloss, brushed, ribbed, woven, lacquered), and sustainability credentials "
+        "(FSC certified, recycled content, natural/biodegradable). Prioritise ideas where "
+        "the material story is the key differentiator at Aldi's price point."
+    ),
+    (
+        "COLOUR & PATTERN: Lead with colour palette and surface pattern. Consider dominant "
+        "hues and tonal shifts (warm neutrals vs. cool greys, earthy terracottas, deep greens), "
+        "mono vs. two-tone vs. pattern, colour blocking or contrast detailing, and pattern "
+        "types (geometric, organic, textural, none). Prioritise ideas where a strong colour "
+        "or pattern story makes the product stand out on shelf."
+    ),
+    (
+        "TEXTURE & TACTILITY: Lead with how products feel and look up close. Consider surface "
+        "texture (smooth, fluted, hammered, woven, embossed, raw), visual texture vs. physical "
+        "texture, and grain direction and visibility in natural materials. Prioritise ideas "
+        "where tactile richness creates a premium perception at an accessible price."
+    ),
+    (
+        "HARDWARE & DETAILING: Lead with the finishing details that elevate a product. Consider "
+        "handle and knob styles (fluted, tab pull, finger pull, integrated, no hardware), hinge "
+        "and joint visibility (exposed vs. concealed), decorative vs. functional detailing, and "
+        "edge profiles (rounded, chamfered, sharp, lipped). Prioritise ideas where considered "
+        "detailing creates a quality feel that punches above Aldi's typical price tier."
+    ),
+    (
+        "FUNCTIONAL FEATURES: Lead with practical innovation and internal functionality. Consider "
+        "internal organisation (dividers, inserts, removable trays, adjustable shelving), lid "
+        "types (hinged, removable, sliding, open top), ventilation or visibility (open, slatted, "
+        "perforated, solid, glazed), and weight and portability (handles, wheels, lightweight "
+        "construction). Prioritise ideas where a smart functional feature solves a real problem "
+        "and justifies the purchase."
+    ),
+    (
+        "SEASONAL & OCCASION FIT: Lead with timing and occasion relevance. Focus on products "
+        "that are perfectly timed for an upcoming season, holiday, or consumer occasion. "
+        "Prioritise ideas with strong gifting potential, seasonal shelf appeal, or that tap "
+        "into a moment consumers are actively shopping for right now."
+    ),
+]
+
 IDEAS_PROMPT_TEMPLATE = """You are a product development consultant for Aldi's home and general merchandise buying team.
 Aldi's product philosophy: excellent quality at market-beating value prices, private-label focus,
 limited SKU range, seasonal "Aldi Finds" format. Aldi customers love value-for-money finds that
 feel on-trend without the premium price tag.
+
+ANALYTICAL LENSES — apply ALL of the following simultaneously:
+{lens}
 
 TREND ANALYSIS FROM UPLOADED MOOD BOARD:
 {trend_json}
@@ -48,8 +113,10 @@ TREND ANALYSIS FROM UPLOADED MOOD BOARD:
 SIMILAR PRODUCTS CURRENTLY IN THE MARKET (for inspiration and reference):
 {products_summary}
 
-Using the trend insights above and drawing inspiration from the real market products,
+{exclusion_block}Using the trend insights above and drawing inspiration from the real market products,
 generate exactly {n} specific product ideas that Aldi could develop as private-label seasonal items.
+Honour the analytical focus above by weighting your ideas toward that dimension, while still ensuring
+variety across product categories.
 
 Return ONLY valid JSON — an array of exactly {n} objects:
 [
@@ -60,11 +127,13 @@ Return ONLY valid JSON — an array of exactly {n} objects:
     "category": "<home category, e.g. 'Kitchen Textiles'>",
     "price_point": "<realistic Aldi price range, e.g. '$6.99–9.99'>",
     "rationale": "<2 sentences explaining why this fits the trend and will appeal to Aldi's customer>",
-    "inspired_by_product_ids": [<integer product IDs from the market data above that inspired this idea — include 1-3 IDs>]
+    "inspired_by_product_ids": [<integer product IDs from the market data above that inspired this idea — include at least 3 IDs, ideally 3–5>]
   }}
 ]
 
 Ensure variety across product categories. Make names specific and commercial, not generic.
+Each idea must have a minimum of 3 inspired_by_product_ids — never fewer.
+Each idea must reference DIFFERENT inspired_by_product_ids — never use the same product ID across multiple ideas.
 Return ONLY the JSON array, no prose, no markdown fences."""
 
 
@@ -101,25 +170,58 @@ class MoodBoardAnalyser:
         self,
         trend_data: dict,
         similar_products: list[dict],
-        n: int = 8,
+        n: int = 10,
+        previous_idea_names: list[str] | None = None,
     ) -> Optional[list[dict]]:
         """
         Generate Aldi product ideas based on trend analysis + similar DB products.
+
+        Args:
+            trend_data: Extracted trend attributes from mood board analysis.
+            similar_products: Pool of similar products from the DB (pass top-50,
+                              this method randomly samples 20 for variety).
+            n: Number of ideas to generate (default 10).
+            previous_idea_names: Names of ideas already generated for this
+                                  upload/session — Claude will avoid repeating them.
         """
-        if similar_products:
+        # Randomly sample 20 from the provided pool for variety across regenerations
+        pool = similar_products[:125]  # cap defensively
+        sample = random.sample(pool, min(20, len(pool))) if len(pool) > 20 else pool
+
+        if sample:
             products_summary = "\n".join(
                 f"[ID:{p['id']}] {p['name']} | {p['retailer_name']} | "
                 f"${p.get('price') or '?'} | "
                 f"Colours: {', '.join((p.get('colours') or [])[:3])} | "
                 f"Materials: {', '.join((p.get('materials') or [])[:3])}"
-                for p in similar_products
+                for p in sample
             )
         else:
             products_summary = "No similar products found in database yet — use trend insights only."
 
+        # All analytical lenses applied simultaneously
+        lens = "\n".join(f"{i}. {l}" for i, l in enumerate(IDEA_LENSES, 1))
+
+        # Exclusion block — avoid repeating ideas from previous generations
+        if previous_idea_names:
+            exclusion_lines = [
+                "PREVIOUSLY GENERATED IDEAS — DO NOT REPEAT THESE:",
+                "The following ideas were already generated for this mood board. "
+                "You MUST produce completely different product ideas this time — "
+                "different product types, different names, different angles:",
+            ]
+            for name in previous_idea_names:
+                exclusion_lines.append(f"- {name}")
+            exclusion_lines.append("")
+            exclusion_block = "\n".join(exclusion_lines) + "\n"
+        else:
+            exclusion_block = ""
+
         prompt = IDEAS_PROMPT_TEMPLATE.format(
+            lens=lens,
             trend_json=json.dumps(trend_data, indent=2),
             products_summary=products_summary,
+            exclusion_block=exclusion_block,
             n=n,
         )
 

@@ -24,12 +24,16 @@ interface Product {
   season: string | null;
   room: string | null;
   is_best_seller: boolean;
+  has_patent: boolean;
+  is_new: boolean;
   last_seen_at: string;
+  first_seen_at: string | null;
 }
 
 const SEASONS = ["spring", "summer", "autumn", "winter", "all-season"];
 const ROOMS = ["kitchen", "living room", "bedroom", "bathroom", "dining room", "office", "outdoor"];
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
+
 
 function ProductCard({ product }: { product: Product }) {
   const symbol = CURRENCIES[product.currency] || product.currency;
@@ -52,9 +56,19 @@ function ProductCard({ product }: { product: Product }) {
           <div className="w-full h-full flex items-center justify-center text-stone-300 text-4xl">⌂</div>
         )}
         <div className="absolute top-2 left-2 flex flex-col gap-1">
+          {product.is_new && (
+            <span className="px-2 py-0.5 bg-emerald-500 text-white rounded-full text-xs font-semibold shadow-sm">
+              ✦ New
+            </span>
+          )}
           {product.is_best_seller && (
             <span className="px-2 py-0.5 bg-amber-400 text-amber-900 rounded-full text-xs font-semibold shadow-sm">
               ★ Best Seller
+            </span>
+          )}
+          {product.has_patent && (
+            <span className="px-2 py-0.5 bg-sky-100 text-sky-800 rounded-full text-xs font-semibold shadow-sm border border-sky-200">
+              ⚙ Patented
             </span>
           )}
           {product.season && product.season !== "all-season" && (
@@ -75,6 +89,13 @@ function ProductCard({ product }: { product: Product }) {
             {symbol}{product.price.toFixed(2)}
           </p>
         )}
+
+        {/* Last scraped */}
+        <p className="text-xs text-stone-400">
+          {product.last_seen_at
+            ? new Date(product.last_seen_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+            : "—"}
+        </p>
 
         {/* Colour swatches */}
         {product.colours.length > 0 && (
@@ -122,12 +143,14 @@ export default function ProductsPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [retailer, setRetailer] = useState("");
+  const [category, setCategory] = useState("");
   const [season, setSeason] = useState("");
   const [room, setRoom] = useState("");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [bestSellerOnly, setBestSellerOnly] = useState(false);
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
+  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
 
   // Debounce search
   useEffect(() => {
@@ -143,11 +166,25 @@ export default function ProductsPage() {
       .catch(() => {});
   }, []);
 
+  // When retailer changes, load its categories and reset category filter
+  useEffect(() => {
+    setCategory("");
+    if (!retailer) {
+      setAvailableCategories([]);
+      return;
+    }
+    fetch(`${API_BASE}/api/retailers/${retailer}/categories`)
+      .then((r) => r.json())
+      .then((cats: string[]) => setAvailableCategories(cats))
+      .catch(() => setAvailableCategories([]));
+  }, [retailer]);
+
   const fetchProducts = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (retailer) params.set("retailer", retailer);
+    if (category) params.set("category", category);
     if (season) params.set("season", season);
     if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
@@ -158,34 +195,33 @@ export default function ProductsPage() {
 
     try {
       const res = await fetch(`${API_BASE}/api/products/?${params}`);
-      const data: Product[] = await res.json();
-      setProducts(data);
-      setTotal(data.length === PAGE_SIZE ? (page + 2) * PAGE_SIZE : page * PAGE_SIZE + data.length);
+      const data: { total: number; items: Product[] } = await res.json();
+      setProducts(data.items);
+      setTotal(data.total);
     } catch {
       setProducts([]);
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, season, room, minPrice, maxPrice, bestSellerOnly, page]);
+  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly, page]);
 
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, retailer, season, room, minPrice, maxPrice, bestSellerOnly]);
+  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly]);
 
   useEffect(() => {
     fetchProducts();
   }, [fetchProducts]);
 
-  const hasFilters = debouncedSearch || retailer || season || room || minPrice || maxPrice || bestSellerOnly;
+  const hasFilters = debouncedSearch || retailer || category || season || room || minPrice || maxPrice || bestSellerOnly;
 
   return (
     <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1 className="text-2xl font-bold text-stone-900">Products</h1>
+        <h1 className="text-2xl font-bold text-stone-900">Current Products</h1>
         <p className="text-sm text-stone-500">
-          {loading ? "Loading…" : `${products.length} shown`}
-          {total > PAGE_SIZE && ` of ${total}+`}
+          {loading ? "Loading…" : `${products.length} of ${total.toLocaleString()}`}
         </p>
       </div>
 
@@ -214,6 +250,20 @@ export default function ProductsPage() {
               <option key={r.slug} value={r.slug}>{r.name}</option>
             ))}
           </select>
+
+          {/* Category — only shown when a retailer with multiple categories is selected */}
+          {availableCategories.length > 1 && (
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+            >
+              <option value="">All categories</option>
+              {availableCategories.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          )}
 
           {/* Season */}
           <select
@@ -275,7 +325,7 @@ export default function ProductsPage() {
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); }}
+            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -320,7 +370,7 @@ export default function ProductsPage() {
             <>
               <p className="font-medium">No products match your filters</p>
               <button
-                onClick={() => { setSearch(""); setRetailer(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); }}
+                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); }}
                 className="mt-2 text-sm text-stone-600 underline hover:text-stone-900"
               >
                 Clear filters

@@ -2,7 +2,7 @@
 from datetime import datetime, date
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.db import get_db
@@ -34,6 +34,7 @@ class TrendExampleOut(BaseModel):
 class TrendOut(BaseModel):
     id: int
     week_start: datetime
+    generation: int = 1
     name: str
     description: str
     rationale: str
@@ -61,15 +62,41 @@ async def list_trends(
     week_start: Optional[date] = None,
     category: Optional[str] = None,
     status: Optional[TrendStatus] = None,
+    generation: Optional[int] = None,
     limit: int = Query(default=20, le=100),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    """List trends, optionally filtered by week, category, or status."""
-    q = select(Trend).order_by(desc(Trend.week_start), desc(Trend.product_count))
+    """List trends, optionally filtered by week, category, status, or generation.
 
+    If generation is not supplied the latest generation for each week is returned.
+    """
+    effective_week: Optional[datetime] = None
     if week_start:
-        q = q.where(Trend.week_start == datetime.combine(week_start, datetime.min.time()))
+        effective_week = datetime.combine(week_start, datetime.min.time())
+
+    # Resolve which generation to show
+    if generation is None:
+        # Find the max generation for the target week (or the most-recent week overall)
+        gen_q = select(func.max(Trend.generation))
+        if effective_week:
+            gen_q = gen_q.where(Trend.week_start == effective_week)
+        else:
+            # Most recent week
+            latest_week_q = select(func.max(Trend.week_start))
+            latest_week_result = await db.execute(latest_week_q)
+            latest_week = latest_week_result.scalar_one_or_none()
+            if latest_week:
+                gen_q = gen_q.where(Trend.week_start == latest_week)
+                effective_week = latest_week
+        gen_result = await db.execute(gen_q)
+        generation = gen_result.scalar_one_or_none() or 1
+
+    q = select(Trend).order_by(desc(Trend.week_start), desc(Trend.product_count))
+    q = q.where(Trend.generation == generation)
+
+    if effective_week:
+        q = q.where(Trend.week_start == effective_week)
     if category:
         q = q.where(Trend.category == category)
     if status:
@@ -122,13 +149,23 @@ async def get_trend(trend_id: int, db: AsyncSession = Depends(get_db)):
     return await _build_trend_out(trend, db, max_examples=20)
 
 
-@router.get("/weeks/", response_model=list[str])
+class WeekInfo(BaseModel):
+    week: str
+    generation_count: int
+
+
+@router.get("/weeks/", response_model=list[WeekInfo])
 async def list_weeks(db: AsyncSession = Depends(get_db)):
-    """List all weeks with trend data."""
+    """List all weeks with trend data, including generation count per week."""
     result = await db.execute(
-        select(Trend.week_start).distinct().order_by(desc(Trend.week_start))
+        select(Trend.week_start, func.max(Trend.generation).label("gen_count"))
+        .group_by(Trend.week_start)
+        .order_by(desc(Trend.week_start))
     )
-    return [str(r.date()) for r in result.scalars().all()]
+    return [
+        WeekInfo(week=str(row.week_start.date()), generation_count=row.gen_count)
+        for row in result.all()
+    ]
 
 
 async def _build_trend_out(
@@ -166,6 +203,7 @@ async def _build_trend_out(
     return TrendOut(
         id=trend.id,
         week_start=trend.week_start,
+        generation=trend.generation,
         name=trend.name,
         description=trend.description,
         rationale=trend.rationale,
