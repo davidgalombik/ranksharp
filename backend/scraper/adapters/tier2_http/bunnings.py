@@ -95,7 +95,7 @@ class BunningsAdapter(BaseAdapter):
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
-            headers=HEADERS, follow_redirects=True, timeout=30,
+            headers=HEADERS, follow_redirects=True, timeout=60,
             proxy=self._build_proxy(),
         )
 
