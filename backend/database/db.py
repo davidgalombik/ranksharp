@@ -60,6 +60,8 @@ async def init_db():
              _idx("ix_product_is_best_seller")),
             ("ALTER TABLE products ADD COLUMN IF NOT EXISTS has_patent BOOLEAN DEFAULT FALSE",
              _col("products", "has_patent")),
+            ("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_new BOOLEAN DEFAULT TRUE",
+             _col("products", "is_new")),
             ("ALTER TABLE aldi_uploads ADD COLUMN IF NOT EXISTS mood_descriptors JSONB DEFAULT '[]'",
              _col("aldi_uploads", "mood_descriptors")),
             ("ALTER TABLE aldi_uploads ADD COLUMN IF NOT EXISTS raw_analysis JSONB DEFAULT '{}'",
@@ -86,6 +88,12 @@ async def init_db():
              _idx("ix_fragrance_trend_week_start")),
             "CREATE TABLE IF NOT EXISTS fragrance_trend_examples (id SERIAL PRIMARY KEY, trend_id INTEGER NOT NULL REFERENCES fragrance_trends(id), product_id INTEGER NOT NULL REFERENCES products(id), relevance_score FLOAT DEFAULT 1.0, is_hero BOOLEAN DEFAULT FALSE, UNIQUE(trend_id, product_id))",
             "CREATE TABLE IF NOT EXISTS fragrance_trend_reports (id SERIAL PRIMARY KEY, week_start TIMESTAMP NOT NULL UNIQUE, title VARCHAR(500) NOT NULL, summary TEXT NOT NULL, trend_ids JSONB DEFAULT '[]', total_products_analysed INTEGER DEFAULT 0, retailers_covered INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())",
+            ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS generation INTEGER DEFAULT 1",
+             _col("fragrance_trends", "generation")),
+            ("CREATE INDEX IF NOT EXISTS ix_fragrance_trend_generation ON fragrance_trends (week_start, generation)",
+             _idx("ix_fragrance_trend_generation")),
+            ("ALTER TABLE fragrance_trend_reports ADD COLUMN IF NOT EXISTS generation_count INTEGER DEFAULT 1",
+             _col("fragrance_trend_reports", "generation_count")),
         ]
         for item in migrations:
             if isinstance(item, tuple):
