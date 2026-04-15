@@ -83,6 +83,7 @@ def _extract_article_images(article_tag) -> list[str]:
 
 class BunningsAdapter(BaseAdapter):
     RETAILER_SLUG = "bunnings"
+    REQUIRES_PROXY = True  # Bunnings blocks cloud IPs — route via residential proxy
 
     def __init__(self, rc):
         super().__init__(rc)
@@ -94,7 +95,8 @@ class BunningsAdapter(BaseAdapter):
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
-            headers=HEADERS, follow_redirects=True, timeout=30
+            headers=HEADERS, follow_redirects=True, timeout=30,
+            proxy=self._build_proxy(),
         )
 
     async def after_scrape(self):
