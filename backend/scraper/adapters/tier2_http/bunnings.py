@@ -83,7 +83,7 @@ def _extract_article_images(article_tag) -> list[str]:
 
 class BunningsAdapter(BaseAdapter):
     RETAILER_SLUG = "bunnings"
-    REQUIRES_PROXY = True  # Bunnings blocks cloud IPs — route via residential proxy
+    REQUIRES_PROXY = False  # Test: try direct connection first
 
     def __init__(self, rc):
         super().__init__(rc)
