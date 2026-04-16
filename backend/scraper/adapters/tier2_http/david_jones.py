@@ -49,6 +49,7 @@ _BATCH = 10
 
 class DavidJonesAdapter(BaseAdapter):
     RETAILER_SLUG = "david-jones"
+    REQUIRES_PROXY = True  # DJ serves bot-detection page to cloud IPs
 
     def __init__(self, rc):
         super().__init__(rc)
@@ -57,7 +58,8 @@ class DavidJonesAdapter(BaseAdapter):
 
     async def before_scrape(self):
         self._client = httpx.AsyncClient(
-            headers=HEADERS, follow_redirects=True, timeout=30
+            headers=HEADERS, follow_redirects=True, timeout=30,
+            proxy=self._build_proxy(),
         )
 
     async def after_scrape(self):
