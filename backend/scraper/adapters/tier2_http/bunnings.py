@@ -77,7 +77,7 @@ class BunningsAdapter(ScrapingAPIAdapter):
         cat_label = CATEGORY_LABELS.get(path, path.rstrip("/").split("/")[-1].replace("-", " ").title())
 
         urls = []
-        for page in range(1, 6):
+        for page in range(1, 3):  # Cap at 2 pages — Scraping API is ~1min/page
             page_url = f"{category_url}?page={page}" if page > 1 else category_url
             html = await self._fetch_rendered(page_url, country="AU")
             if not html:
