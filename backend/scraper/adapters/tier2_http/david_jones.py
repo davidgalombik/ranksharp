@@ -1,22 +1,21 @@
 """
-David Jones AU adapter (davidjones.com) — Plain HTTP, static HTML.
+David Jones AU adapter (davidjones.com) — Smartproxy Universal Scraping API.
 
-David Jones is a Next.js SPA, but:
-  - Category listing pages embed ~22 product links in static HTML per page
-  - Individual product pages embed full ProductGroup JSON-LD in static HTML
-  - Pagination works via ?page=N query param
+David Jones serves a bot-detection page (200 OK, 0 products) to both cloud
+datacenter IPs and residential proxy IPs. The Universal Scraping API handles
+full JS rendering on residential IPs with bot bypass.
 
 Strategy:
-  1. Paginate each category URL via plain HTTP, extract product links from HTML
-  2. Fetch each product page for ProductGroup JSON-LD (name, SKU, price, images, category)
-  3. ProductGroup has magnify-size images (productimages/magnify/...) — no Playwright needed
+  1. Fetch each category page via Scraping API, extract product links from HTML
+  2. Fetch each product page via Scraping API for ProductGroup JSON-LD
+  3. Pagination via ?page=N, capped at 3 pages per category
 """
 import re
 import asyncio
 import json
-import httpx
 from typing import Optional, AsyncIterator
-from scraper.base_adapter import BaseAdapter, RawProduct
+from scraper.scraping_api_adapter import ScrapingAPIAdapter
+from scraper.base_adapter import RawProduct
 
 BASE_URL = "https://www.davidjones.com"
 
@@ -25,63 +24,37 @@ CATEGORY_URLS = [
     ("https://www.davidjones.com/home/dining", "Dining"),
     ("https://www.davidjones.com/home/living", "Living"),
     ("https://www.davidjones.com/home/kitchen/storage-organisation", "Kitchen Storage"),
-    ("https://www.davidjones.com/home/new-in", "New In"),  # scoped to home department
+    ("https://www.davidjones.com/home/new-in", "New In"),
 ]
 
-# DJ category segments worth keeping (from ProductGroup category breadcrumb)
 _INCLUDE_SEGMENTS = {
     "kitchen", "dining", "living", "home", "homewares", "cookware",
     "bakeware", "storage", "tableware", "glassware", "entertaining",
     "candles", "fragrances", "decor", "vases", "linen",
 }
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-AU,en;q=0.9",
-}
-
 _PRODUCT_PATH_RE = re.compile(r'/product/[a-z0-9-]+-\d+')
-_BATCH = 10
+_BATCH = 5  # Reduced batch size — Scraping API is slow
 
 
-class DavidJonesAdapter(BaseAdapter):
+class DavidJonesAdapter(ScrapingAPIAdapter):
     RETAILER_SLUG = "david-jones"
-    REQUIRES_PROXY = True  # DJ serves bot-detection page to cloud IPs
 
     def __init__(self, rc):
         super().__init__(rc)
-        self._client: Optional[httpx.AsyncClient] = None
         self._cat_cache: dict[str, str] = {}
 
-    async def before_scrape(self):
-        self._client = httpx.AsyncClient(
-            headers=HEADERS, follow_redirects=True, timeout=30,
-            proxy=self._build_proxy(),
-        )
-
-    async def after_scrape(self):
-        if self._client:
-            await self._client.aclose()
-
     async def _get_product_urls_for_category(self, cat_url: str, label: str) -> list[str]:
-        """Paginate through a DJ category page extracting product links from static HTML."""
         seen: set[str] = set()
         urls: list[str] = []
 
-        for page in range(1, 60):  # max ~60 pages (~1320 products per category)
+        for page in range(1, 4):  # Max 3 pages per category
             url = f"{cat_url}?page={page}" if page > 1 else cat_url
-            try:
-                resp = await self._client.get(url)
-                if resp.status_code != 200:
-                    break
-            except Exception as exc:
-                self.log.warning("dj_category_fetch_error", url=url, error=str(exc))
+            html = await self._fetch_rendered(url, country="AU")
+            if not html:
                 break
 
-            paths = _PRODUCT_PATH_RE.findall(resp.text)
+            paths = _PRODUCT_PATH_RE.findall(html)
             added = 0
             for path in dict.fromkeys(paths):
                 full = BASE_URL + path
@@ -98,17 +71,12 @@ class DavidJonesAdapter(BaseAdapter):
         return urls
 
     async def _fetch_product(self, url: str) -> Optional[RawProduct]:
-        """Fetch a product page and extract ProductGroup JSON-LD."""
-        try:
-            resp = await self._client.get(url)
-            if resp.status_code != 200:
-                return None
-        except Exception as exc:
-            self.log.warning("dj_product_fetch_error", url=url, error=str(exc))
+        html = await self._fetch_rendered(url, country="AU")
+        if not html:
             return None
 
         for match in re.finditer(
-            r'type="application/ld\+json">([\s\S]*?)</script>', resp.text
+            r'type="application/ld\+json">([\s\S]*?)</script>', html
         ):
             try:
                 d = json.loads(match.group(1).strip())
@@ -122,7 +90,6 @@ class DavidJonesAdapter(BaseAdapter):
             if not name:
                 continue
 
-            # Price from first variant's offers
             price: Optional[float] = None
             for variant in d.get("hasVariant", []):
                 offers = variant.get("offers", {})
@@ -136,24 +103,18 @@ class DavidJonesAdapter(BaseAdapter):
                     except (ValueError, TypeError):
                         pass
 
-            # SKU from first variant
             variants = d.get("hasVariant", [])
             sku = variants[0].get("sku") if variants else None
             external_id = d.get("productID")
 
-            # Images — ProductGroup includes thumb/medium/magnify for each shot.
-            # Use magnify (largest) and deduplicate, capping at 5.
             all_imgs = d.get("image", [])
             if isinstance(all_imgs, str):
                 all_imgs = [all_imgs]
             magnify_imgs = [i for i in all_imgs if "/magnify/" in i]
             img_urls = (magnify_imgs or all_imgs)[:5]
 
-            # Category — use the label from the category page we came from
             cat_label = self._cat_cache.get(url)
             if not cat_label:
-                # Fallback: parse DJ's breadcrumb category string
-                # e.g. "Brand > Joseph Joseph > Kitchen > Food Preparation"
                 dj_cat = d.get("category", "")
                 for seg in [s.strip() for s in dj_cat.split(">")]:
                     if seg.lower() in _INCLUDE_SEGMENTS:
