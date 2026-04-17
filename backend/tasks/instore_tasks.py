@@ -19,8 +19,14 @@ def _get_session():
 
 
 @app.task(bind=True, max_retries=2)
-def analyse_instore_product(self, product_id: int):
-    """Analyse a single in-store product photo via Claude Vision."""
+def analyse_instore_product(self, product_id: int, file_b64: str | None = None):
+    """Analyse a single in-store product photo via Claude Vision.
+
+    If `file_b64` is supplied, the image bytes are decoded and analysed
+    directly. This avoids requiring a shared filesystem between the API
+    container (where the file was originally written) and the worker
+    container. Falls back to reading from disk if no bytes were passed.
+    """
     db = _get_session()
     try:
         product = db.get(InStoreProduct, product_id)
@@ -31,8 +37,13 @@ def analyse_instore_product(self, product_id: int):
         db.commit()
 
         from analysis.instore_vision import InStoreProductAnalyser
+        import base64 as _b64
         analyser = InStoreProductAnalyser()
-        result = asyncio.run(analyser.analyse_product_photo(product.file_path, product.file_type))
+        if file_b64:
+            raw_bytes = _b64.b64decode(file_b64)
+            result = asyncio.run(analyser.analyse_product_bytes(raw_bytes, product.file_type))
+        else:
+            result = asyncio.run(analyser.analyse_product_photo(product.file_path, product.file_type))
 
         if result:
             product.product_name = result.get("product_name")

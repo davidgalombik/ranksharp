@@ -54,6 +54,7 @@ async def create_session(
     await db.flush()
 
     products = []
+    product_bytes: list[bytes] = []
     for file in files:
         content_type = file.content_type or ""
         file_type = ALLOWED_CONTENT_TYPES.get(content_type)
@@ -80,6 +81,7 @@ async def create_session(
         )
         db.add(product)
         products.append(product)
+        product_bytes.append(contents)
 
     if not products:
         await db.rollback()
@@ -91,9 +93,12 @@ async def create_session(
     for p in products:
         await db.refresh(p)
 
-    # Dispatch analysis tasks
-    for p in products:
-        analyse_instore_product.delay(p.id)
+    # Dispatch analysis tasks — pass raw bytes inline so the worker doesn't
+    # need to share a filesystem with the API container (Railway services
+    # have isolated disks by default).
+    import base64 as _b64
+    for p, raw in zip(products, product_bytes):
+        analyse_instore_product.delay(p.id, file_b64=_b64.b64encode(raw).decode())
 
     return {"id": session.id, "product_count": len(products), "status": "pending"}
 

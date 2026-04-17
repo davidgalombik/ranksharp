@@ -138,17 +138,14 @@ class InStoreProductAnalyser:
             log.warning("instore_trend_report_failed", error=str(e))
             return None
 
-    def _load_content_blocks(self, file_path: str, file_type: str) -> list:
+    def _load_content_blocks_from_bytes(self, data: bytes, file_type: str) -> list:
         try:
-            data = Path(file_path).read_bytes()
             if file_type in ("jpeg", "jpg"):
-                media = "image/jpeg"
                 b64 = base64.standard_b64encode(data).decode()
-                return [{"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}]
+                return [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}}]
             elif file_type == "png":
-                media = "image/png"
                 b64 = base64.standard_b64encode(data).decode()
-                return [{"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}]
+                return [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}]
             elif file_type == "heic":
                 # Convert HEIC → JPEG for Claude Vision
                 import io
@@ -175,9 +172,37 @@ class InStoreProductAnalyser:
                 except Exception:
                     return []
         except Exception as e:
-            log.warning("instore_load_failed", file=file_path, error=str(e))
+            log.warning("instore_bytes_decode_failed", error=str(e))
             return []
         return []
+
+    def _load_content_blocks(self, file_path: str, file_type: str) -> list:
+        try:
+            data = Path(file_path).read_bytes()
+        except Exception as e:
+            log.warning("instore_load_failed", file=file_path, error=str(e))
+            return []
+        return self._load_content_blocks_from_bytes(data, file_type)
+
+    async def analyse_product_bytes(self, data: bytes, file_type: str) -> Optional[dict]:
+        """Analyse a product photo from raw bytes (no filesystem access)."""
+        content_blocks = self._load_content_blocks_from_bytes(data, file_type)
+        if not content_blocks:
+            return None
+        try:
+            response = await self._client.messages.create(
+                model=settings.vision_model,
+                max_tokens=1000,
+                messages=[{
+                    "role": "user",
+                    "content": content_blocks + [{"type": "text", "text": PRODUCT_PHOTO_PROMPT}],
+                }],
+            )
+            raw = response.content[0].text if response.content else ""
+            return json.loads(self._strip_fences(raw))
+        except Exception as e:
+            log.warning("instore_analysis_failed", error=str(e))
+            return None
 
     @staticmethod
     def _strip_fences(text: str) -> str:
