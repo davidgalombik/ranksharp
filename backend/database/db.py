@@ -77,6 +77,12 @@ async def init_db():
              _col("aldi_product_ideas", "session_id")),
             ("CREATE INDEX IF NOT EXISTS ix_aldi_ideas_session_id ON aldi_product_ideas (session_id)",
              _idx("ix_aldi_ideas_session_id")),
+            ("ALTER TABLE aldi_product_ideas ADD COLUMN IF NOT EXISTS generation INTEGER DEFAULT 1",
+             _col("aldi_product_ideas", "generation")),
+            ("ALTER TABLE aldi_product_ideas ADD COLUMN IF NOT EXISTS inspired_by_product_ids JSONB DEFAULT '[]'",
+             _col("aldi_product_ideas", "inspired_by_product_ids")),
+            ("ALTER TABLE aldi_product_ideas ADD COLUMN IF NOT EXISTS inspired_by_products JSONB DEFAULT '[]'",
+             _col("aldi_product_ideas", "inspired_by_products")),
             # Guard: skip if upload_id is ALREADY nullable (migration already applied)
             (
                 "ALTER TABLE aldi_product_ideas ALTER COLUMN upload_id DROP NOT NULL",
