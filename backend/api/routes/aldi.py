@@ -5,8 +5,9 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from database.db import get_db
 from database.models import AldiUpload, AldiProductIdea, AldiUploadStatus
@@ -179,9 +180,16 @@ async def upload_document(
 
 @router.get("/uploads", response_model=list[AldiUploadOut])
 async def list_uploads(db: AsyncSession = Depends(get_db)):
-    """List all uploaded documents newest-first."""
+    """List all uploaded documents newest-first.
+
+    Uses selectinload so the `ideas` relationship is eagerly loaded —
+    lazy-loading a relationship on an async session would raise
+    MissingGreenlet at runtime.
+    """
     result = await db.execute(
-        select(AldiUpload).order_by(desc(AldiUpload.created_at))
+        select(AldiUpload)
+        .options(selectinload(AldiUpload.ideas))
+        .order_by(desc(AldiUpload.created_at))
     )
     uploads = result.scalars().all()
     return [
@@ -200,7 +208,12 @@ async def list_uploads(db: AsyncSession = Depends(get_db)):
 @router.get("/uploads/{upload_id}", response_model=AldiUploadDetailOut)
 async def get_upload(upload_id: int, db: AsyncSession = Depends(get_db)):
     """Get a single upload with full extracted analysis and generated ideas."""
-    upload = await db.get(AldiUpload, upload_id)
+    result = await db.execute(
+        select(AldiUpload)
+        .options(selectinload(AldiUpload.ideas))
+        .where(AldiUpload.id == upload_id)
+    )
+    upload = result.scalar_one_or_none()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
 
@@ -344,7 +357,12 @@ async def list_sessions(db: AsyncSession = Depends(get_db)):
     """List all sessions newest-first."""
     from database.models import AldiSession
     result = await db.execute(
-        select(AldiSession).order_by(desc(AldiSession.created_at))
+        select(AldiSession)
+        .options(
+            selectinload(AldiSession.uploads),
+            selectinload(AldiSession.ideas),
+        )
+        .order_by(desc(AldiSession.created_at))
     )
     sessions = result.scalars().all()
     return [
@@ -363,7 +381,15 @@ async def list_sessions(db: AsyncSession = Depends(get_db)):
 async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
     """Get a session with all uploads and generated ideas."""
     from database.models import AldiSession
-    sess_obj = await db.get(AldiSession, session_id)
+    result = await db.execute(
+        select(AldiSession)
+        .options(
+            selectinload(AldiSession.uploads),
+            selectinload(AldiSession.ideas),
+        )
+        .where(AldiSession.id == session_id)
+    )
+    sess_obj = result.scalar_one_or_none()
     if not sess_obj:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -449,7 +475,12 @@ async def regenerate_session_ideas(session_id: int, db: AsyncSession = Depends(g
 async def delete_session(session_id: int, db: AsyncSession = Depends(get_db)):
     """Delete a session and all its uploads and ideas."""
     from database.models import AldiSession
-    sess_obj = await db.get(AldiSession, session_id)
+    result = await db.execute(
+        select(AldiSession)
+        .options(selectinload(AldiSession.uploads))
+        .where(AldiSession.id == session_id)
+    )
+    sess_obj = result.scalar_one_or_none()
     if not sess_obj:
         raise HTTPException(status_code=404, detail="Session not found")
     # Delete files on disk
