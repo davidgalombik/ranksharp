@@ -20,8 +20,14 @@ def _get_session():
 # ── Task 1: Vision analysis ───────────────────────────────────────────────────
 
 @app.task(bind=True, max_retries=2)
-def analyse_aldi_upload(self, upload_id: int) -> int:
-    """Analyse an uploaded mood-board document with Claude Vision."""
+def analyse_aldi_upload(self, upload_id: int, file_b64: str | None = None) -> int:
+    """Analyse an uploaded mood-board document with Claude Vision.
+
+    If ``file_b64`` is supplied, the image/PDF bytes are decoded and analysed
+    directly. This avoids requiring a shared filesystem between the API
+    container (where the file was originally written) and the worker
+    container. Falls back to reading from disk if no bytes were passed.
+    """
     session = _get_session()
     try:
         upload = session.get(AldiUpload, upload_id)
@@ -41,7 +47,12 @@ def analyse_aldi_upload(self, upload_id: int) -> int:
         session.commit()
 
         try:
-            result = asyncio.run(_vision_analyse(upload.file_path, upload.file_type))
+            if file_b64:
+                import base64 as _b64
+                raw_bytes = _b64.b64decode(file_b64)
+                result = asyncio.run(_vision_analyse_bytes(raw_bytes, upload.file_type))
+            else:
+                result = asyncio.run(_vision_analyse(upload.file_path, upload.file_type))
 
             if result:
                 upload.themes = result.get("themes", [])
@@ -199,6 +210,11 @@ def generate_aldi_ideas(self, upload_id: int) -> dict:
 async def _vision_analyse(file_path: str, file_type: str) -> dict | None:
     from analysis.aldi_vision import MoodBoardAnalyser
     return await MoodBoardAnalyser().analyse_file(file_path, file_type)
+
+
+async def _vision_analyse_bytes(data: bytes, file_type: str) -> dict | None:
+    from analysis.aldi_vision import MoodBoardAnalyser
+    return await MoodBoardAnalyser().analyse_file_bytes(data, file_type)
 
 
 async def _generate_ideas(trend_data: dict, similar_products: list, previous_idea_names: list[str] | None = None) -> list | None:

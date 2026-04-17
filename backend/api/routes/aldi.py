@@ -160,11 +160,13 @@ async def upload_document(
     await db.commit()
     await db.refresh(upload)
 
-    # Dispatch Celery chain: analyse → generate
+    # Dispatch Celery chain: analyse → generate. Pass bytes inline so the
+    # worker doesn't need a shared filesystem with the API container.
+    import base64 as _b64
     from tasks.aldi_tasks import analyse_aldi_upload, generate_aldi_ideas
     from celery import chain as celery_chain
     celery_chain(
-        analyse_aldi_upload.s(upload.id),
+        analyse_aldi_upload.s(upload.id, file_b64=_b64.b64encode(contents).decode()),
         generate_aldi_ideas.s(),
     ).delay()
 
@@ -304,6 +306,7 @@ async def create_session(
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     upload_ids = []
+    upload_bytes: list[bytes] = []
     for file in files:
         # Validate type
         file_ext = ALLOWED_CONTENT_TYPES.get(file.content_type or "")
@@ -331,6 +334,7 @@ async def create_session(
         db.add(upload)
         await db.flush()
         upload_ids.append(upload.id)
+        upload_bytes.append(contents)
 
     if not upload_ids:
         raise HTTPException(status_code=400, detail="No valid files could be processed")
@@ -338,10 +342,12 @@ async def create_session(
     await db.commit()
     await db.refresh(sess_obj)
 
-    # Dispatch analysis task for each upload
+    # Dispatch analysis task for each upload, passing bytes inline so the
+    # worker doesn't need a shared filesystem with the API container.
+    import base64 as _b64
     from tasks.aldi_tasks import analyse_aldi_upload
-    for uid in upload_ids:
-        analyse_aldi_upload.delay(uid)
+    for uid, raw in zip(upload_ids, upload_bytes):
+        analyse_aldi_upload.delay(uid, file_b64=_b64.b64encode(raw).decode())
 
     return AldiSessionOut(
         id=sess_obj.id,

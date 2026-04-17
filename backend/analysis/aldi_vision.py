@@ -151,6 +151,25 @@ class MoodBoardAnalyser:
             log.error("no_content_blocks_loaded", file_path=file_path)
             return None
 
+        return await self._analyse_with_blocks(content_blocks, context=file_path)
+
+    async def analyse_file_bytes(self, data: bytes, file_type: str) -> Optional[dict]:
+        """
+        Analyse a mood board file from raw bytes (no filesystem dependency).
+
+        Used when the worker and API containers don't share a disk — the API
+        passes the uploaded bytes inline through Celery instead of relying on
+        a shared volume.
+        """
+        content_blocks = self._load_content_blocks_from_bytes(data, file_type)
+        if not content_blocks:
+            log.error("no_content_blocks_loaded_from_bytes", file_type=file_type,
+                      size=len(data) if data else 0)
+            return None
+
+        return await self._analyse_with_blocks(content_blocks, context=f"bytes:{file_type}")
+
+    async def _analyse_with_blocks(self, content_blocks: list[dict], context: str) -> Optional[dict]:
         content = content_blocks + [{"type": "text", "text": MOOD_BOARD_PROMPT}]
 
         try:
@@ -163,7 +182,7 @@ class MoodBoardAnalyser:
             raw = _strip_fences(raw)
             return json.loads(raw)
         except Exception as exc:
-            log.error("mood_board_analysis_failed", file_path=file_path, error=str(exc))
+            log.error("mood_board_analysis_failed", context=context, error=str(exc))
             return None
 
     async def generate_ideas(
@@ -241,7 +260,7 @@ class MoodBoardAnalyser:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _load_content_blocks(self, file_path: str, file_type: str) -> list[dict]:
-        """Load a document as Claude content blocks (image or text)."""
+        """Load a document as Claude content blocks (image or text) from disk."""
         path = pathlib.Path(file_path)
         if not path.exists():
             log.error("file_not_found", file_path=file_path)
@@ -253,15 +272,29 @@ class MoodBoardAnalyser:
         if ft == "png":
             return [_image_block(path.read_bytes(), "image/png")]
         if ft == "pdf":
-            return self._pdf_blocks(file_path)
+            return self._pdf_blocks_from_bytes(path.read_bytes())
         log.warning("unsupported_file_type", file_type=file_type)
         return []
 
-    def _pdf_blocks(self, file_path: str) -> list[dict]:
+    def _load_content_blocks_from_bytes(self, data: bytes, file_type: str) -> list[dict]:
+        """Load Claude content blocks directly from raw bytes (no filesystem)."""
+        if not data:
+            return []
+        ft = file_type.lower().lstrip(".")
+        if ft in ("jpeg", "jpg"):
+            return [_image_block(data, "image/jpeg")]
+        if ft == "png":
+            return [_image_block(data, "image/png")]
+        if ft == "pdf":
+            return self._pdf_blocks_from_bytes(data)
+        log.warning("unsupported_file_type", file_type=file_type)
+        return []
+
+    def _pdf_blocks_from_bytes(self, data: bytes) -> list[dict]:
         """Rasterise first 2 PDF pages → JPEG image blocks. Falls back to text."""
         try:
-            from pdf2image import convert_from_path
-            images = convert_from_path(file_path, first_page=1, last_page=2, dpi=150)
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(data, first_page=1, last_page=2, dpi=150)
             blocks = []
             for img in images:
                 buf = io.BytesIO()
@@ -275,7 +308,7 @@ class MoodBoardAnalyser:
         # Fallback: extract text via pypdf
         try:
             from pypdf import PdfReader
-            reader = PdfReader(file_path)
+            reader = PdfReader(io.BytesIO(data))
             text = "\n".join(page.extract_text() or "" for page in reader.pages[:4])
             if text.strip():
                 log.info("pdf_text_fallback_used", chars=len(text))
