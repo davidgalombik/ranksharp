@@ -296,26 +296,67 @@ def _find_similar_products(session, upload: AldiUpload, limit: int = 125) -> lis
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def _maybe_trigger_session_ideas(session, session_id: int) -> None:
-    """If all uploads in the session are done/failed, trigger idea generation."""
+    """If all uploads in the session are done/failed, trigger idea generation.
+
+    Uses SELECT ... FOR UPDATE on the session row so only one worker at a
+    time evaluates the terminal-state condition — without this, three
+    concurrent callers (one per upload task) can each read stale
+    identity-map data for their sibling uploads and all three early-return,
+    leaving the session stuck at ANALYSING.
+    """
     from sqlalchemy import select as sa_select
+    # Kill any stale identity-map state from earlier in the task so that
+    # sibling upload rows are re-read fresh from the DB.
+    session.expire_all()
+
     terminal = {AldiUploadStatus.DONE, AldiUploadStatus.FAILED}
+
+    # Lock the session row — serialises concurrent callers.
+    sess_obj = session.execute(
+        sa_select(AldiSession).where(AldiSession.id == session_id).with_for_update()
+    ).scalar_one_or_none()
+    if not sess_obj:
+        log.warning("trigger_session_not_found", session_id=session_id)
+        session.commit()
+        return
+
     uploads = session.execute(
         sa_select(AldiUpload).where(AldiUpload.session_id == session_id)
     ).scalars().all()
 
+    statuses = [
+        (u.id, u.status.value if hasattr(u.status, "value") else str(u.status))
+        for u in uploads
+    ]
+    sess_status = sess_obj.status.value if hasattr(sess_obj.status, "value") else str(sess_obj.status)
+    log.info(
+        "trigger_check",
+        session_id=session_id,
+        upload_count=len(uploads),
+        statuses=statuses,
+        session_status=sess_status,
+    )
+
     if not uploads:
+        session.commit()
         return
     if not all(u.status in terminal for u in uploads):
-        return  # Some still running
+        log.info("trigger_waiting_for_uploads", session_id=session_id)
+        session.commit()  # releases the row lock
+        return
 
-    # Try to claim generation slot atomically
-    sess_obj = session.get(AldiSession, session_id)
-    if not sess_obj or sess_obj.status != AldiUploadStatus.ANALYSING:
-        return  # Already claimed or done
+    if sess_obj.status != AldiUploadStatus.ANALYSING:
+        log.info(
+            "trigger_session_not_analysing",
+            session_id=session_id,
+            current_status=sess_status,
+        )
+        session.commit()
+        return
 
     sess_obj.status = AldiUploadStatus.GENERATING
     sess_obj.updated_at = datetime.utcnow()
-    session.commit()
+    session.commit()  # releases FOR UPDATE lock
 
     # Dispatch session-level idea generation
     generate_aldi_session_ideas.delay(session_id)

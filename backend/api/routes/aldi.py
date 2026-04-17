@@ -458,6 +458,41 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
     )
 
 
+@router.post("/sessions/{session_id}/kick")
+async def kick_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Recovery hatch: if all uploads finished analysing but the session got
+    stuck at ANALYSING (the trigger helper race-condition bug), manually
+    dispatch the session idea-generation task.
+    """
+    from database.models import AldiSession
+    sess_obj = await db.get(AldiSession, session_id)
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Count uploads and check they're all in a terminal state
+    result = await db.execute(
+        select(AldiUpload).where(AldiUpload.session_id == session_id)
+    )
+    uploads = result.scalars().all()
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Session has no uploads")
+
+    terminal = {AldiUploadStatus.DONE, AldiUploadStatus.FAILED}
+    not_ready = [u.id for u in uploads if u.status not in terminal]
+    if not_ready:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Uploads still analysing: {not_ready}",
+        )
+
+    sess_obj.status = AldiUploadStatus.GENERATING
+    await db.commit()
+
+    from tasks.aldi_tasks import generate_aldi_session_ideas
+    task = generate_aldi_session_ideas.delay(session_id)
+    return {"task_id": task.id, "status": "queued", "session_id": session_id}
+
+
 @router.post("/sessions/{session_id}/regenerate")
 async def regenerate_session_ideas(session_id: int, db: AsyncSession = Depends(get_db)):
     """Trigger a new round of idea generation for an existing session (Try Again)."""
