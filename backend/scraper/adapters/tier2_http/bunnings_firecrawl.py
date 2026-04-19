@@ -53,10 +53,21 @@ _SKU_RE = re.compile(r'_p(\d{6,8})$')
 # Category listing URLs → human-readable category label.
 # Add more home & laundry verticals as needed.
 CATEGORIES: dict[str, str] = {
-    "https://www.bunnings.com.au/products/storage-cleaning/laundry/laundry-cabinets": "Laundry Cabinets",
-    "https://www.bunnings.com.au/products/storage-cleaning/laundry/laundry-troughs": "Laundry Troughs",
-    "https://www.bunnings.com.au/products/storage-cleaning/storage/storage-cabinets": "Storage Cabinets",
-    "https://www.bunnings.com.au/products/storage-cleaning/storage/storage-baskets-tubs": "Storage Baskets & Tubs",
+    "storage": "https://www.bunnings.com.au/products/storage-cleaning/laundry/laundry-cabinets",
+    "storage_2": "https://www.bunnings.com.au/products/storage-cleaning/storage/modular-storage-cabinets",
+    "storage_3": "https://www.bunnings.com.au/products/storage-cleaning/storage/containers/storage-baskets",
+    "storage_4": "https://www.bunnings.com.au/products/storage-cleaning/storage/containers/storage-tubs-crates",
+    "storage_5": "https://www.bunnings.com.au/products/storage-cleaning/storage/modular-storage-cabinets/modular-storage-inspiration",
+    "storage_6": "https://www.bunnings.com.au/products/storage-cleaning/storage-cleaning-inspiration/office-storage-inspiration",
+    "storage_7": "https://www.bunnings.com.au/products/storage-cleaning/storage-cleaning-inspiration/kitchen-storage-inspiration",
+    "storage_8": "https://www.bunnings.com.au/products/storage-cleaning/storage-cleaning-inspiration/laundry-storage-inspiration",
+    "storage_9": "https://www.bunnings.com.au/products/storage-cleaning/storage-cleaning-inspiration/cube-storage-inspiration",
+    "storage_10": "https://www.bunnings.com.au/products/storage-cleaning/storage-cleaning-inspiration/garage-storage-inspiration",
+    "storage_11": "https://www.bunnings.com.au/products/storage-cleaning/storage-cleaning-inspiration/wardrobe-storage-inspiration",
+    "storage_12": "https://www.bunnings.com.au/products/kitchen/kitchen-storage-organisation/kitchen-cleaning-accessories",
+    "storage_13": "https://www.bunnings.com.au/products/kitchen/kitchen-storage-organisation/kitchen-drawer-organiser",
+    "storage_14": "https://www.bunnings.com.au/products/kitchen/kitchen-storage-organisation/kitchen-storage-solutions",
+    "storage_15": "https://www.bunnings.com.au/products/kitchen/kitchen-storage-organisation/kitchen-cabinet-bins",
 }
 
 
