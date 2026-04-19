@@ -17,6 +17,31 @@ log = structlog.get_logger()
 EMBEDDING_DIM = 1536
 
 
+def _coerce_str(v) -> str:
+    """Normalise a value that *might* be a list into a single string.
+
+    Claude Vision occasionally returns list values for scalar-typed fields
+    (e.g. multi-finish products returning ['woodgrain', 'matte']). Without
+    this, string concatenation in _build_embedding_text raises TypeError
+    and sends the task into a retry loop that burns API credits.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x).strip() for x in v if x)
+    return str(v).strip()
+
+
+def _coerce_list(v) -> list[str]:
+    """Normalise a value that *might* be a single string into a list of strings."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if x]
+    s = str(v).strip()
+    return [s] if s else []
+
+
 def _build_embedding_text(
     name: str,
     description: str,
@@ -27,18 +52,19 @@ def _build_embedding_text(
     parts = [name or ""]
 
     if vision_attrs:
-        parts.append("Colours: " + ", ".join(vision_attrs.get("colours", [])))
-        parts.append("Style: " + ", ".join(vision_attrs.get("style_tags", [])))
-        parts.append("Shape: " + (vision_attrs.get("shape") or ""))
-        parts.append("Finish: " + (vision_attrs.get("finish") or ""))
+        parts.append("Colours: " + ", ".join(_coerce_list(vision_attrs.get("colours"))))
+        parts.append("Style: " + ", ".join(_coerce_list(vision_attrs.get("style_tags"))))
+        parts.append("Shape: " + _coerce_str(vision_attrs.get("shape")))
+        parts.append("Finish: " + _coerce_str(vision_attrs.get("finish")))
 
     if nlp_attrs:
-        parts.append("Materials: " + ", ".join(nlp_attrs.get("materials", [])))
-        parts.append("Patterns: " + ", ".join(nlp_attrs.get("patterns", [])))
-        parts.append("Function: " + ", ".join(nlp_attrs.get("function_tags", [])))
-        if nlp_attrs.get("fragrance"):
-            parts.append("Fragrance: " + nlp_attrs["fragrance"])
-        parts.append("Room: " + (nlp_attrs.get("room") or ""))
+        parts.append("Materials: " + ", ".join(_coerce_list(nlp_attrs.get("materials"))))
+        parts.append("Patterns: " + ", ".join(_coerce_list(nlp_attrs.get("patterns"))))
+        parts.append("Function: " + ", ".join(_coerce_list(nlp_attrs.get("function_tags"))))
+        fragrance = _coerce_str(nlp_attrs.get("fragrance"))
+        if fragrance:
+            parts.append("Fragrance: " + fragrance)
+        parts.append("Room: " + _coerce_str(nlp_attrs.get("room")))
 
     if description:
         parts.append(description[:500])
