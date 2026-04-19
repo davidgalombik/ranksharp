@@ -213,7 +213,7 @@ async def seed_retailers():
              tier=ScrapeTier.BROWSER, adapter_class="scraper.adapters.tier3_browser.officeworks.OfficeworksAdapter",
              categories={"storage": "storage", "decor": "home"}),
         dict(slug="bunnings", name="Bunnings", base_url="https://www.bunnings.com.au", country="AU",
-             tier=ScrapeTier.HTTP, adapter_class="scraper.adapters.tier2_http.bunnings.BunningsAdapter",
+              tier=ScrapeTier.HTTP, adapter_class="scraper.adapters.tier2_http.bunnings_firecrawl.BunningsFirecrawlAdapter",
              categories={"storage": "storage", "decor": "home-decor"}),
         dict(slug="hawkins-ny", name="Hawkins New York", base_url="https://www.hawkinsnewyork.com", country="US",
              tier=ScrapeTier.HTTP, adapter_class="scraper.adapters.tier2_http.hawkins_ny.HawkinsNYAdapter",
