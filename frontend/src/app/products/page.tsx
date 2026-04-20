@@ -149,6 +149,7 @@ export default function ProductsPage() {
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [bestSellerOnly, setBestSellerOnly] = useState(false);
+  const [patentOnly, setPatentOnly] = useState(false);
   const [newOnly, setNewOnly] = useState(false);
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
   const [availableCategories, setAvailableCategories] = useState<string[]>([]);
@@ -191,6 +192,7 @@ export default function ProductsPage() {
     if (minPrice) params.set("min_price", minPrice);
     if (maxPrice) params.set("max_price", maxPrice);
     if (bestSellerOnly) params.set("best_seller", "true");
+    if (patentOnly) params.set("has_patent", "true");
     if (newOnly) params.set("is_new", "true");
     params.set("limit", String(PAGE_SIZE));
     params.set("offset", String(page * PAGE_SIZE));
@@ -205,7 +207,7 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly, newOnly, page]);
+  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
 
   useEffect(() => {
     setPage(0);
@@ -215,7 +217,7 @@ export default function ProductsPage() {
     fetchProducts();
   }, [fetchProducts]);
 
-  const hasFilters = debouncedSearch || retailer || category || season || room || minPrice || maxPrice || bestSellerOnly || newOnly;
+  const hasFilters = debouncedSearch || retailer || category || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
 
   return (
     <div className="space-y-5">
@@ -324,6 +326,20 @@ export default function ProductsPage() {
             <span>Best Sellers</span>
           </button>
 
+          {/* Patent toggle */}
+          <button
+            onClick={() => setPatentOnly((v) => !v)}
+            className={clsx(
+              "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+              patentOnly
+                ? "bg-sky-100 border-sky-300 text-sky-800"
+                : "bg-white border-stone-200 text-stone-600 hover:border-sky-300 hover:text-sky-700"
+            )}
+          >
+            <span>⚙</span>
+            <span>Patent</span>
+          </button>
+
           {/* New toggle */}
           <button
             onClick={() => setNewOnly((v) => !v)}
@@ -341,7 +357,7 @@ export default function ProductsPage() {
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setNewOnly(false); }}
+            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -386,7 +402,7 @@ export default function ProductsPage() {
             <>
               <p className="font-medium">No products match your filters</p>
               <button
-                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setNewOnly(false); }}
+                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
                 className="mt-2 text-sm text-stone-600 underline hover:text-stone-900"
               >
                 Clear filters

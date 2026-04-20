@@ -58,6 +58,7 @@ async def search_products(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     best_seller: Optional[bool] = None,
+    has_patent: Optional[bool] = None,
     is_new: Optional[bool] = None,
     limit: int = Query(default=48, le=200),
     offset: int = 0,
@@ -92,6 +93,8 @@ async def search_products(
         stmt = stmt.where(ProductAttributes.room == room)
     if best_seller is True:
         stmt = stmt.where(Product.is_best_seller == True)
+    if has_patent is True:
+        stmt = stmt.where(Product.has_patent == True)
     if is_new is True:
         stmt = stmt.where(Product.is_new == True)
 
@@ -119,6 +122,8 @@ async def search_products(
         count_stmt = count_stmt.where(ProductAttributes.room == room)
     if best_seller is True:
         count_stmt = count_stmt.where(Product.is_best_seller == True)
+    if has_patent is True:
+        count_stmt = count_stmt.where(Product.has_patent == True)
     if is_new is True:
         count_stmt = count_stmt.where(Product.is_new == True)
 
