@@ -63,15 +63,25 @@ def analyse_instore_product(self, product_id: int, file_b64: str | None = None):
         db.commit()
 
         # Check if all products in session are done/failed → trigger trend report
+        # BUT: if session is still UPLOADING, user may add more photos — wait for finalise.
         session_id = product.session_id
-        session = db.get(InStoreSession, session_id)
-        if session:
+        # Row-lock the session and refresh identity map to avoid race conditions
+        # when multiple workers finish simultaneously.
+        db.expire_all()
+        session = db.execute(
+            select(InStoreSession).where(InStoreSession.id == session_id).with_for_update()
+        ).scalar_one_or_none()
+        if session and session.status == InStoreStatus.ANALYSING:
             all_products = db.execute(
                 select(InStoreProduct).where(InStoreProduct.session_id == session_id)
             ).scalars().all()
             pending = [p for p in all_products if p.status in (InStoreStatus.PENDING, InStoreStatus.ANALYSING)]
             if not pending:
+                log.info("instore_session_all_done", session_id=session_id, total=len(all_products))
                 generate_instore_trend_report.delay(session_id)
+        elif session and session.status == InStoreStatus.UPLOADING:
+            log.info("instore_trigger_waiting_for_finalise", session_id=session_id)
+        db.commit()  # release the row lock
 
         return {"status": "done", "product_id": product_id}
     except Exception as exc:

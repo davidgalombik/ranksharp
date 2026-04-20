@@ -199,11 +199,27 @@ export const api = {
     historical: (params: Record<string, string>) => apiFetch<Product[]>("/api/products/historical", params),
   },
   instore: {
-    createSession: async (files: File[], name?: string) => {
+    createSession: async (files: File[], opts?: { name?: string; finalise?: boolean }) => {
       const formData = new FormData();
       files.forEach((f) => formData.append("files", f));
-      if (name) formData.append("name", name);
+      if (opts?.name) formData.append("name", opts.name);
+      formData.append("finalise", String(opts?.finalise ?? false));
       const res = await fetch(`${API_BASE}/api/instore/sessions`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    addUploads: async (sessionId: number, files: File[]) => {
+      const formData = new FormData();
+      files.forEach((f) => formData.append("files", f));
+      const res = await fetch(`${API_BASE}/api/instore/sessions/${sessionId}/uploads`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    finaliseSession: async (sessionId: number) => {
+      const res = await fetch(`${API_BASE}/api/instore/sessions/${sessionId}/finalise`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },

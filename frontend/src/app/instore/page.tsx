@@ -60,7 +60,7 @@ interface GenerationEntry {
 interface InStoreSession {
   id: number;
   name: string | null;
-  status: "pending" | "analysing" | "generating" | "done" | "failed";
+  status: "uploading" | "pending" | "analysing" | "generating" | "done" | "failed";
   product_count: number;
   done_count: number;
   trend_report: TrendInReport[] | null;
@@ -75,6 +75,7 @@ interface InStoreSession {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const STATUS_LABEL: Record<string, string> = {
+  uploading: "Uploading…",
   pending: "Queued",
   analysing: "Analysing…",
   generating: "Generating trends…",
@@ -83,6 +84,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const STATUS_CLASS: Record<string, string> = {
+  uploading: "bg-sky-100 text-sky-700",
   pending: "bg-stone-100 text-stone-500",
   analysing: "bg-amber-100 text-amber-700 animate-pulse",
   generating: "bg-amber-100 text-amber-700 animate-pulse",
@@ -401,7 +403,8 @@ export default function InStorePage() {
     setUploading(true);
     setUploadError(null);
     try {
-      const result = await api.instore.createSession(files);
+      // Start a new UPLOADING session (finalise=false) so the user can batch more
+      const result = await api.instore.createSession(files, { finalise: false });
       await fetchSessions();
       setSelectedId(result.id);
     } catch (e: unknown) {
@@ -410,6 +413,32 @@ export default function InStorePage() {
       setUploading(false);
     }
   }, [fetchSessions]);
+
+  const handleAddMore = useCallback(async (sessionId: number, files: File[]) => {
+    setUploading(true);
+    setUploadError(null);
+    try {
+      await api.instore.addUploads(sessionId, files);
+      await fetchDetail(sessionId);
+      await fetchSessions();
+    } catch (e: unknown) {
+      setUploadError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }, [fetchDetail, fetchSessions]);
+
+  const handleFinalise = useCallback(async (sessionId: number) => {
+    if (!confirm("Done uploading? Claude will start analysing your photos and generating trends.")) return;
+    try {
+      await api.instore.finaliseSession(sessionId);
+      await fetchDetail(sessionId);
+      await fetchSessions();
+      startPolling(sessionId);
+    } catch (e: unknown) {
+      setUploadError(e instanceof Error ? e.message : "Finalise failed");
+    }
+  }, [fetchDetail, fetchSessions, startPolling]);
 
   const handleDelete = useCallback(async (id: number) => {
     if (!confirm("Delete this session and all its photos?")) return;
@@ -435,7 +464,8 @@ export default function InStorePage() {
     }
   }, [sessions, selectedId]);
 
-  const isActive = detail && ["pending", "analysing", "generating"].includes(detail.status);
+  const isActive = detail && ["uploading", "pending", "analysing", "generating"].includes(detail.status);
+  const isUploadingMode = detail?.status === "uploading";
 
   return (
     <div className="min-h-screen bg-stone-50">
@@ -450,7 +480,13 @@ export default function InStorePage() {
         <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6">
           {/* ── Left sidebar: sessions + upload ── */}
           <div className="space-y-4">
-            <UploadZone onUpload={handleUpload} />
+            {!detail || detail.status !== "uploading" ? (
+              <UploadZone onUpload={handleUpload} />
+            ) : (
+              <div className="bg-stone-100 rounded-xl p-4 text-center text-xs text-stone-500">
+                Add more photos to your current session in the main panel →
+              </div>
+            )}
 
             {uploading && (
               <div className="text-xs text-amber-600 animate-pulse text-center">Uploading…</div>
@@ -535,8 +571,38 @@ export default function InStorePage() {
                   </div>
                 </div>
 
+                {isUploadingMode && (
+                  <div className="bg-sky-50 border border-sky-200 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-sky-900">Batch upload mode</p>
+                        <p className="text-xs text-sky-700 mt-0.5">
+                          Add more photos in batches to avoid upload timeouts. Click &ldquo;Finish uploading&rdquo; when done.
+                        </p>
+                      </div>
+                    </div>
+
+                    <UploadZone onUpload={(files) => handleAddMore(detail.id, files)} />
+
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        onClick={() => handleFinalise(detail.id)}
+                        disabled={uploading || detail.product_count === 0}
+                        className={clsx(
+                          "px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+                          uploading || detail.product_count === 0
+                            ? "bg-stone-200 text-stone-400 cursor-not-allowed"
+                            : "bg-emerald-600 text-white hover:bg-emerald-700"
+                        )}
+                      >
+                        ✓ Finish uploading ({detail.product_count} photo{detail.product_count !== 1 ? "s" : ""})
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Progress bar while running */}
-                {isActive && (
+                {isActive && !isUploadingMode && (
                   <div className="bg-white rounded-xl border border-stone-200 p-4">
                     <ProgressBar done={detail.done_count} total={detail.product_count} status={detail.status} />
                   </div>

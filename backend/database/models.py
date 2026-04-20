@@ -235,6 +235,7 @@ class TrendExample(Base):
 
 
 class AldiUploadStatus(str, enum.Enum):
+    UPLOADING = "uploading"   # NEW: session is accepting more files
     PENDING = "pending"
     ANALYSING = "analysing"
     GENERATING = "generating"
@@ -447,6 +448,7 @@ class TrendReport(Base):
 # ── In-store Products feature ─────────────────────────────────────────────────
 
 class InStoreStatus(str, enum.Enum):
+    UPLOADING = "uploading"   # NEW
     PENDING = "pending"
     ANALYSING = "analysing"
     GENERATING = "generating"

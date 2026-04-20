@@ -35,37 +35,41 @@ async def get_db():
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.post("/sessions")
-async def create_session(
-    files: list[UploadFile] = File(...),
-    name: Optional[str] = Form(None),
-    db: AsyncSession = Depends(get_db),
-):
-    """Create a new session and upload product photos."""
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
+MAX_FILES_PER_SESSION = 2000
+MAX_FILES_PER_BATCH = 200
 
 
+async def _process_files_into_session(
+    session: InStoreSession,
+    files: list[UploadFile],
+    db: AsyncSession,
+) -> tuple[list[InStoreProduct], list[bytes], int]:
+    """Shared helper: validate files, write to disk, create InStoreProduct rows.
+
+    Returns (products, product_bytes, skipped_count).
+    Does NOT commit — caller must commit after any final status updates.
+    """
     upload_dir = Path(settings.instore_upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    session = InStoreSession(name=name, status=InStoreStatus.PENDING)
-    db.add(session)
-    await db.flush()
-
-    products = []
+    products: list[InStoreProduct] = []
     product_bytes: list[bytes] = []
+    skipped = 0
+
     for file in files:
         content_type = file.content_type or ""
         file_type = ALLOWED_CONTENT_TYPES.get(content_type)
         if not file_type:
             ext = (file.filename or "").rsplit(".", 1)[-1].lower()
-            file_type = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "pdf": "pdf", "heic": "heic", "heif": "heic"}.get(ext)
+            file_type = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png",
+                         "pdf": "pdf", "heic": "heic", "heif": "heic"}.get(ext)
         if not file_type:
+            skipped += 1
             continue
 
         contents = await file.read()
         if len(contents) > MAX_FILE_SIZE:
+            skipped += 1
             continue
 
         fname = f"{uuid.uuid4()}.{file_type}"
@@ -83,24 +87,168 @@ async def create_session(
         products.append(product)
         product_bytes.append(contents)
 
+    return products, product_bytes, skipped
+
+
+def _dispatch_analysis(products: list[InStoreProduct], product_bytes: list[bytes]):
+    """Fire a Celery analysis task per uploaded photo, inlining bytes."""
+    import base64 as _b64
+    from datetime import datetime as _dt, timedelta as _td
+    # Smooth dispatch at ~5 tasks/sec to stay below Railway log rate limit
+    for i, (p, raw) in enumerate(zip(products, product_bytes)):
+        eta = _dt.utcnow() + _td(milliseconds=i * 200)
+        analyse_instore_product.apply_async(
+            args=[p.id],
+            kwargs={"file_b64": _b64.b64encode(raw).decode()},
+            eta=eta,
+        )
+
+
+@router.post("/sessions")
+async def create_session(
+    files: list[UploadFile] = File(...),
+    name: Optional[str] = Form(None),
+    finalise: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new session and upload the first batch of product photos.
+
+    finalise=False  → session stays in UPLOADING; caller must POST /uploads
+                      for more batches, then POST /finalise to trigger the
+                      trend report. Use this for large multi-batch uploads.
+    finalise=True   → single-shot behaviour (backward compat). Session goes
+                      straight to PENDING; trend report auto-triggers when
+                      the last photo finishes.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_FILES_PER_BATCH} files per batch",
+        )
+
+    initial_status = InStoreStatus.PENDING if finalise else InStoreStatus.UPLOADING
+    session = InStoreSession(name=name, status=initial_status)
+    db.add(session)
+    await db.flush()
+
+    products, product_bytes, skipped = await _process_files_into_session(session, files, db)
     if not products:
         await db.rollback()
         raise HTTPException(status_code=400, detail="No valid files were uploaded")
 
     await db.commit()
-
-    # Refresh to get IDs
     for p in products:
         await db.refresh(p)
 
-    # Dispatch analysis tasks — pass raw bytes inline so the worker doesn't
-    # need to share a filesystem with the API container (Railway services
-    # have isolated disks by default).
-    import base64 as _b64
-    for p, raw in zip(products, product_bytes):
-        analyse_instore_product.delay(p.id, file_b64=_b64.b64encode(raw).decode())
+    _dispatch_analysis(products, product_bytes)
 
-    return {"id": session.id, "product_count": len(products), "status": "pending"}
+    return {
+        "id": session.id,
+        "product_count": len(products),
+        "skipped": skipped,
+        "status": session.status.value if hasattr(session.status, "value") else session.status,
+    }
+
+
+@router.post("/sessions/{session_id}/uploads")
+async def add_uploads(
+    session_id: int,
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add another batch of photos to an UPLOADING session."""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_FILES_PER_BATCH} files per batch",
+        )
+
+    session = await db.get(InStoreSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status != InStoreStatus.UPLOADING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is {session.status}; cannot add files. Create a new session.",
+        )
+
+    # Cap total photos per session
+    current_count_result = await db.execute(
+        select(InStoreProduct).where(InStoreProduct.session_id == session_id)
+    )
+    current_count = len(current_count_result.scalars().all())
+    if current_count + len(files) > MAX_FILES_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session would exceed {MAX_FILES_PER_SESSION} photos "
+                   f"(currently {current_count}, adding {len(files)})",
+        )
+
+    products, product_bytes, skipped = await _process_files_into_session(session, files, db)
+    if not products:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="No valid files in batch")
+
+    await db.commit()
+    for p in products:
+        await db.refresh(p)
+
+    _dispatch_analysis(products, product_bytes)
+
+    return {
+        "session_id": session_id,
+        "added": len(products),
+        "skipped": skipped,
+        "total": current_count + len(products),
+        "status": session.status.value if hasattr(session.status, "value") else session.status,
+    }
+
+
+@router.post("/sessions/{session_id}/finalise")
+async def finalise_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Mark session as ready for trend analysis. Worker will trigger trend
+    report once remaining photos finish (or immediately if all done)."""
+    session = await db.get(InStoreSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status != InStoreStatus.UPLOADING:
+        raise HTTPException(status_code=409, detail=f"Session is {session.status}")
+
+    products_result = await db.execute(
+        select(InStoreProduct).where(InStoreProduct.session_id == session_id)
+    )
+    products = products_result.scalars().all()
+    if not products:
+        raise HTTPException(status_code=400, detail="Session has no photos")
+
+    # Flip to ANALYSING so the per-photo worker's trigger guard will now fire
+    session.status = InStoreStatus.ANALYSING
+    await db.commit()
+
+    # If every photo already finished while the user was still uploading,
+    # kick off the trend report directly — otherwise the worker will trigger.
+    all_done = all(
+        p.status in (InStoreStatus.DONE, InStoreStatus.FAILED)
+        for p in products
+    )
+    if all_done:
+        from tasks.instore_tasks import generate_instore_trend_report
+        generate_instore_trend_report.delay(session_id)
+
+    pending = sum(
+        1 for p in products
+        if p.status in (InStoreStatus.PENDING, InStoreStatus.ANALYSING)
+    )
+    return {
+        "session_id": session_id,
+        "status": "analysing",
+        "pending_count": pending,
+        "trend_report_dispatched": all_done,
+    }
 
 
 @router.get("/sessions")

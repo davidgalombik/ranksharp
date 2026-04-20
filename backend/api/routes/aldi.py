@@ -285,40 +285,38 @@ async def delete_upload(upload_id: int, db: AsyncSession = Depends(get_db)):
 
 # ── Session routes ─────────────────────────────────────────────────────────────
 
-@router.post("/sessions", response_model=AldiSessionOut)
-async def create_session(
-    files: list[UploadFile] = File(...),
-    db: AsyncSession = Depends(get_db),
-):
-    """Upload multiple trend documents as a single analysis session."""
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
-    if len(files) > 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 files per session")
+MAX_FILES_PER_SESSION = 2000
+MAX_FILES_PER_BATCH = 50  # Aldi PDFs are bigger on average
 
-    # Create session record
-    from database.models import AldiSession
-    sess_obj = AldiSession(status=AldiUploadStatus.PENDING)
-    db.add(sess_obj)
-    await db.flush()  # Get session ID
 
+async def _aldi_process_files(
+    sess_obj,
+    files: list[UploadFile],
+    db: AsyncSession,
+) -> tuple[list[int], list[bytes], int]:
+    """Validate, write to disk, create AldiUpload rows. Does NOT commit.
+    Returns (upload_ids, upload_bytes, skipped_count).
+    """
     upload_dir = pathlib.Path(settings.aldi_upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    upload_ids = []
+    upload_ids: list[int] = []
     upload_bytes: list[bytes] = []
+    skipped = 0
+
     for file in files:
-        # Validate type
         file_ext = ALLOWED_CONTENT_TYPES.get(file.content_type or "")
         if not file_ext:
             suffix = pathlib.Path(file.filename or "").suffix.lower()
             file_ext = ALLOWED_EXTENSIONS.get(suffix)
         if not file_ext:
-            continue  # Skip unsupported files silently
+            skipped += 1
+            continue
 
         contents = await file.read()
         if len(contents) > MAX_FILE_BYTES:
-            continue  # Skip oversized files
+            skipped += 1
+            continue
 
         save_name = f"{uuid.uuid4()}.{file_ext}"
         file_path = upload_dir / save_name
@@ -336,18 +334,51 @@ async def create_session(
         upload_ids.append(upload.id)
         upload_bytes.append(contents)
 
+    return upload_ids, upload_bytes, skipped
+
+
+def _aldi_dispatch_analysis(upload_ids: list[int], upload_bytes: list[bytes]):
+    import base64 as _b64
+    from datetime import datetime as _dt, timedelta as _td
+    from tasks.aldi_tasks import analyse_aldi_upload
+    for i, (uid, raw) in enumerate(zip(upload_ids, upload_bytes)):
+        eta = _dt.utcnow() + _td(milliseconds=i * 200)
+        analyse_aldi_upload.apply_async(
+            args=[uid],
+            kwargs={"file_b64": _b64.b64encode(raw).decode()},
+            eta=eta,
+        )
+
+
+@router.post("/sessions", response_model=AldiSessionOut)
+async def create_session(
+    files: list[UploadFile] = File(...),
+    finalise: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a session. finalise=False → session stays UPLOADING for batching."""
+    from database.models import AldiSession
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_FILES_PER_BATCH} files per batch",
+        )
+
+    initial_status = AldiUploadStatus.PENDING if finalise else AldiUploadStatus.UPLOADING
+    sess_obj = AldiSession(status=initial_status)
+    db.add(sess_obj)
+    await db.flush()
+
+    upload_ids, upload_bytes, skipped = await _aldi_process_files(sess_obj, files, db)
     if not upload_ids:
         raise HTTPException(status_code=400, detail="No valid files could be processed")
 
     await db.commit()
     await db.refresh(sess_obj)
 
-    # Dispatch analysis task for each upload, passing bytes inline so the
-    # worker doesn't need a shared filesystem with the API container.
-    import base64 as _b64
-    from tasks.aldi_tasks import analyse_aldi_upload
-    for uid, raw in zip(upload_ids, upload_bytes):
-        analyse_aldi_upload.delay(uid, file_b64=_b64.b64encode(raw).decode())
+    _aldi_dispatch_analysis(upload_ids, upload_bytes)
 
     return AldiSessionOut(
         id=sess_obj.id,
@@ -356,6 +387,101 @@ async def create_session(
         upload_count=len(upload_ids),
         idea_count=0,
     )
+
+
+@router.post("/sessions/{session_id}/uploads")
+async def add_aldi_uploads(
+    session_id: int,
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add more files to an UPLOADING Aldi session."""
+    from database.models import AldiSession
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_FILES_PER_BATCH} files per batch",
+        )
+
+    sess_obj = await db.get(AldiSession, session_id)
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess_obj.status != AldiUploadStatus.UPLOADING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is {sess_obj.status}; cannot add files.",
+        )
+
+    count_result = await db.execute(
+        select(AldiUpload).where(AldiUpload.session_id == session_id)
+    )
+    current_count = len(count_result.scalars().all())
+    if current_count + len(files) > MAX_FILES_PER_SESSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session would exceed {MAX_FILES_PER_SESSION} uploads",
+        )
+
+    upload_ids, upload_bytes, skipped = await _aldi_process_files(sess_obj, files, db)
+    if not upload_ids:
+        raise HTTPException(status_code=400, detail="No valid files in batch")
+
+    await db.commit()
+
+    _aldi_dispatch_analysis(upload_ids, upload_bytes)
+
+    return {
+        "session_id": session_id,
+        "added": len(upload_ids),
+        "skipped": skipped,
+        "total": current_count + len(upload_ids),
+        "status": sess_obj.status.value,
+    }
+
+
+@router.post("/sessions/{session_id}/finalise")
+async def finalise_aldi_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Flip session from UPLOADING → ANALYSING. Worker will trigger idea
+    generation once pending analyses complete (or immediately if all done)."""
+    from database.models import AldiSession
+    sess_obj = await db.get(AldiSession, session_id)
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess_obj.status != AldiUploadStatus.UPLOADING:
+        raise HTTPException(status_code=409, detail=f"Session is {sess_obj.status}")
+
+    uploads_result = await db.execute(
+        select(AldiUpload).where(AldiUpload.session_id == session_id)
+    )
+    uploads = uploads_result.scalars().all()
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Session has no uploads")
+
+    sess_obj.status = AldiUploadStatus.ANALYSING
+    await db.commit()
+
+    all_done = all(
+        u.status in (AldiUploadStatus.DONE, AldiUploadStatus.FAILED)
+        for u in uploads
+    )
+    if all_done:
+        sess_obj.status = AldiUploadStatus.GENERATING
+        await db.commit()
+        from tasks.aldi_tasks import generate_aldi_session_ideas
+        generate_aldi_session_ideas.delay(session_id)
+
+    pending = sum(
+        1 for u in uploads
+        if u.status in (AldiUploadStatus.PENDING, AldiUploadStatus.ANALYSING)
+    )
+    return {
+        "session_id": session_id,
+        "status": sess_obj.status.value,
+        "pending_count": pending,
+        "ideas_dispatched": all_done,
+    }
 
 
 @router.get("/sessions", response_model=list[AldiSessionOut])
