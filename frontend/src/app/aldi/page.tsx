@@ -45,7 +45,7 @@ interface AldiUploadDoc {
 
 interface AldiSession {
   id: number;
-  status: "pending" | "analysing" | "generating" | "done" | "failed";
+  status: "uploading" | "pending" | "analysing" | "generating" | "done" | "failed";
   created_at: string;
   upload_count: number;
   idea_count: number;
@@ -68,6 +68,7 @@ interface AldiSession {
 // ── Status helpers ────────────────────────────────────────────────────────────
 
 const STATUS_LABELS: Record<string, string> = {
+  uploading: "Uploading…",
   pending: "Queued",
   analysing: "Analysing…",
   generating: "Generating ideas…",
@@ -76,6 +77,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLOURS: Record<string, string> = {
+  uploading: "bg-sky-100 text-sky-700",
   pending: "bg-stone-100 text-stone-600",
   analysing: "bg-amber-100 text-amber-700 animate-pulse",
   generating: "bg-amber-100 text-amber-700 animate-pulse",
@@ -106,7 +108,7 @@ function UploadZone({ onSessionCreated }: { onSessionCreated: (s: AldiSession) =
     try {
       const form = new FormData();
       for (const file of files) form.append("files", file);
-      const res = await fetch(`${API_BASE}/api/aldi/sessions`, { method: "POST", body: form });
+      const res = await fetch(`${API_BASE}/api/aldi/sessions?finalise=false`, { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `Upload failed (${res.status})`);
@@ -359,14 +361,108 @@ function IdeaCard({ idea }: { idea: AldiIdea }) {
   );
 }
 
+// ── Batch upload panel (shown while session is UPLOADING) ─────────────────────
+
+function BatchUploadPanel({
+  session,
+  onAddMore,
+  onFinalise,
+}: {
+  session: AldiSession;
+  onAddMore: (files: File[]) => Promise<void>;
+  onFinalise: () => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleFiles = async (files: File[]) => {
+    if (!files.length) return;
+    setError(null);
+    setUploading(true);
+    try {
+      await onAddMore(files);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    handleFiles(Array.from(e.dataTransfer.files));
+  };
+
+  return (
+    <div className="bg-sky-50 border border-sky-200 rounded-xl p-4 space-y-3 mt-4">
+      <div>
+        <p className="text-sm font-semibold text-sky-900">Batch upload mode</p>
+        <p className="text-xs text-sky-700 mt-0.5">
+          Add more documents in batches to avoid upload timeouts. Click &ldquo;Finish uploading&rdquo; when done.
+        </p>
+      </div>
+
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
+        onClick={() => !uploading && inputRef.current?.click()}
+        className={clsx(
+          "border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors bg-white",
+          dragging ? "border-amber-400 bg-amber-50" : "border-stone-300 hover:border-stone-400",
+          uploading && "pointer-events-none opacity-60",
+        )}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".pdf,.jpg,.jpeg,.png"
+          multiple
+          className="hidden"
+          onChange={(e) => handleFiles(Array.from(e.target.files || []))}
+        />
+        <div className="text-2xl mb-1">{uploading ? "⏳" : "📂"}</div>
+        <p className="text-sm font-medium text-stone-700">
+          {uploading ? "Uploading…" : "Drop more documents here or click to browse"}
+        </p>
+        <p className="text-xs text-stone-400 mt-0.5">PDF, JPEG or PNG · max 20 MB each</p>
+        {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          onClick={onFinalise}
+          disabled={uploading || session.upload_count === 0}
+          className={clsx(
+            "px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+            uploading || session.upload_count === 0
+              ? "bg-stone-200 text-stone-400 cursor-not-allowed"
+              : "bg-emerald-600 text-white hover:bg-emerald-700",
+          )}
+        >
+          ✓ Finish uploading ({session.upload_count} document{session.upload_count !== 1 ? "s" : ""})
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Session detail view ────────────────────────────────────────────────────────
 
 function SessionDetailView({
   session,
   onTryAgain,
+  onAddMore,
+  onFinalise,
 }: {
   session: AldiSession;
   onTryAgain: () => void;
+  onAddMore: (files: File[]) => Promise<void>;
+  onFinalise: () => void;
 }) {
   const [activeDocIdx, setActiveDocIdx] = useState(0);
   const uploads = session.uploads || [];
@@ -408,7 +504,17 @@ function SessionDetailView({
     return "bg-white border-stone-200 text-stone-500 hover:bg-stone-50";
   };
 
+  const isUploadingMode = session.status === "uploading";
+
   return (
+    <>
+      {isUploadingMode && (
+        <BatchUploadPanel
+          session={session}
+          onAddMore={onAddMore}
+          onFinalise={onFinalise}
+        />
+      )}
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
       {/* Left: document tabs + per-doc analysis */}
       <div className="space-y-4">
@@ -586,6 +692,7 @@ function SessionDetailView({
         )}
       </div>
     </div>
+    </>
   );
 }
 
@@ -674,6 +781,28 @@ export default function AldiPage() {
     if (selectedId === id) setSelectedId(null);
   };
 
+  const handleAddMore = useCallback(async (sessionId: number, files: File[]) => {
+    if (!files.length) return;
+    const form = new FormData();
+    for (const file of files) form.append("files", file);
+    const res = await fetch(`${API_BASE}/api/aldi/sessions/${sessionId}/uploads`, { method: "POST", body: form });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Upload failed (${res.status})`);
+    }
+    await fetchDetail(sessionId);
+    await fetchList();
+  }, [fetchDetail, fetchList]);
+
+  const handleFinalise = useCallback(async (sessionId: number) => {
+    if (!confirm("Done uploading? Claude will analyse the documents and generate product ideas.")) return;
+    const res = await fetch(`${API_BASE}/api/aldi/sessions/${sessionId}/finalise`, { method: "POST" });
+    if (!res.ok) return;
+    await fetchDetail(sessionId);
+    await fetchList();
+    startPolling(sessionId);
+  }, [fetchDetail, fetchList, startPolling]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -684,8 +813,14 @@ export default function AldiPage() {
         </p>
       </div>
 
-      {/* Upload zone */}
-      <UploadZone onSessionCreated={handleSessionCreated} />
+      {/* Upload zone — hidden while an existing session is still being batched up */}
+      {selectedDetail?.status === "uploading" ? (
+        <div className="bg-stone-100 rounded-xl p-4 text-center text-xs text-stone-500">
+          Add more documents to your current session below, or finish uploading to start a new one.
+        </div>
+      ) : (
+        <UploadZone onSessionCreated={handleSessionCreated} />
+      )}
 
       {/* Content */}
       {loading ? (
@@ -726,7 +861,12 @@ export default function AldiPage() {
                     <StatusBadge status={selectedDetail.status} />
                   </div>
                 </div>
-                <SessionDetailView session={selectedDetail} onTryAgain={() => handleTryAgain(selectedDetail.id)} />
+                <SessionDetailView
+                  session={selectedDetail}
+                  onTryAgain={() => handleTryAgain(selectedDetail.id)}
+                  onAddMore={(files) => handleAddMore(selectedDetail.id, files)}
+                  onFinalise={() => handleFinalise(selectedDetail.id)}
+                />
               </>
             ) : (
               <div className="bg-white rounded-xl border border-stone-200 p-12 text-center text-stone-400">
