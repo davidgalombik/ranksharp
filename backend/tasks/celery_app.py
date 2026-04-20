@@ -1,7 +1,11 @@
 """Celery application with beat schedule for weekly scraping."""
+import logging
 from celery import Celery
 from celery.schedules import crontab
 from config import settings
+
+# Silence HTTPX's per-request INFO logs (one line per Anthropic/etc call)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 app = Celery("trend_tracker")
 

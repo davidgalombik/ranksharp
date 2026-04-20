@@ -1,4 +1,5 @@
 """FastAPI application entry point."""
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,6 +7,9 @@ from database.db import init_db, seed_retailers
 from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, instore, fragrance_trends
 from config import settings
 import structlog
+
+# Silence HTTPX's per-request INFO logs (one line per Anthropic/etc call)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 log = structlog.get_logger()
 
