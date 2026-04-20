@@ -704,3 +704,50 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
 
     finally:
         db_session.close()
+
+
+# ── Housekeeping ──────────────────────────────────────────────────────────────
+
+@app.task
+def finalise_stale_aldi_sessions():
+    """Safety net: flip any Aldi session stuck in UPLOADING for >24h.
+
+    If all uploads already finished, dispatch idea generation directly;
+    otherwise the per-upload worker's trigger helper will fire when the
+    last analysis lands.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from sqlalchemy import select as sa_select
+    cutoff = _dt.utcnow() - _td(hours=24)
+    db = _get_session()
+    try:
+        stale = db.execute(
+            sa_select(AldiSession).where(
+                AldiSession.status == AldiUploadStatus.UPLOADING,
+                AldiSession.created_at < cutoff,
+            )
+        ).scalars().all()
+        finalised = 0
+        dispatched = 0
+        for s in stale:
+            uploads = db.execute(
+                sa_select(AldiUpload).where(AldiUpload.session_id == s.id)
+            ).scalars().all()
+            if not uploads:
+                s.status = AldiUploadStatus.FAILED
+                s.error_message = "Abandoned (no uploads) — auto-failed after 24h"
+                s.updated_at = datetime.utcnow()
+                finalised += 1
+                continue
+            s.status = AldiUploadStatus.ANALYSING
+            s.updated_at = datetime.utcnow()
+            finalised += 1
+            if all(u.status in (AldiUploadStatus.DONE, AldiUploadStatus.FAILED) for u in uploads):
+                s.status = AldiUploadStatus.GENERATING
+                generate_aldi_session_ideas.delay(s.id)
+                dispatched += 1
+        db.commit()
+        log.info("finalise_stale_aldi_sessions", finalised=finalised, dispatched=dispatched)
+        return {"finalised": finalised, "dispatched": dispatched}
+    finally:
+        db.close()

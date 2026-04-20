@@ -275,6 +275,48 @@ def generate_instore_trend_report(self, session_id: int):
         db.close()
 
 
+@app.task
+def finalise_stale_instore_sessions():
+    """Safety net: flip any session stuck in UPLOADING for >24h to ANALYSING.
+
+    Mirrors the /finalise endpoint's behaviour: if all products already
+    finished, dispatch the trend report directly; otherwise the per-product
+    worker will trigger it when the last one lands.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    cutoff = _dt.utcnow() - _td(hours=24)
+    db = _get_session()
+    try:
+        stale = db.execute(
+            select(InStoreSession).where(
+                InStoreSession.status == InStoreStatus.UPLOADING,
+                InStoreSession.created_at < cutoff,
+            )
+        ).scalars().all()
+        finalised = 0
+        dispatched = 0
+        for s in stale:
+            products = db.execute(
+                select(InStoreProduct).where(InStoreProduct.session_id == s.id)
+            ).scalars().all()
+            if not products:
+                # Empty UPLOADING session — nothing to analyse, mark failed
+                s.status = InStoreStatus.FAILED
+                s.error_message = "Abandoned (no photos) — auto-failed after 24h"
+                finalised += 1
+                continue
+            s.status = InStoreStatus.ANALYSING
+            finalised += 1
+            if all(p.status in (InStoreStatus.DONE, InStoreStatus.FAILED) for p in products):
+                generate_instore_trend_report.delay(s.id)
+                dispatched += 1
+        db.commit()
+        log.info("finalise_stale_instore_sessions", finalised=finalised, dispatched=dispatched)
+        return {"finalised": finalised, "dispatched": dispatched}
+    finally:
+        db.close()
+
+
 @app.task(bind=True, max_retries=2)
 def regenerate_instore_trend_report(self, session_id: int):
     """Generate a fresh trend report for an existing session (Try Again).
