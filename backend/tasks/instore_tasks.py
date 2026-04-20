@@ -100,7 +100,7 @@ def analyse_instore_product(self, product_id: int, file_b64: str | None = None):
         db.close()
 
 
-def _find_products_for_trend(db, trend: dict, sample_size: int = 60) -> list[dict]:
+def _find_products_for_trend(db, trend: dict, sample_size: int = 15) -> list[dict]:
     """Find products from the main database that align with a trend.
 
     Fetches the top sample_size*5 by cosine similarity, then randomly samples
