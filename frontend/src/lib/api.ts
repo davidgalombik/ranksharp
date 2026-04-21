@@ -241,6 +241,75 @@ export const api = {
     getImageUrl: (sessionId: number, productId: number) =>
       `${API_BASE}/api/instore/sessions/${sessionId}/products/${productId}/image`,
   },
+  instoreCatalogue: {
+    upload: async (files: File[], hashes: string[]) => {
+      const formData = new FormData();
+      files.forEach((f) => formData.append("files", f));
+      hashes.forEach((h) => formData.append("hashes", h));
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/upload`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{
+        added: number;
+        skipped_duplicate: number;
+        skipped_invalid: number;
+        image_ids: number[];
+      }>;
+    },
+    listItems: async (params: { q?: string; category?: string; limit?: number; offset?: number } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.q) qs.set("q", params.q);
+      if (params.category) qs.set("category", params.category);
+      qs.set("limit", String(params.limit ?? 60));
+      qs.set("offset", String(params.offset ?? 0));
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/?${qs}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    listImages: async (params: { status?: string; limit?: number; offset?: number } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.status) qs.set("status", params.status);
+      qs.set("limit", String(params.limit ?? 60));
+      qs.set("offset", String(params.offset ?? 0));
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/images?${qs}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    stats: async () => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/stats`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    patchItem: async (id: number, body: { product_name?: string; category?: string }) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/items/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    deleteItem: async (id: number) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/items/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    retryImage: async (id: number) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/images/${id}/retry`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    retryAllFailed: async () => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/retry-all-failed`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    deleteImage: async (id: number) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/images/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    imageUrl: (id: number) => `${API_BASE}/api/instore-catalogue/images/${id}/file`,
+  },
   fragranceTrends: {
     latestReport: (generation?: number) =>
       apiFetch<FragranceTrendReport>("/api/fragrance-trends/latest", generation ? { generation: String(generation) } : undefined),

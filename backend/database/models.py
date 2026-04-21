@@ -491,3 +491,39 @@ class InStoreProduct(Base):
     created_at = mapped_column(DateTime, default=datetime.utcnow)
     updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     session = relationship("InStoreSession", back_populates="products")
+
+
+# ── In-store Products Catalogue (standalone — no sessions) ────────────────────
+
+class InStoreCatalogueImage(Base):
+    """A single uploaded image. One image may contain many products (Mode B)."""
+    __tablename__ = "instore_catalogue_images"
+    id = mapped_column(Integer, primary_key=True)
+    filename = mapped_column(String, nullable=False)
+    file_path = mapped_column(String, nullable=False)
+    file_type = mapped_column(String, nullable=False)
+    sha256_hash = mapped_column(String(64), nullable=False, unique=True, index=True)
+    status = mapped_column(String(20), default="pending", nullable=False, index=True)
+    error_message = mapped_column(Text, nullable=True)
+    item_count = mapped_column(Integer, default=0)
+    raw_analysis = mapped_column(JSON, nullable=True)
+    created_at = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    items = relationship("InStoreCatalogueItem", back_populates="image", cascade="all, delete-orphan", lazy="select")
+
+
+class InStoreCatalogueItem(Base):
+    """A single product detected within a catalogue image."""
+    __tablename__ = "instore_catalogue_items"
+    id = mapped_column(Integer, primary_key=True)
+    image_id = mapped_column(Integer, ForeignKey("instore_catalogue_images.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_name = mapped_column(String, nullable=False)
+    category = mapped_column(String(50), nullable=False, index=True)   # Kitchen & Dining | Home & Decor | Candles | Other
+    colours = mapped_column(JSON, nullable=True)
+    materials = mapped_column(JSON, nullable=True)
+    patterns = mapped_column(JSON, nullable=True)
+    style_tags = mapped_column(JSON, nullable=True)
+    confidence = mapped_column(String(10), nullable=True)  # stored as str to allow null
+    created_at = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    image = relationship("InStoreCatalogueImage", back_populates="items")

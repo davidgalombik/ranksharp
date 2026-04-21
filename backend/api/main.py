@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import init_db, seed_retailers
-from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, instore, fragrance_trends
+from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, instore, instore_catalogue, fragrance_trends
 from config import settings
 import structlog
 
@@ -48,6 +48,7 @@ app.include_router(reports.router, prefix="/api/reports", tags=["Reports"])
 app.include_router(scrape_jobs.router, prefix="/api/scrape-jobs", tags=["Scrape Jobs"])
 app.include_router(aldi.router, prefix="/api/aldi", tags=["Aldi"])
 app.include_router(instore.router, prefix="/api/instore", tags=["In-store"])
+app.include_router(instore_catalogue.router, prefix="/api/instore-catalogue", tags=["In-store Catalogue"])
 app.include_router(fragrance_trends.router, prefix="/api/fragrance-trends", tags=["Fragrance Trends"])
 
 

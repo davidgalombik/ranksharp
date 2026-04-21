@@ -76,6 +76,19 @@ export default function Navigation() {
             Current Products
           </Link>
 
+          {/* In-store Products */}
+          <Link
+            href="/instore-products"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/instore-products" || path.startsWith("/instore-products/")
+                ? "bg-stone-900 text-white"
+                : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            In-store Products
+          </Link>
+
           {/* Trends dropdown */}
           <div
             className="relative"
