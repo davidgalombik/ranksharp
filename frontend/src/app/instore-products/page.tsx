@@ -50,8 +50,17 @@ interface CatalogueItem {
   style_tags: string[];
   confidence: string | null;
   source_filename: string;
+  retailer: string | null;
   created_at: string;
 }
+
+interface Retailer {
+  name: string;
+  count: number;
+}
+
+const RETAILER_STORAGE_KEY = "instore-products-last-retailer";
+const RETAILER_NONE = "__none__";
 
 interface CatalogueImage {
   id: number;
@@ -160,9 +169,15 @@ async function maybeDownscale(file: File): Promise<File> {
 // ── Upload Zone ──────────────────────────────────────────────────────────────
 
 function UploadZone({
+  retailer,
+  onRetailerChange,
+  retailers,
   onFilesSelected,
   disabled,
 }: {
+  retailer: string;
+  onRetailerChange: (v: string) => void;
+  retailers: Retailer[];
   onFilesSelected: (files: File[]) => void;
   disabled: boolean;
 }) {
@@ -170,8 +185,11 @@ function UploadZone({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
+  const retailerValid = retailer.trim().length > 0;
+
   const handleFiles = (fileList: FileList | null | File[]) => {
     if (!fileList) return;
+    if (!retailerValid) return;
     const files = Array.from(fileList as ArrayLike<File>).filter(isAcceptedFile);
     if (files.length) onFilesSelected(files);
   };
@@ -179,27 +197,50 @@ function UploadZone({
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
-    if (disabled) return;
+    if (disabled || !retailerValid) return;
     if (e.dataTransfer.files && e.dataTransfer.files.length) {
       handleFiles(e.dataTransfer.files);
     }
   };
 
   return (
-    <div className="bg-white rounded-xl border border-stone-200 p-4">
+    <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
+      {/* Retailer input — required before uploading */}
+      <div>
+        <label className="block text-xs font-semibold text-stone-600 mb-1">
+          Retailer <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          list="instore-retailer-options"
+          value={retailer}
+          onChange={(e) => onRetailerChange(e.target.value)}
+          placeholder="e.g. World Market, Target, HomeGoods…"
+          className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-300"
+        />
+        <datalist id="instore-retailer-options">
+          {retailers.map((r) => <option key={r.name} value={r.name}>{`${r.count} images`}</option>)}
+        </datalist>
+        {!retailerValid && (
+          <p className="text-xs text-stone-400 mt-1">
+            Tag these uploads with a store name so you can filter by retailer later. Autocompletes from retailers you&apos;ve used before.
+          </p>
+        )}
+      </div>
+
       <div
-        onDragOver={(e) => { e.preventDefault(); if (!disabled) setDragging(true); }}
+        onDragOver={(e) => { e.preventDefault(); if (!disabled && retailerValid) setDragging(true); }}
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
         className={clsx(
           "border-2 border-dashed rounded-xl p-8 text-center transition-colors",
           dragging ? "border-stone-500 bg-stone-50" : "border-stone-300",
-          disabled && "opacity-50 pointer-events-none",
+          (disabled || !retailerValid) && "opacity-50 pointer-events-none",
         )}
       >
         <div className="text-3xl mb-2">🏪</div>
         <p className="text-sm font-medium text-stone-700 mb-1">
-          Drag a folder, drop files, or pick below
+          {retailerValid ? "Drag a folder, drop files, or pick below" : "Enter a retailer first ↑"}
         </p>
         <p className="text-xs text-stone-400">
           JPG, PNG, HEIC or PDF · up to 10,000+ files · dupes skipped automatically
@@ -209,14 +250,16 @@ function UploadZone({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700"
+            disabled={!retailerValid}
+            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Choose files…
           </button>
           <button
             type="button"
             onClick={() => folderInputRef.current?.click()}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700"
+            disabled={!retailerValid}
+            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Choose folder…
           </button>
@@ -477,6 +520,14 @@ function ProductCard({
               {PROMINENCE_LABEL[item.prominence]}
             </span>
           )}
+          {item.retailer && (
+            <span
+              className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-violet-100 text-violet-700 border border-violet-200"
+              title={`Uploaded from ${item.retailer}`}
+            >
+              {item.retailer}
+            </span>
+          )}
         </div>
         {(item.colours?.length || 0) > 0 && (
           <div className="flex flex-wrap gap-1">
@@ -606,8 +657,16 @@ export default function InStoreProductsPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [category, setCategory] = useState<"" | Category>("");
+  const [retailerFilter, setRetailerFilter] = useState("");   // "" = all, "__none__" = untagged
   const [showAll, setShowAll] = useState(false);   // include peripheral/background
   const [mode, setMode] = useState<"catalogue" | "failed">("catalogue");
+
+  // Retailers known to the system — for autocomplete on upload + filter dropdown
+  const [retailers, setRetailers] = useState<Retailer[]>([]);
+  const [untaggedCount, setUntaggedCount] = useState(0);
+
+  // Retailer currently selected in the upload zone (remembered across sessions)
+  const [uploadRetailer, setUploadRetailer] = useState<string>("");
 
   // Upload state
   const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
@@ -638,7 +697,7 @@ export default function InStoreProductsPage() {
   // Reset to page 0 when filters change
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, category, showAll]);
+  }, [debouncedSearch, category, retailerFilter, showAll]);
 
   // Load items
   const loadItems = useCallback(async () => {
@@ -647,6 +706,7 @@ export default function InStoreProductsPage() {
       const data = await api.instoreCatalogue.listItems({
         q: debouncedSearch || undefined,
         category: category || undefined,
+        retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
@@ -659,7 +719,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, showAll, page]);
+  }, [debouncedSearch, category, retailerFilter, showAll, page]);
 
   useEffect(() => { loadItems(); }, [loadItems]);
 
@@ -671,6 +731,23 @@ export default function InStoreProductsPage() {
     } catch { /* ignore */ }
   }, []);
   useEffect(() => { loadStats(); }, [loadStats]);
+
+  // Load retailer list (for autocomplete + filter dropdown)
+  const loadRetailers = useCallback(async () => {
+    try {
+      const r = await api.instoreCatalogue.listRetailers();
+      setRetailers(r.retailers || []);
+      setUntaggedCount(r.untagged_count || 0);
+    } catch { /* ignore */ }
+  }, []);
+  useEffect(() => { loadRetailers(); }, [loadRetailers]);
+
+  // Hydrate uploadRetailer from localStorage on mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(RETAILER_STORAGE_KEY);
+    if (stored) setUploadRetailer(stored);
+  }, []);
 
   // Poll while uploads/analysis are in flight
   useEffect(() => {
@@ -729,6 +806,7 @@ export default function InStoreProductsPage() {
         const result = await api.instoreCatalogue.upload(
           prepared.map((p) => p.file),
           prepared.map((p) => p.hash),
+          uploadRetailer.trim() || undefined,
         );
         setProgress((p) => ({
           ...p,
@@ -751,9 +829,14 @@ export default function InStoreProductsPage() {
       ...p,
       currentPhase: cancelRef.current ? "cancelled" : "done",
     }));
+    // Remember the retailer name for next time
+    if (typeof window !== "undefined" && uploadRetailer.trim()) {
+      window.localStorage.setItem(RETAILER_STORAGE_KEY, uploadRetailer.trim());
+    }
     await loadStats();
     await loadItems();
-  }, [pendingFiles, loadStats, loadItems]);
+    await loadRetailers();
+  }, [pendingFiles, uploadRetailer, loadStats, loadItems, loadRetailers]);
 
   const cancelUpload = useCallback(() => {
     cancelRef.current = true;
@@ -794,7 +877,7 @@ export default function InStoreProductsPage() {
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
   // Clear selection on filter change so old IDs don't linger after they scroll off
-  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, showAll, page]);
+  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, retailerFilter, showAll, page]);
 
   const toggleSelect = useCallback((id: number, e: React.MouseEvent) => {
     setSelectedIds((prev) => {
@@ -861,7 +944,7 @@ export default function InStoreProductsPage() {
   const processingCount = (stats?.images_by_status?.pending || 0) + (stats?.images_by_status?.analysing || 0);
   const failedCount = stats?.images_by_status?.failed || 0;
 
-  const hasFilters = debouncedSearch || category || showAll;
+  const hasFilters = debouncedSearch || category || retailerFilter || showAll;
 
   return (
     <div className="space-y-5">
@@ -897,6 +980,9 @@ export default function InStoreProductsPage() {
 
       {/* Upload zone */}
       <UploadZone
+        retailer={uploadRetailer}
+        onRetailerChange={setUploadRetailer}
+        retailers={retailers}
         onFilesSelected={onFilesSelected}
         disabled={progress.currentPhase === "hashing" || progress.currentPhase === "downscaling" || progress.currentPhase === "uploading"}
       />
@@ -944,7 +1030,7 @@ export default function InStoreProductsPage() {
         <>
           {/* Filter bar */}
           <div className="bg-white rounded-xl border border-stone-200 p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-center">
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-center">
               <div className="sm:col-span-2">
                 <input
                   type="search"
@@ -954,6 +1040,19 @@ export default function InStoreProductsPage() {
                   className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-300"
                 />
               </div>
+              <select
+                value={retailerFilter}
+                onChange={(e) => setRetailerFilter(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All retailers</option>
+                {retailers.map((r) => (
+                  <option key={r.name} value={r.name}>{r.name} ({r.count})</option>
+                ))}
+                {untaggedCount > 0 && (
+                  <option value={RETAILER_NONE}>(no retailer) ({untaggedCount})</option>
+                )}
+              </select>
               <select
                 value={category}
                 onChange={(e) => setCategory(e.target.value as "" | Category)}
@@ -983,7 +1082,7 @@ export default function InStoreProductsPage() {
             )}
             {hasFilters && (
               <button
-                onClick={() => { setSearch(""); setCategory(""); setShowAll(false); }}
+                onClick={() => { setSearch(""); setCategory(""); setRetailerFilter(""); setShowAll(false); }}
                 className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
               >
                 Clear filters

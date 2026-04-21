@@ -42,16 +42,21 @@ async def get_db():
 async def upload_batch(
     files: list[UploadFile] = File(...),
     hashes: list[str] = Form(...),
+    retailer: str = Form(""),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload a batch of images. `hashes` must be a parallel list of SHA-256 hashes
-    (hex) computed client-side. Duplicates (matching hash already in DB) are skipped."""
+    (hex) computed client-side. Duplicates (matching hash already in DB) are skipped.
+    `retailer` is an optional free-text tag saved on every image in the batch."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     if len(files) != len(hashes):
         raise HTTPException(status_code=400, detail="files and hashes length mismatch")
     if len(files) > MAX_FILES_PER_BATCH:
         raise HTTPException(status_code=400, detail=f"Max {MAX_FILES_PER_BATCH} files per batch")
+
+    # Normalise retailer — trim, collapse internal whitespace, cap length
+    retailer_clean = " ".join((retailer or "").split())[:100] or None
 
     upload_dir = Path(settings.instore_catalogue_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +111,7 @@ async def upload_batch(
             file_type=file_type,
             sha256_hash=h,
             status="pending",
+            retailer=retailer_clean,
         )
         db.add(image)
         added_images.append(image)
@@ -156,6 +162,7 @@ DEFAULT_PROMINENCE = {"hero", "main"}
 async def list_items(
     q: Optional[str] = None,
     category: Optional[str] = None,
+    retailer: Optional[str] = None,     # exact match; use '__none__' to filter where retailer IS NULL
     prominence: Optional[str] = None,   # e.g. "hero" or "hero,main" — overrides default
     show_all: bool = False,             # convenience: include peripheral/background too
     status: Optional[str] = None,       # 'failed' | 'pending' | 'analysing' | 'done'
@@ -183,6 +190,13 @@ async def list_items(
     if category and category in CATEGORIES:
         stmt = stmt.where(InStoreCatalogueItem.category == category)
         count_stmt = count_stmt.where(InStoreCatalogueItem.category == category)
+    if retailer:
+        if retailer == "__none__":
+            stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
+            count_stmt = count_stmt.where(InStoreCatalogueImage.retailer.is_(None))
+        else:
+            stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
+            count_stmt = count_stmt.where(InStoreCatalogueImage.retailer == retailer)
 
     # Prominence filtering — explicit override wins, else show_all toggle, else defaults
     if prominence:
@@ -225,11 +239,33 @@ async def list_items(
             "style_tags": item.style_tags or [],
             "confidence": item.confidence,
             "source_filename": image.filename,
+            "retailer": image.retailer,
             "created_at": item.created_at,
         }
         for item, image in rows
     ]
     return {"total": total, "items": items}
+
+
+# ── Retailers endpoint — populate the filter dropdown + autocomplete ──────────
+
+@router.get("/retailers")
+async def list_retailers(db: AsyncSession = Depends(get_db)):
+    """Distinct retailers used in the catalogue, with image counts.
+    Sorted alphabetically. Also returns `untagged_count` for images with no retailer."""
+    rows = await db.execute(
+        select(InStoreCatalogueImage.retailer, func.count())
+        .group_by(InStoreCatalogueImage.retailer)
+        .order_by(InStoreCatalogueImage.retailer)
+    )
+    named: list[dict] = []
+    untagged = 0
+    for name, count in rows.all():
+        if name is None:
+            untagged = count
+        else:
+            named.append({"name": name, "count": count})
+    return {"retailers": named, "untagged_count": untagged}
 
 
 # ── Images endpoint — separate list for the image-centric view (failed retry etc) ──

@@ -111,6 +111,11 @@ async def init_db():
              _col("instore_catalogue_items", "prominence")),
             ("CREATE INDEX IF NOT EXISTS ix_catalogue_items_prominence ON instore_catalogue_items (prominence)",
              _idx("ix_catalogue_items_prominence")),
+            # In-store catalogue: retailer column on images (free-text with frontend autocomplete)
+            ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS retailer VARCHAR(100)",
+             _col("instore_catalogue_images", "retailer")),
+            ("CREATE INDEX IF NOT EXISTS ix_catalogue_images_retailer ON instore_catalogue_images (retailer)",
+             _idx("ix_catalogue_images_retailer")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

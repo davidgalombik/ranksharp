@@ -504,6 +504,7 @@ class InStoreCatalogueImage(Base):
     file_type = mapped_column(String, nullable=False)
     sha256_hash = mapped_column(String(64), nullable=False, unique=True, index=True)
     status = mapped_column(String(20), default="pending", nullable=False, index=True)
+    retailer = mapped_column(String(100), nullable=True, index=True)
     error_message = mapped_column(Text, nullable=True)
     item_count = mapped_column(Integer, default=0)
     raw_analysis = mapped_column(JSON, nullable=True)

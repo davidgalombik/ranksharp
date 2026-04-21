@@ -242,10 +242,11 @@ export const api = {
       `${API_BASE}/api/instore/sessions/${sessionId}/products/${productId}/image`,
   },
   instoreCatalogue: {
-    upload: async (files: File[], hashes: string[]) => {
+    upload: async (files: File[], hashes: string[], retailer?: string) => {
       const formData = new FormData();
       files.forEach((f) => formData.append("files", f));
       hashes.forEach((h) => formData.append("hashes", h));
+      if (retailer) formData.append("retailer", retailer);
       const res = await fetch(`${API_BASE}/api/instore-catalogue/upload`, { method: "POST", body: formData });
       if (!res.ok) throw new Error(await res.text());
       return res.json() as Promise<{
@@ -255,10 +256,11 @@ export const api = {
         image_ids: number[];
       }>;
     },
-    listItems: async (params: { q?: string; category?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
+    listItems: async (params: { q?: string; category?: string; retailer?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
+      if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
       if (params.prominence) qs.set("prominence", params.prominence);
       qs.set("limit", String(params.limit ?? 60));
@@ -266,6 +268,11 @@ export const api = {
       const res = await fetch(`${API_BASE}/api/instore-catalogue/?${qs}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
+    },
+    listRetailers: async () => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/retailers`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ retailers: { name: string; count: number }[]; untagged_count: number }>;
     },
     listImages: async (params: { status?: string; limit?: number; offset?: number } = {}) => {
       const qs = new URLSearchParams();
