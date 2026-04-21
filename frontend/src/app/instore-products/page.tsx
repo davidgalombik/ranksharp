@@ -22,6 +22,20 @@ const CATEGORY_COLOURS: Record<string, string> = {
   "Other": "bg-stone-100 text-stone-700 border-stone-200",
 };
 
+const PROMINENCE_COLOURS: Record<string, string> = {
+  hero: "bg-indigo-100 text-indigo-700",
+  main: "bg-sky-100 text-sky-700",
+  peripheral: "bg-stone-100 text-stone-500",
+  background: "bg-stone-100 text-stone-400",
+};
+
+const PROMINENCE_LABEL: Record<string, string> = {
+  hero: "Hero",
+  main: "Main",
+  peripheral: "Peripheral",
+  background: "Background",
+};
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface CatalogueItem {
@@ -29,6 +43,7 @@ interface CatalogueItem {
   image_id: number;
   product_name: string;
   category: string;
+  prominence: string | null;
   colours: string[];
   materials: string[];
   patterns: string[];
@@ -53,6 +68,7 @@ interface Stats {
   images_by_status: Record<string, number>;
   items_total: number;
   items_by_category: Record<string, number>;
+  items_by_prominence?: Record<string, number>;
 }
 
 interface UploadProgress {
@@ -421,8 +437,16 @@ function ProductCard({
       </button>
       <div className="p-3 space-y-2 flex-1 flex flex-col">
         <EditableName value={item.product_name} onSave={(v) => onUpdate(item.id, { product_name: v })} />
-        <div>
+        <div className="flex items-center gap-1.5 flex-wrap">
           <EditableCategory value={item.category} onSave={(v) => onUpdate(item.id, { category: v })} />
+          {item.prominence && PROMINENCE_LABEL[item.prominence] && (
+            <span
+              className={clsx("px-1.5 py-0.5 rounded-full text-[10px] font-medium", PROMINENCE_COLOURS[item.prominence] || "bg-stone-100 text-stone-500")}
+              title="AI-assessed how prominent this product is in the frame"
+            >
+              {PROMINENCE_LABEL[item.prominence]}
+            </span>
+          )}
         </div>
         {(item.colours?.length || 0) > 0 && (
           <div className="flex flex-wrap gap-1">
@@ -552,6 +576,7 @@ export default function InStoreProductsPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [category, setCategory] = useState<"" | Category>("");
+  const [showAll, setShowAll] = useState(false);   // include peripheral/background
   const [mode, setMode] = useState<"catalogue" | "failed">("catalogue");
 
   // Upload state
@@ -577,7 +602,7 @@ export default function InStoreProductsPage() {
   // Reset to page 0 when filters change
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, category]);
+  }, [debouncedSearch, category, showAll]);
 
   // Load items
   const loadItems = useCallback(async () => {
@@ -586,6 +611,7 @@ export default function InStoreProductsPage() {
       const data = await api.instoreCatalogue.listItems({
         q: debouncedSearch || undefined,
         category: category || undefined,
+        show_all: showAll,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       });
@@ -597,7 +623,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, page]);
+  }, [debouncedSearch, category, showAll, page]);
 
   useEffect(() => { loadItems(); }, [loadItems]);
 
@@ -732,7 +758,7 @@ export default function InStoreProductsPage() {
   const processingCount = (stats?.images_by_status?.pending || 0) + (stats?.images_by_status?.analysing || 0);
   const failedCount = stats?.images_by_status?.failed || 0;
 
-  const hasFilters = debouncedSearch || category;
+  const hasFilters = debouncedSearch || category || showAll;
 
   return (
     <div className="space-y-5">
@@ -804,7 +830,7 @@ export default function InStoreProductsPage() {
         <>
           {/* Filter bar */}
           <div className="bg-white rounded-xl border border-stone-200 p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-center">
               <div className="sm:col-span-2">
                 <input
                   type="search"
@@ -822,10 +848,28 @@ export default function InStoreProductsPage() {
                 <option value="">All categories</option>
                 {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
+              <button
+                onClick={() => setShowAll((v) => !v)}
+                className={clsx(
+                  "flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+                  showAll
+                    ? "bg-stone-900 border-stone-900 text-white"
+                    : "bg-white border-stone-200 text-stone-600 hover:border-stone-400"
+                )}
+                title="When off, only hero/main products are shown — hiding items Claude judged peripheral or background"
+              >
+                <span>{showAll ? "✓" : "○"}</span>
+                <span>Show background items</span>
+              </button>
             </div>
+            {stats?.items_by_prominence && !showAll && (
+              <p className="text-xs text-stone-400 mt-2">
+                Hiding {((stats.items_by_prominence.peripheral || 0) + (stats.items_by_prominence.background || 0)).toLocaleString()} peripheral/background items · toggle above to show all
+              </p>
+            )}
             {hasFilters && (
               <button
-                onClick={() => { setSearch(""); setCategory(""); }}
+                onClick={() => { setSearch(""); setCategory(""); setShowAll(false); }}
                 className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
               >
                 Clear filters
@@ -883,7 +927,7 @@ export default function InStoreProductsPage() {
               {hasFilters ? (
                 <>
                   <p className="font-medium">No products match your filters</p>
-                  <button onClick={() => { setSearch(""); setCategory(""); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
+                  <button onClick={() => { setSearch(""); setCategory(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
                 </>
               ) : (
                 <>

@@ -59,6 +59,7 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
                 image_id=image_id,
                 product_name=entry["product_name"],
                 category=entry["category"],
+                prominence=entry.get("prominence"),
                 colours=entry.get("colours") or [],
                 materials=entry.get("materials") or [],
                 patterns=entry.get("patterns") or [],

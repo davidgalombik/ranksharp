@@ -146,17 +146,26 @@ async def upload_batch(
 
 # ── List / Search ─────────────────────────────────────────────────────────────
 
+PROMINENCE_VALUES = {"hero", "main", "peripheral", "background"}
+# Default list excludes peripheral+background — i.e. only things that are clearly
+# part of the framed display. Pass show_all=true to see everything.
+DEFAULT_PROMINENCE = {"hero", "main"}
+
+
 @router.get("/")
 async def list_items(
     q: Optional[str] = None,
     category: Optional[str] = None,
-    status: Optional[str] = None,   # 'failed' | 'pending' | 'analysing' | 'done'
+    prominence: Optional[str] = None,   # e.g. "hero" or "hero,main" — overrides default
+    show_all: bool = False,             # convenience: include peripheral/background too
+    status: Optional[str] = None,       # 'failed' | 'pending' | 'analysing' | 'done'
     limit: int = Query(default=60, le=200),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """Search the catalogue. Default: returns one row per *detected item*
-    (not per image) — matching the user's "product" mental model."""
+    (not per image), and only items flagged hero/main by the AI. Pass
+    show_all=true to include peripheral and background items."""
     stmt = (
         select(InStoreCatalogueItem, InStoreCatalogueImage)
         .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
@@ -175,6 +184,29 @@ async def list_items(
         stmt = stmt.where(InStoreCatalogueItem.category == category)
         count_stmt = count_stmt.where(InStoreCatalogueItem.category == category)
 
+    # Prominence filtering — explicit override wins, else show_all toggle, else defaults
+    if prominence:
+        requested = {p.strip().lower() for p in prominence.split(",") if p.strip().lower() in PROMINENCE_VALUES}
+        if requested:
+            # Include NULLs when default set is requested, so pre-prominence rows don't disappear
+            if requested == DEFAULT_PROMINENCE:
+                cond = or_(
+                    InStoreCatalogueItem.prominence.in_(requested),
+                    InStoreCatalogueItem.prominence.is_(None),
+                )
+            else:
+                cond = InStoreCatalogueItem.prominence.in_(requested)
+            stmt = stmt.where(cond)
+            count_stmt = count_stmt.where(cond)
+    elif not show_all:
+        # Default: hero + main only, but keep rows analysed before prominence existed (NULL)
+        cond = or_(
+            InStoreCatalogueItem.prominence.in_(DEFAULT_PROMINENCE),
+            InStoreCatalogueItem.prominence.is_(None),
+        )
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+
     stmt = stmt.limit(limit).offset(offset)
 
     rows = (await db.execute(stmt)).all()
@@ -186,6 +218,7 @@ async def list_items(
             "image_id": item.image_id,
             "product_name": item.product_name,
             "category": item.category,
+            "prominence": item.prominence,
             "colours": item.colours or [],
             "materials": item.materials or [],
             "patterns": item.patterns or [],
@@ -247,11 +280,17 @@ async def stats(db: AsyncSession = Depends(get_db)):
         .group_by(InStoreCatalogueItem.category)
     )
     by_category = {c: n for c, n in by_cat_rows.all()}
+    by_prom_rows = await db.execute(
+        select(InStoreCatalogueItem.prominence, func.count())
+        .group_by(InStoreCatalogueItem.prominence)
+    )
+    by_prominence = {(p or "unknown"): n for p, n in by_prom_rows.all()}
     return {
         "images_total": sum(by_status.values()),
         "images_by_status": by_status,
         "items_total": total_items,
         "items_by_category": by_category,
+        "items_by_prominence": by_prominence,
     }
 
 

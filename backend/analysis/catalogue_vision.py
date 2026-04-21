@@ -17,30 +17,48 @@ from config import settings
 log = structlog.get_logger()
 
 CATEGORIES = ["Kitchen & Dining", "Home & Decor", "Candles", "Other"]
+PROMINENCE_VALUES = ["hero", "main", "peripheral", "background"]
 
 CATALOGUE_PROMPT = """You are analysing a photograph taken inside a retail store (home, décor, kitchenware).
-The image may contain ANYWHERE FROM 1 TO 80+ distinct products on shelves, tables, or displays.
-Identify EVERY visible product — small items, background items, and items partially in frame count too.
+The photographer framed this shot around a SPECIFIC display, table, aisle end-cap, or product cluster —
+that framed area is the ONLY thing you should catalogue as the subject of the photo. The background
+typically contains shelving and products from other displays that the photographer was NOT documenting.
 
-For each product, extract:
-- product_name: a short descriptive name (e.g. "Red lobster-handle ceramic mug", "Sea turtle ceramic plate", "Blue striped canister")
+For each product visible, extract:
+- product_name: a short descriptive name (e.g. "Red lobster-handle ceramic mug", "Sea turtle ceramic plate")
 - category: exactly one of: "Kitchen & Dining", "Home & Decor", "Candles", "Other"
   - Kitchen & Dining: mugs, plates, bowls, cutlery, cookware, bakeware, glassware, tea towels, placemats, serving ware, food storage, utensils, aprons, lunch boxes
   - Home & Decor: vases, figurines, picture frames, decor objects, throws, cushions, wall art, ornaments, books (decorative/coffee-table)
   - Candles: candles, candle holders, diffusers, wax melts, tea lights
   - Other: anything that doesn't fit the above (tools, electronics, stationery, toys, outdoor, pet, garden)
+- prominence: exactly one of "hero" | "main" | "peripheral" | "background" — this is CRITICAL
+  - hero: centre-frame, in sharp focus, clearly the primary subject of the photo
+  - main: on the same display/table/shelf as the hero items — clearly part of the subject display
+  - peripheral: at the edges of the frame, on neighbouring displays that are only partially visible
+  - background: on distant shelves, blurred, out of focus, behind the main display, or glimpsed through gaps
 - colours: 1-4 dominant colours (e.g. ["red", "cream", "navy"])
 - materials: visible materials (e.g. ["ceramic", "cast iron", "wicker"])
 - patterns: visible patterns (e.g. ["striped", "solid", "speckled", "floral"]) — empty list if plain
 - style_tags: 1-4 style descriptors (e.g. ["coastal", "farmhouse", "modern", "rustic"])
 - confidence: "high" | "medium" | "low"
 
-Return ONLY valid JSON — an array of objects, one per detected product. No prose, no markdown fences.
+PROMINENCE RULES — BE STRICT:
+- The photo was framed around a SPECIFIC display. Everything on that display is hero or main.
+- Everything NOT on that display — including items on background shelving, adjacent aisles, boxed
+  merchandise stacked behind, distant endcaps, items visible through gaps in the front display,
+  cookbooks on a back wall — must be peripheral or background.
+- If in doubt between main and peripheral, choose peripheral.
+- If in doubt between peripheral and background, choose background.
+- Do NOT inflate prominence. It is fine — and expected — for most products to be peripheral/background
+  in a wide retail shot.
+
+Return ONLY valid JSON — an array of objects, one per distinct visible product. No prose, no markdown fences.
 
 [
   {
     "product_name": "...",
     "category": "...",
+    "prominence": "hero",
     "colours": [...],
     "materials": [...],
     "patterns": [...],
@@ -49,7 +67,8 @@ Return ONLY valid JSON — an array of objects, one per detected product. No pro
   }
 ]
 
-Be EXHAUSTIVE. If you see 40 products, return 40 entries. If you see 2, return 2.
+Be EXHAUSTIVE — include ALL visible products, but rate each one's prominence honestly so downstream
+filtering can separate the subject display from incidental background items.
 Do NOT invent duplicates — each entry should correspond to a distinct visible product.
 Do NOT include people, store signage, price tags, or empty shelving as products."""
 
@@ -90,9 +109,13 @@ class CatalogueVision:
         cat = (item.get("category") or "").strip()
         if cat not in CATEGORIES:
             cat = "Other"
+        prominence = (item.get("prominence") or "").strip().lower()
+        if prominence not in PROMINENCE_VALUES:
+            prominence = "main"  # sensible default if Claude omits it
         return {
             "product_name": (item.get("product_name") or "Unknown product").strip()[:300],
             "category": cat,
+            "prominence": prominence,
             "colours": _coerce_list(item.get("colours")),
             "materials": _coerce_list(item.get("materials")),
             "patterns": _coerce_list(item.get("patterns")),

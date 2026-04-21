@@ -106,6 +106,11 @@ async def init_db():
              _idx("ix_fragrance_trend_generation")),
             ("ALTER TABLE fragrance_trend_reports ADD COLUMN IF NOT EXISTS generation_count INTEGER DEFAULT 1",
              _col("fragrance_trend_reports", "generation_count")),
+            # In-store catalogue: prominence column for framing-aware filtering
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS prominence VARCHAR(20)",
+             _col("instore_catalogue_items", "prominence")),
+            ("CREATE INDEX IF NOT EXISTS ix_catalogue_items_prominence ON instore_catalogue_items (prominence)",
+             _idx("ix_catalogue_items_prominence")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

@@ -255,10 +255,12 @@ export const api = {
         image_ids: number[];
       }>;
     },
-    listItems: async (params: { q?: string; category?: string; limit?: number; offset?: number } = {}) => {
+    listItems: async (params: { q?: string; category?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
+      if (params.show_all) qs.set("show_all", "true");
+      if (params.prominence) qs.set("prominence", params.prominence);
       qs.set("limit", String(params.limit ?? 60));
       qs.set("offset", String(params.offset ?? 0));
       const res = await fetch(`${API_BASE}/api/instore-catalogue/?${qs}`, { cache: "no-store" });
