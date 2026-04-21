@@ -14,8 +14,8 @@ const topLinks = [
 
 const trendsDropdown = [
   { href: "/trends", label: "Product Trends" },
-  { href: "/fragrance-trends", label: "Fragrance" },
-  { href: "/instore", label: "In-store" },
+  { href: "/fragrance-trends", label: "Fragrance Trends" },
+  { href: "/instore", label: "In-store Trends" },
   { href: "/aldi", label: "Aldi Trends" },
 ];
 
@@ -88,7 +88,7 @@ export default function Navigation() {
                 isTrendsActive ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
               )}
             >
-              Trends
+              Analysis
               <svg
                 className={clsx("w-3.5 h-3.5 transition-transform", open && "rotate-180")}
                 fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
@@ -118,7 +118,7 @@ export default function Navigation() {
             )}
           </div>
 
-          {/* Retailers */}
+          {/* Retailers (Scrape) */}
           <Link
             href="/retailers"
             className={clsx(
@@ -128,7 +128,7 @@ export default function Navigation() {
                 : "text-stone-600 hover:bg-stone-100"
             )}
           >
-            Retailers
+            Scrape
           </Link>
 
           {/* Historical Products */}
