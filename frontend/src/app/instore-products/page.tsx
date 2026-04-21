@@ -411,30 +411,60 @@ function EditableCategory({ value, onSave }: { value: string; onSave: (v: string
 
 function ProductCard({
   item,
+  selected,
+  onToggleSelect,
   onUpdate,
   onDelete,
   onOpenLightbox,
 }: {
   item: CatalogueItem;
+  selected: boolean;
+  onToggleSelect: (id: number, e: React.MouseEvent) => void;
   onUpdate: (id: number, patch: { product_name?: string; category?: string }) => Promise<void>;
   onDelete: (id: number) => void;
   onOpenLightbox: (imageId: number, filename: string) => void;
 }) {
   return (
-    <div className="bg-white rounded-xl border border-stone-200 overflow-hidden flex flex-col">
-      <button
-        onClick={() => onOpenLightbox(item.image_id, item.source_filename)}
-        className="relative aspect-square bg-stone-100 overflow-hidden group"
-        title="Click to view full image"
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={api.instoreCatalogue.imageUrl(item.image_id)}
-          alt={item.product_name}
-          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-          loading="lazy"
-        />
-      </button>
+    <div
+      className={clsx(
+        "bg-white rounded-xl border overflow-hidden flex flex-col transition-colors",
+        selected ? "border-stone-900 ring-2 ring-stone-900" : "border-stone-200",
+      )}
+    >
+      <div className="relative aspect-square bg-stone-100 overflow-hidden group">
+        <button
+          onClick={() => onOpenLightbox(item.image_id, item.source_filename)}
+          className="w-full h-full"
+          title="Click to view full image"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={api.instoreCatalogue.imageUrl(item.image_id)}
+            alt={item.product_name}
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            loading="lazy"
+          />
+        </button>
+        {/* Select checkbox — top-left */}
+        <label
+          className={clsx(
+            "absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-opacity",
+            selected
+              ? "bg-stone-900 text-white opacity-100"
+              : "bg-white/90 text-stone-400 opacity-0 group-hover:opacity-100 hover:bg-white border border-stone-300",
+          )}
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(item.id, e); }}
+          title="Select for bulk actions (shift-click to range-select)"
+        >
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => { /* handled by label onClick */ }}
+            className="sr-only"
+          />
+          {selected ? "✓" : ""}
+        </label>
+      </div>
       <div className="p-3 space-y-2 flex-1 flex flex-col">
         <EditableName value={item.product_name} onSave={(v) => onUpdate(item.id, { product_name: v })} />
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -589,6 +619,12 @@ export default function InStoreProductsPage() {
 
   // Lightbox
   const [lightbox, setLightbox] = useState<{ id: number; filename: string } | null>(null);
+
+  // Multi-select
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const lastClickedIdRef = useRef<number | null>(null);
+  const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   // Reload nonce for failed panel
   const [failedReload, setFailedReload] = useState(0);
@@ -753,6 +789,73 @@ export default function InStoreProductsPage() {
     } catch { /* ignore */ }
   }, [loadStats]);
 
+  // ── Selection actions ───────────────────────────────────────────────────
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  // Clear selection on filter change so old IDs don't linger after they scroll off
+  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, showAll, page]);
+
+  const toggleSelect = useCallback((id: number, e: React.MouseEvent) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      // Shift-click = range select using the last clicked anchor
+      if (e.shiftKey && lastClickedIdRef.current != null && lastClickedIdRef.current !== id) {
+        const ids = items.map((it) => it.id);
+        const a = ids.indexOf(lastClickedIdRef.current);
+        const b = ids.indexOf(id);
+        if (a !== -1 && b !== -1) {
+          const [lo, hi] = [Math.min(a, b), Math.max(a, b)];
+          for (let i = lo; i <= hi; i++) next.add(ids[i]);
+          lastClickedIdRef.current = id;
+          return next;
+        }
+      }
+      if (next.has(id)) next.delete(id); else next.add(id);
+      lastClickedIdRef.current = id;
+      return next;
+    });
+  }, [items]);
+
+  const selectAllOnPage = useCallback(() => {
+    setSelectedIds(new Set(items.map((it) => it.id)));
+  }, [items]);
+
+  const bulkDeleteSelected = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} selected item${selectedIds.size !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    setBulkDeleting(true);
+    try {
+      const ids = Array.from(selectedIds);
+      await api.instoreCatalogue.bulkDeleteItems(ids);
+      setItems((prev) => prev.filter((it) => !selectedIds.has(it.id)));
+      setTotal((t) => Math.max(0, t - selectedIds.size));
+      clearSelection();
+      loadStats();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Bulk delete failed");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }, [selectedIds, clearSelection, loadStats]);
+
+  const deleteEverything = useCallback(async () => {
+    setBulkDeleting(true);
+    try {
+      await api.instoreCatalogue.deleteEverything();
+      clearSelection();
+      setItems([]);
+      setTotal(0);
+      setPage(0);
+      await loadStats();
+      setConfirmingDeleteAll(false);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Delete all failed");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }, [clearSelection, loadStats]);
+
   // ── Derived ──────────────────────────────────────────────────────────────
 
   const processingCount = (stats?.images_by_status?.pending || 0) + (stats?.images_by_status?.analysing || 0);
@@ -765,19 +868,30 @@ export default function InStoreProductsPage() {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-2xl font-bold text-stone-900">In-store Products</h1>
-        <div className="text-sm text-stone-500 text-right">
-          {loading ? "Loading…" : (
-            <>
-              <div>{items.length} of {total.toLocaleString()} products</div>
-              {stats && (
-                <div className="text-xs text-stone-400">
-                  {stats.items_total.toLocaleString()} catalogued · {stats.images_total} images
-                  {processingCount > 0 && ` · ${processingCount} analysing`}
-                  {failedCount > 0 && ` · ${failedCount} failed`}
-                </div>
-              )}
-            </>
+        <div className="flex items-center gap-3">
+          {stats && stats.images_total > 0 && (
+            <button
+              onClick={() => setConfirmingDeleteAll(true)}
+              className="px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 text-xs font-medium"
+              title="Permanently delete every image, item, and file in the catalogue"
+            >
+              Delete all
+            </button>
           )}
+          <div className="text-sm text-stone-500 text-right">
+            {loading ? "Loading…" : (
+              <>
+                <div>{items.length} of {total.toLocaleString()} products</div>
+                {stats && (
+                  <div className="text-xs text-stone-400">
+                    {stats.items_total.toLocaleString()} catalogued · {stats.images_total} images
+                    {processingCount > 0 && ` · ${processingCount} analysing`}
+                    {failedCount > 0 && ` · ${failedCount} failed`}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -897,6 +1011,8 @@ export default function InStoreProductsPage() {
                   <ProductCard
                     key={item.id}
                     item={item}
+                    selected={selectedIds.has(item.id)}
+                    onToggleSelect={toggleSelect}
                     onUpdate={updateItem}
                     onDelete={deleteItem}
                     onOpenLightbox={(id, fn) => setLightbox({ id, filename: fn })}
@@ -945,6 +1061,67 @@ export default function InStoreProductsPage() {
       {/* Lightbox */}
       {lightbox && (
         <Lightbox imageId={lightbox.id} filename={lightbox.filename} onClose={() => setLightbox(null)} />
+      )}
+
+      {/* Floating selection action bar */}
+      {selectedIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-stone-900 text-white rounded-full shadow-xl px-2 py-1.5 flex items-center gap-1">
+          <span className="px-3 py-1 text-sm font-medium">
+            {selectedIds.size} selected
+          </span>
+          <button
+            onClick={selectAllOnPage}
+            className="px-3 py-1 text-xs rounded-full hover:bg-stone-800 transition-colors"
+          >
+            Select all on page ({items.length})
+          </button>
+          <button
+            onClick={clearSelection}
+            className="px-3 py-1 text-xs rounded-full hover:bg-stone-800 transition-colors"
+          >
+            Clear
+          </button>
+          <button
+            onClick={bulkDeleteSelected}
+            disabled={bulkDeleting}
+            className="px-4 py-1.5 rounded-full bg-red-500 hover:bg-red-600 text-white text-sm font-medium disabled:opacity-60"
+          >
+            {bulkDeleting ? "Deleting…" : `Delete ${selectedIds.size}`}
+          </button>
+        </div>
+      )}
+
+      {/* Delete-all confirmation modal */}
+      {confirmingDeleteAll && stats && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <h2 className="text-lg font-bold text-stone-900">Delete everything?</h2>
+            <div className="text-sm text-stone-600 space-y-2">
+              <p>
+                This will permanently delete <strong className="text-stone-900">{stats.images_total.toLocaleString()} images</strong>
+                {" "}and <strong className="text-stone-900">{stats.items_total.toLocaleString()} catalogued products</strong>,
+                including the image files on disk.
+              </p>
+              <p className="text-red-600">This cannot be undone.</p>
+            </div>
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                onClick={() => setConfirmingDeleteAll(false)}
+                disabled={bulkDeleting}
+                className="px-4 py-2 rounded-lg border border-stone-300 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteEverything}
+                disabled={bulkDeleting}
+                className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-60"
+              >
+                {bulkDeleting ? "Deleting…" : "Yes, delete everything"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

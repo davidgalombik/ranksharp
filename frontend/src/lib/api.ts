@@ -295,6 +295,20 @@ export const api = {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
+    bulkDeleteItems: async (ids: number[]) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/items/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_ids: ids }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ deleted: number }>;
+    },
+    deleteEverything: async () => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/everything?confirm=YES`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ deleted_images: number; files_unlinked: number }>;
+    },
     retryImage: async (id: number) => {
       const res = await fetch(`${API_BASE}/api/instore-catalogue/images/${id}/retry`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());

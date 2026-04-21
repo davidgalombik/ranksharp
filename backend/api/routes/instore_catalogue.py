@@ -364,6 +364,63 @@ async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
     return {"deleted": True, "id": item_id}
 
 
+class BulkDeleteBody(BaseModel):
+    item_ids: list[int]
+
+
+@router.post("/items/bulk-delete")
+async def bulk_delete_items(body: BulkDeleteBody, db: AsyncSession = Depends(get_db)):
+    """Delete multiple items in one round-trip (up to 1000 at a time)."""
+    if not body.item_ids:
+        return {"deleted": 0}
+    ids = body.item_ids[:1000]
+    result = await db.execute(
+        select(InStoreCatalogueItem).where(InStoreCatalogueItem.id.in_(ids))
+    )
+    items = result.scalars().all()
+    for item in items:
+        await db.delete(item)
+    await db.commit()
+    return {"deleted": len(items)}
+
+
+@router.delete("/everything")
+async def delete_everything(
+    confirm: str = Query(..., description="Must be literal string 'YES' to proceed"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Wipe the entire In-store Products catalogue: all items, all image rows,
+    and their files on disk. Requires ?confirm=YES as a safety gate."""
+    if confirm != "YES":
+        raise HTTPException(status_code=400, detail="Pass ?confirm=YES to proceed")
+
+    # Collect file paths before DB delete so we can unlink after commit
+    images = (await db.execute(select(InStoreCatalogueImage))).scalars().all()
+    paths = [Path(img.file_path) for img in images]
+    image_count = len(images)
+
+    # Delete items first then images (explicit to avoid ORDER-BY cascade surprises)
+    await db.execute(
+        InStoreCatalogueItem.__table__.delete()
+    )
+    await db.execute(
+        InStoreCatalogueImage.__table__.delete()
+    )
+    await db.commit()
+
+    # Best-effort file cleanup
+    unlinked = 0
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+            unlinked += 1
+        except Exception:
+            pass
+
+    log.info("catalogue_everything_deleted", images=image_count, files_unlinked=unlinked)
+    return {"deleted_images": image_count, "files_unlinked": unlinked}
+
+
 # ── Retry / delete images ─────────────────────────────────────────────────────
 
 @router.post("/images/{image_id}/retry")
