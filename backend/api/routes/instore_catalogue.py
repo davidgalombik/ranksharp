@@ -268,36 +268,189 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
     return {"retailers": named, "untagged_count": untagged}
 
 
-# ── Images endpoint — separate list for the image-centric view (failed retry etc) ──
+# ── Images endpoint — primary image-centric list (one row per uploaded photo) ──
+
+SAMPLE_ITEMS_PER_IMAGE = 6   # how many detected products to include per image in the preview
+
+
+def _build_item_filter(
+    q: Optional[str],
+    category: Optional[str],
+    prominence: Optional[str],
+    show_all: bool,
+):
+    """Return a list of SQL conditions to apply to the InStoreCatalogueItem rows.
+
+    Also returns a boolean `product_filter_active` — when True the main image
+    list should be restricted to images that have at least one matching item.
+    """
+    conds: list = []
+    active = False
+
+    if q:
+        conds.append(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
+        active = True
+    if category and category in CATEGORIES:
+        conds.append(InStoreCatalogueItem.category == category)
+        active = True
+
+    if prominence:
+        requested = {p.strip().lower() for p in prominence.split(",") if p.strip().lower() in PROMINENCE_VALUES}
+        if requested:
+            if requested == DEFAULT_PROMINENCE:
+                conds.append(or_(
+                    InStoreCatalogueItem.prominence.in_(requested),
+                    InStoreCatalogueItem.prominence.is_(None),
+                ))
+            else:
+                conds.append(InStoreCatalogueItem.prominence.in_(requested))
+            # Only flag as "active" if it's narrower than the default
+            if requested != DEFAULT_PROMINENCE:
+                active = True
+    elif not show_all:
+        conds.append(or_(
+            InStoreCatalogueItem.prominence.in_(DEFAULT_PROMINENCE),
+            InStoreCatalogueItem.prominence.is_(None),
+        ))
+        # Not "active" — this is the default, we don't want to exclude
+        # images that only have peripheral/background items from appearing
+        # (they'd just have zero matching items in their preview).
+
+    return conds, active
+
 
 @router.get("/images")
 async def list_images(
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    retailer: Optional[str] = None,
+    prominence: Optional[str] = None,
+    show_all: bool = False,
     status: Optional[str] = None,
     limit: int = Query(default=60, le=200),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(InStoreCatalogueImage).order_by(desc(InStoreCatalogueImage.created_at))
+    """Image-centric list — one row per uploaded photo, with a preview of detected products.
+
+    Filters `q`, `category`, `prominence` are applied at the item level; when any is
+    active the result is restricted to images that contain at least one matching item.
+    Filters `retailer`, `status` are applied at the image level.
+    """
+    item_conds, product_filter_active = _build_item_filter(q, category, prominence, show_all)
+
+    # Stage 1: determine which image ids to return on this page
+    img_stmt = select(InStoreCatalogueImage).order_by(desc(InStoreCatalogueImage.created_at))
     count_stmt = select(func.count()).select_from(InStoreCatalogueImage)
+
+    if retailer:
+        if retailer == "__none__":
+            img_stmt = img_stmt.where(InStoreCatalogueImage.retailer.is_(None))
+            count_stmt = count_stmt.where(InStoreCatalogueImage.retailer.is_(None))
+        else:
+            img_stmt = img_stmt.where(InStoreCatalogueImage.retailer == retailer)
+            count_stmt = count_stmt.where(InStoreCatalogueImage.retailer == retailer)
+
     if status:
-        stmt = stmt.where(InStoreCatalogueImage.status == status)
+        img_stmt = img_stmt.where(InStoreCatalogueImage.status == status)
         count_stmt = count_stmt.where(InStoreCatalogueImage.status == status)
-    stmt = stmt.limit(limit).offset(offset)
-    rows = (await db.execute(stmt)).scalars().all()
+
+    if product_filter_active:
+        sub = select(InStoreCatalogueItem.image_id).where(*item_conds).distinct()
+        img_stmt = img_stmt.where(InStoreCatalogueImage.id.in_(sub))
+        count_stmt = count_stmt.where(InStoreCatalogueImage.id.in_(sub))
+
+    img_stmt = img_stmt.limit(limit).offset(offset)
+
+    images = (await db.execute(img_stmt)).scalars().all()
     total = (await db.execute(count_stmt)).scalar_one()
+    image_ids = [img.id for img in images]
+
+    # Stage 2: fetch items for this page of images
+    # - If product filter is active, only fetch matching items (so previews align with the filter)
+    # - Otherwise fetch all items (or items that pass the default prominence visibility filter)
+    items_by_image: dict[int, list] = {i: [] for i in image_ids}
+    total_items_by_image: dict[int, int] = {i: 0 for i in image_ids}
+    cats_by_image: dict[int, dict[str, int]] = {i: {} for i in image_ids}
+
+    if image_ids:
+        items_stmt = (
+            select(InStoreCatalogueItem)
+            .where(InStoreCatalogueItem.image_id.in_(image_ids))
+            .order_by(InStoreCatalogueItem.id)
+        )
+        # Apply item-level filters to the preview set (so category/q/prominence narrow the preview)
+        if item_conds:
+            items_stmt = items_stmt.where(*item_conds)
+        rows = (await db.execute(items_stmt)).scalars().all()
+        for it in rows:
+            items_by_image.setdefault(it.image_id, []).append(it)
+            total_items_by_image[it.image_id] = total_items_by_image.get(it.image_id, 0) + 1
+            if it.category:
+                d = cats_by_image.setdefault(it.image_id, {})
+                d[it.category] = d.get(it.category, 0) + 1
+
+    # Stage 3: shape the response
+    result = []
+    for img in images:
+        preview = items_by_image.get(img.id, [])[:SAMPLE_ITEMS_PER_IMAGE]
+        result.append({
+            "id": img.id,
+            "filename": img.filename,
+            "file_type": img.file_type,
+            "status": img.status,
+            "retailer": img.retailer,
+            "item_count": total_items_by_image.get(img.id, 0),
+            "total_item_count": img.item_count,  # raw column from DB (unfiltered total)
+            "by_category": cats_by_image.get(img.id, {}),
+            "error_message": img.error_message,
+            "created_at": img.created_at,
+            "preview": [
+                {
+                    "id": it.id,
+                    "product_name": it.product_name,
+                    "category": it.category,
+                    "prominence": it.prominence,
+                }
+                for it in preview
+            ],
+        })
+
+    return {"total": total, "images": result}
+
+
+@router.get("/images/{image_id}")
+async def get_image_detail(image_id: int, db: AsyncSession = Depends(get_db)):
+    """Full image detail — all items with every attribute, for the click-through modal."""
+    image = await db.get(InStoreCatalogueImage, image_id)
+    if not image:
+        raise HTTPException(status_code=404, detail="Not found")
+    items = (await db.execute(
+        select(InStoreCatalogueItem)
+        .where(InStoreCatalogueItem.image_id == image_id)
+        .order_by(InStoreCatalogueItem.id)
+    )).scalars().all()
     return {
-        "total": total,
-        "images": [
+        "id": image.id,
+        "filename": image.filename,
+        "file_type": image.file_type,
+        "status": image.status,
+        "retailer": image.retailer,
+        "error_message": image.error_message,
+        "created_at": image.created_at,
+        "items": [
             {
-                "id": i.id,
-                "filename": i.filename,
-                "file_type": i.file_type,
-                "status": i.status,
-                "item_count": i.item_count,
-                "error_message": i.error_message,
-                "created_at": i.created_at,
+                "id": it.id,
+                "product_name": it.product_name,
+                "category": it.category,
+                "prominence": it.prominence,
+                "colours": it.colours or [],
+                "materials": it.materials or [],
+                "patterns": it.patterns or [],
+                "style_tags": it.style_tags or [],
+                "confidence": it.confidence,
             }
-            for i in rows
+            for it in items
         ],
     }
 
@@ -521,3 +674,30 @@ async def delete_image(image_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(image)  # cascade deletes items
     await db.commit()
     return {"deleted": True, "id": image_id}
+
+
+class BulkDeleteImagesBody(BaseModel):
+    image_ids: list[int]
+
+
+@router.post("/images/bulk-delete")
+async def bulk_delete_images(body: BulkDeleteImagesBody, db: AsyncSession = Depends(get_db)):
+    """Bulk-delete images (and cascade their items + unlink files). Capped at 1000/call."""
+    if not body.image_ids:
+        return {"deleted": 0}
+    ids = body.image_ids[:1000]
+    rows = (await db.execute(
+        select(InStoreCatalogueImage).where(InStoreCatalogueImage.id.in_(ids))
+    )).scalars().all()
+    paths = [Path(img.file_path) for img in rows]
+    for img in rows:
+        await db.delete(img)
+    await db.commit()
+    unlinked = 0
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+            unlinked += 1
+        except Exception:
+            pass
+    return {"deleted": len(rows), "files_unlinked": unlinked}

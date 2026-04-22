@@ -274,14 +274,42 @@ export const api = {
       if (!res.ok) throw new Error(await res.text());
       return res.json() as Promise<{ retailers: { name: string; count: number }[]; untagged_count: number }>;
     },
-    listImages: async (params: { status?: string; limit?: number; offset?: number } = {}) => {
+    listImages: async (params: {
+      q?: string;
+      category?: string;
+      retailer?: string;
+      prominence?: string;
+      show_all?: boolean;
+      status?: string;
+      limit?: number;
+      offset?: number;
+    } = {}) => {
       const qs = new URLSearchParams();
+      if (params.q) qs.set("q", params.q);
+      if (params.category) qs.set("category", params.category);
+      if (params.retailer) qs.set("retailer", params.retailer);
+      if (params.prominence) qs.set("prominence", params.prominence);
+      if (params.show_all) qs.set("show_all", "true");
       if (params.status) qs.set("status", params.status);
       qs.set("limit", String(params.limit ?? 60));
       qs.set("offset", String(params.offset ?? 0));
       const res = await fetch(`${API_BASE}/api/instore-catalogue/images?${qs}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
+    },
+    getImageDetail: async (id: number) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/images/${id}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    bulkDeleteImages: async (ids: number[]) => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/images/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_ids: ids }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ deleted: number; files_unlinked: number }>;
     },
     stats: async () => {
       const res = await fetch(`${API_BASE}/api/instore-catalogue/stats`, { cache: "no-store" });

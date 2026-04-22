@@ -54,6 +54,50 @@ interface CatalogueItem {
   created_at: string;
 }
 
+interface ImagePreviewItem {
+  id: number;
+  product_name: string;
+  category: string;
+  prominence: string | null;
+}
+
+interface ImageRow {
+  id: number;
+  filename: string;
+  file_type: string;
+  status: string;
+  retailer: string | null;
+  item_count: number;       // count matching active filter
+  total_item_count: number; // total detected (from DB column)
+  by_category: Record<string, number>;
+  error_message: string | null;
+  created_at: string;
+  preview: ImagePreviewItem[];
+}
+
+interface ImageDetailItem {
+  id: number;
+  product_name: string;
+  category: string;
+  prominence: string | null;
+  colours: string[];
+  materials: string[];
+  patterns: string[];
+  style_tags: string[];
+  confidence: string | null;
+}
+
+interface ImageDetail {
+  id: number;
+  filename: string;
+  file_type: string;
+  status: string;
+  retailer: string | null;
+  error_message: string | null;
+  created_at: string;
+  items: ImageDetailItem[];
+}
+
 interface Retailer {
   name: string;
   count: number;
@@ -450,9 +494,10 @@ function EditableCategory({ value, onSave }: { value: string; onSave: (v: string
   );
 }
 
-// ── Product card ─────────────────────────────────────────────────────────────
+// ── Product card (legacy — kept for potential future flat-list view) ─────────
 
-function ProductCard({
+/* eslint-disable-next-line @typescript-eslint/no-unused-vars */
+function _ProductCard({
   item,
   selected,
   onToggleSelect,
@@ -554,9 +599,10 @@ function ProductCard({
   );
 }
 
-// ── Lightbox ─────────────────────────────────────────────────────────────────
+// ── Lightbox (legacy — kept for potential reuse) ─────────────────────────────
 
-function Lightbox({ imageId, filename, onClose }: { imageId: number; filename: string; onClose: () => void }) {
+/* eslint-disable-next-line @typescript-eslint/no-unused-vars */
+function _Lightbox({ imageId, filename, onClose }: { imageId: number; filename: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -644,14 +690,289 @@ function FailedImagesPanel({ onRetryAll, reload }: { onRetryAll: () => void; rel
   );
 }
 
+// ── Image card (one per uploaded photo) ──────────────────────────────────────
+
+function ImageCard({
+  image,
+  selected,
+  onToggleSelect,
+  onOpen,
+}: {
+  image: ImageRow;
+  selected: boolean;
+  onToggleSelect: (id: number, e: React.MouseEvent) => void;
+  onOpen: () => void;
+}) {
+  const categoryEntries = Object.entries(image.by_category).sort((a, b) => b[1] - a[1]);
+  const status = image.status;
+  const isProcessing = status === "pending" || status === "analysing";
+  const isFailed = status === "failed";
+
+  return (
+    <div
+      className={clsx(
+        "bg-white rounded-xl border overflow-hidden flex flex-col transition-colors",
+        selected ? "border-stone-900 ring-2 ring-stone-900" : "border-stone-200",
+      )}
+    >
+      <div className="relative aspect-square bg-stone-100 overflow-hidden group">
+        <button
+          onClick={onOpen}
+          className="w-full h-full"
+          title="Click to view all detected products"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={api.instoreCatalogue.imageUrl(image.id)}
+            alt={image.filename}
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            loading="lazy"
+          />
+        </button>
+
+        {/* Select checkbox */}
+        <label
+          className={clsx(
+            "absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-opacity",
+            selected
+              ? "bg-stone-900 text-white opacity-100"
+              : "bg-white/90 text-stone-400 opacity-0 group-hover:opacity-100 hover:bg-white border border-stone-300",
+          )}
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(image.id, e); }}
+          title="Select image (shift-click to range-select)"
+        >
+          <input type="checkbox" checked={selected} onChange={() => {}} className="sr-only" />
+          {selected ? "✓" : ""}
+        </label>
+
+        {/* Retailer chip */}
+        {image.retailer && (
+          <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-100 text-violet-800 border border-violet-200 shadow-sm">
+            {image.retailer}
+          </span>
+        )}
+
+        {/* Status ribbon */}
+        {isProcessing && (
+          <div className="absolute inset-x-0 bottom-0 bg-amber-500/90 text-white text-xs font-semibold text-center py-1 animate-pulse">
+            {status === "analysing" ? "Analysing…" : "Queued"}
+          </div>
+        )}
+        {isFailed && (
+          <div className="absolute inset-x-0 bottom-0 bg-red-500/90 text-white text-xs font-semibold text-center py-1">
+            Analysis failed
+          </div>
+        )}
+      </div>
+
+      <div className="p-3 space-y-2 flex-1 flex flex-col">
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="text-sm font-semibold text-stone-900">
+            {image.item_count} product{image.item_count !== 1 ? "s" : ""}
+          </p>
+          {image.total_item_count > image.item_count && (
+            <p className="text-xs text-stone-400">of {image.total_item_count}</p>
+          )}
+        </div>
+
+        {/* Category breakdown */}
+        {categoryEntries.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {categoryEntries.map(([cat, n]) => (
+              <span
+                key={cat}
+                className={clsx(
+                  "px-1.5 py-0.5 rounded-full text-[10px] font-medium border",
+                  CATEGORY_COLOURS[cat] || CATEGORY_COLOURS["Other"],
+                )}
+              >
+                {n} {cat}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Sample product names */}
+        {image.preview.length > 0 && (
+          <ul className="text-xs text-stone-500 space-y-0.5 list-disc list-inside">
+            {image.preview.slice(0, 3).map((p) => (
+              <li key={p.id} className="truncate">{p.product_name}</li>
+            ))}
+            {image.item_count > 3 && (
+              <li className="list-none text-stone-400">… +{image.item_count - 3} more</li>
+            )}
+          </ul>
+        )}
+
+        <p className="text-[10px] text-stone-300 mt-auto pt-1 truncate" title={image.filename}>
+          {image.filename}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Image detail modal (full image + all detected products) ──────────────────
+
+function ImageDetailModal({
+  imageId,
+  onClose,
+  onItemUpdated,
+  onItemDeleted,
+  onImageDeleted,
+}: {
+  imageId: number;
+  onClose: () => void;
+  onItemUpdated: (id: number, patch: { product_name?: string; category?: string }) => Promise<void>;
+  onItemDeleted: (id: number) => Promise<void>;
+  onImageDeleted: (id: number) => void;
+}) {
+  const [detail, setDetail] = useState<ImageDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.instoreCatalogue.getImageDetail(imageId)
+      .then((d) => { if (!cancelled) setDetail(d as ImageDetail); })
+      .catch(() => { if (!cancelled) setDetail(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [imageId]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const handleItemPatch = async (id: number, patch: { product_name?: string; category?: string }) => {
+    await onItemUpdated(id, patch);
+    setDetail((prev) => prev ? { ...prev, items: prev.items.map((it) => it.id === id ? { ...it, ...patch } : it) } : prev);
+  };
+
+  const handleItemDelete = async (id: number) => {
+    if (!confirm("Delete this detected product?")) return;
+    await onItemDeleted(id);
+    setDetail((prev) => prev ? { ...prev, items: prev.items.filter((it) => it.id !== id) } : prev);
+  };
+
+  const handleImageDelete = async () => {
+    if (!detail) return;
+    if (!confirm(`Delete this image and all ${detail.items.length} detected product${detail.items.length !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    await api.instoreCatalogue.deleteImage(detail.id);
+    onImageDeleted(detail.id);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/75 z-50 flex items-stretch justify-center p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-xl shadow-xl max-w-7xl w-full max-h-[92vh] overflow-hidden flex flex-col md:flex-row"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Left: image */}
+        <div className="md:w-1/2 bg-stone-900 flex items-center justify-center p-4 md:p-6 relative">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={api.instoreCatalogue.imageUrl(imageId)}
+            alt={detail?.filename || ""}
+            className="max-w-full max-h-[85vh] object-contain rounded-lg"
+          />
+        </div>
+
+        {/* Right: items list */}
+        <div className="md:w-1/2 flex flex-col overflow-hidden">
+          <div className="flex items-center justify-between p-4 border-b border-stone-200">
+            <div className="min-w-0">
+              <p className="text-xs text-stone-400 truncate" title={detail?.filename}>{detail?.filename}</p>
+              <div className="flex items-center gap-2 mt-1">
+                {detail?.retailer && (
+                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-violet-100 text-violet-800 border border-violet-200">
+                    {detail.retailer}
+                  </span>
+                )}
+                <p className="text-sm font-semibold text-stone-900">
+                  {detail ? `${detail.items.length} product${detail.items.length !== 1 ? "s" : ""} detected` : "Loading…"}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleImageDelete}
+                className="text-xs text-red-500 hover:text-red-700"
+                title="Delete this image and all its detected products"
+              >
+                Delete image
+              </button>
+              <button
+                onClick={onClose}
+                className="text-2xl text-stone-400 hover:text-stone-900 leading-none"
+                title="Close (Esc)"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {loading && <p className="text-sm text-stone-400 animate-pulse">Loading products…</p>}
+            {!loading && detail?.items.length === 0 && (
+              <p className="text-sm text-stone-400">No products detected in this image.</p>
+            )}
+            {detail?.items.map((item) => (
+              <div key={item.id} className="bg-stone-50 rounded-xl border border-stone-200 p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <EditableName
+                    value={item.product_name}
+                    onSave={(v) => handleItemPatch(item.id, { product_name: v })}
+                  />
+                  <button
+                    onClick={() => handleItemDelete(item.id)}
+                    className="text-xs text-stone-300 hover:text-red-500 leading-none"
+                    title="Delete this item"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <EditableCategory
+                    value={item.category}
+                    onSave={(v) => handleItemPatch(item.id, { category: v })}
+                  />
+                  {item.prominence && PROMINENCE_LABEL[item.prominence] && (
+                    <span
+                      className={clsx("px-1.5 py-0.5 rounded-full text-[10px] font-medium", PROMINENCE_COLOURS[item.prominence] || "bg-stone-100 text-stone-500")}
+                    >
+                      {PROMINENCE_LABEL[item.prominence]}
+                    </span>
+                  )}
+                </div>
+                {(item.colours.length > 0 || item.materials.length > 0) && (
+                  <div className="text-xs text-stone-500 space-y-0.5">
+                    {item.colours.length > 0 && <p>Colours: {item.colours.join(" · ")}</p>}
+                    {item.materials.length > 0 && <p>Materials: {item.materials.join(" · ")}</p>}
+                    {item.patterns.length > 0 && <p>Patterns: {item.patterns.join(" · ")}</p>}
+                    {item.style_tags.length > 0 && <p>Style: {item.style_tags.join(" · ")}</p>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ────────────────────────────────────────────────────────────────
 
 export default function InStoreProductsPage() {
-  const [items, setItems] = useState<CatalogueItem[]>([]);
+  const [images, setImages] = useState<ImageRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
-  const PAGE_SIZE = 60;
+  const PAGE_SIZE = 48;
 
   // Filters
   const [search, setSearch] = useState("");
@@ -676,10 +997,10 @@ export default function InStoreProductsPage() {
   // Stats
   const [stats, setStats] = useState<Stats | null>(null);
 
-  // Lightbox
-  const [lightbox, setLightbox] = useState<{ id: number; filename: string } | null>(null);
+  // Detail modal (image-level)
+  const [openImageId, setOpenImageId] = useState<number | null>(null);
 
-  // Multi-select
+  // Multi-select (image IDs)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const lastClickedIdRef = useRef<number | null>(null);
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
@@ -699,11 +1020,11 @@ export default function InStoreProductsPage() {
     setPage(0);
   }, [debouncedSearch, category, retailerFilter, showAll]);
 
-  // Load items
-  const loadItems = useCallback(async () => {
+  // Load images (image-centric grid)
+  const loadImages = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.instoreCatalogue.listItems({
+      const data = await api.instoreCatalogue.listImages({
         q: debouncedSearch || undefined,
         category: category || undefined,
         retailer: retailerFilter || undefined,
@@ -711,17 +1032,17 @@ export default function InStoreProductsPage() {
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       });
-      setItems(data.items || []);
+      setImages((data.images as ImageRow[]) || []);
       setTotal(data.total || 0);
     } catch {
-      setItems([]);
+      setImages([]);
       setTotal(0);
     } finally {
       setLoading(false);
     }
   }, [debouncedSearch, category, retailerFilter, showAll, page]);
 
-  useEffect(() => { loadItems(); }, [loadItems]);
+  useEffect(() => { loadImages(); }, [loadImages]);
 
   // Load stats
   const loadStats = useCallback(async () => {
@@ -756,9 +1077,9 @@ export default function InStoreProductsPage() {
       (stats.images_by_status?.analysing || 0) > 0
     );
     if (!anyActive) return;
-    const t = setInterval(() => { loadStats(); loadItems(); }, 4000);
+    const t = setInterval(() => { loadStats(); loadImages(); }, 4000);
     return () => clearInterval(t);
-  }, [stats, loadStats, loadItems]);
+  }, [stats, loadStats, loadImages]);
 
   // ── Upload pipeline ──────────────────────────────────────────────────────
 
@@ -834,9 +1155,9 @@ export default function InStoreProductsPage() {
       window.localStorage.setItem(RETAILER_STORAGE_KEY, uploadRetailer.trim());
     }
     await loadStats();
-    await loadItems();
+    await loadImages();
     await loadRetailers();
-  }, [pendingFiles, uploadRetailer, loadStats, loadItems, loadRetailers]);
+  }, [pendingFiles, uploadRetailer, loadStats, loadImages, loadRetailers]);
 
   const cancelUpload = useCallback(() => {
     cancelRef.current = true;
@@ -844,24 +1165,22 @@ export default function InStoreProductsPage() {
 
   // ── Item actions ─────────────────────────────────────────────────────────
 
+  // Item-level edit/delete (invoked from the detail modal)
   const updateItem = useCallback(async (id: number, patch: { product_name?: string; category?: string }) => {
     try {
       await api.instoreCatalogue.patchItem(id, patch);
-      setItems((prev) => prev.map((it) => it.id === id ? { ...it, ...patch } : it));
-      // Update stats optimistically for category changes
       if (patch.category) loadStats();
     } catch { /* ignore */ }
   }, [loadStats]);
 
   const deleteItem = useCallback(async (id: number) => {
-    if (!confirm("Delete this item?")) return;
     try {
       await api.instoreCatalogue.deleteItem(id);
-      setItems((prev) => prev.filter((it) => it.id !== id));
-      setTotal((t) => Math.max(0, t - 1));
       loadStats();
+      // Refresh the image list so counts update
+      loadImages();
     } catch { /* ignore */ }
-  }, [loadStats]);
+  }, [loadStats, loadImages]);
 
   const retryAllFailed = useCallback(async () => {
     if (!confirm("Re-queue all failed images for analysis?")) return;
@@ -884,7 +1203,7 @@ export default function InStoreProductsPage() {
       const next = new Set(prev);
       // Shift-click = range select using the last clicked anchor
       if (e.shiftKey && lastClickedIdRef.current != null && lastClickedIdRef.current !== id) {
-        const ids = items.map((it) => it.id);
+        const ids = images.map((img) => img.id);
         const a = ids.indexOf(lastClickedIdRef.current);
         const b = ids.indexOf(id);
         if (a !== -1 && b !== -1) {
@@ -898,46 +1217,48 @@ export default function InStoreProductsPage() {
       lastClickedIdRef.current = id;
       return next;
     });
-  }, [items]);
+  }, [images]);
 
   const selectAllOnPage = useCallback(() => {
-    setSelectedIds(new Set(items.map((it) => it.id)));
-  }, [items]);
+    setSelectedIds(new Set(images.map((img) => img.id)));
+  }, [images]);
 
   const bulkDeleteSelected = useCallback(async () => {
     if (selectedIds.size === 0) return;
-    if (!confirm(`Delete ${selectedIds.size} selected item${selectedIds.size !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    if (!confirm(`Delete ${selectedIds.size} selected image${selectedIds.size !== 1 ? "s" : ""} (and every product detected in them)? This cannot be undone.`)) return;
     setBulkDeleting(true);
     try {
       const ids = Array.from(selectedIds);
-      await api.instoreCatalogue.bulkDeleteItems(ids);
-      setItems((prev) => prev.filter((it) => !selectedIds.has(it.id)));
+      await api.instoreCatalogue.bulkDeleteImages(ids);
+      setImages((prev) => prev.filter((img) => !selectedIds.has(img.id)));
       setTotal((t) => Math.max(0, t - selectedIds.size));
       clearSelection();
       loadStats();
+      loadRetailers();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Bulk delete failed");
     } finally {
       setBulkDeleting(false);
     }
-  }, [selectedIds, clearSelection, loadStats]);
+  }, [selectedIds, clearSelection, loadStats, loadRetailers]);
 
   const deleteEverything = useCallback(async () => {
     setBulkDeleting(true);
     try {
       await api.instoreCatalogue.deleteEverything();
       clearSelection();
-      setItems([]);
+      setImages([]);
       setTotal(0);
       setPage(0);
       await loadStats();
+      await loadRetailers();
       setConfirmingDeleteAll(false);
     } catch (err) {
       alert(err instanceof Error ? err.message : "Delete all failed");
     } finally {
       setBulkDeleting(false);
     }
-  }, [clearSelection, loadStats]);
+  }, [clearSelection, loadStats, loadRetailers]);
 
   // ── Derived ──────────────────────────────────────────────────────────────
 
@@ -964,10 +1285,10 @@ export default function InStoreProductsPage() {
           <div className="text-sm text-stone-500 text-right">
             {loading ? "Loading…" : (
               <>
-                <div>{items.length} of {total.toLocaleString()} products</div>
+                <div>{images.length} of {total.toLocaleString()} images</div>
                 {stats && (
                   <div className="text-xs text-stone-400">
-                    {stats.items_total.toLocaleString()} catalogued · {stats.images_total} images
+                    {stats.items_total.toLocaleString()} products catalogued
                     {processingCount > 0 && ` · ${processingCount} analysing`}
                     {failedCount > 0 && ` · ${failedCount} failed`}
                   </div>
@@ -1103,18 +1424,16 @@ export default function InStoreProductsPage() {
                 </div>
               ))}
             </div>
-          ) : items.length > 0 ? (
+          ) : images.length > 0 ? (
             <>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-                {items.map((item) => (
-                  <ProductCard
-                    key={item.id}
-                    item={item}
-                    selected={selectedIds.has(item.id)}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {images.map((img) => (
+                  <ImageCard
+                    key={img.id}
+                    image={img}
+                    selected={selectedIds.has(img.id)}
                     onToggleSelect={toggleSelect}
-                    onUpdate={updateItem}
-                    onDelete={deleteItem}
-                    onOpenLightbox={(id, fn) => setLightbox({ id, filename: fn })}
+                    onOpen={() => setOpenImageId(img.id)}
                   />
                 ))}
               </div>
@@ -1129,7 +1448,7 @@ export default function InStoreProductsPage() {
                 <span className="text-sm text-stone-500">Page {page + 1}</span>
                 <button
                   onClick={() => setPage((p) => p + 1)}
-                  disabled={items.length < PAGE_SIZE}
+                  disabled={images.length < PAGE_SIZE}
                   className="px-4 py-2 rounded-lg border border-stone-200 text-sm font-medium disabled:opacity-40 hover:bg-stone-50"
                 >
                   Next →
@@ -1141,12 +1460,12 @@ export default function InStoreProductsPage() {
               <p className="text-4xl mb-3">🏪</p>
               {hasFilters ? (
                 <>
-                  <p className="font-medium">No products match your filters</p>
-                  <button onClick={() => { setSearch(""); setCategory(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
+                  <p className="font-medium">No images match your filters</p>
+                  <button onClick={() => { setSearch(""); setCategory(""); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
                 </>
               ) : (
                 <>
-                  <p className="font-medium">No products yet</p>
+                  <p className="font-medium">No images yet</p>
                   <p className="text-sm mt-1">Upload in-store photos above to get started</p>
                 </>
               )}
@@ -1157,9 +1476,20 @@ export default function InStoreProductsPage() {
         <FailedImagesPanel onRetryAll={retryAllFailed} reload={failedReload} />
       )}
 
-      {/* Lightbox */}
-      {lightbox && (
-        <Lightbox imageId={lightbox.id} filename={lightbox.filename} onClose={() => setLightbox(null)} />
+      {/* Image detail modal */}
+      {openImageId !== null && (
+        <ImageDetailModal
+          imageId={openImageId}
+          onClose={() => setOpenImageId(null)}
+          onItemUpdated={updateItem}
+          onItemDeleted={deleteItem}
+          onImageDeleted={(id) => {
+            setImages((prev) => prev.filter((img) => img.id !== id));
+            setTotal((t) => Math.max(0, t - 1));
+            loadStats();
+            loadRetailers();
+          }}
+        />
       )}
 
       {/* Floating selection action bar */}
@@ -1172,7 +1502,7 @@ export default function InStoreProductsPage() {
             onClick={selectAllOnPage}
             className="px-3 py-1 text-xs rounded-full hover:bg-stone-800 transition-colors"
           >
-            Select all on page ({items.length})
+            Select all on page ({images.length})
           </button>
           <button
             onClick={clearSelection}
