@@ -31,7 +31,7 @@ interface Product {
 }
 
 const SEASONS = ["spring", "summer", "autumn", "winter", "all-season"];
-const ROOMS = ["kitchen", "living room", "bedroom", "bathroom", "dining room", "office", "outdoor"];
+const ROOMS = ["kitchen", "living room", "bedroom", "bathroom", "dining room", "office", "outdoor", "multiple"];
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
 
 

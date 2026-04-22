@@ -97,6 +97,27 @@ async def _analyse(product: Product) -> dict:
     # Merge style_tags from both sources
     style_tags = list(set(v.get("style_tags", []) + n.get("style_tags", [])))
 
+    # Normalise non-committal AI responses so they fall into useful filter buckets.
+    # Without this, products end up filed as "unknown"/"any" and never match any
+    # filter. Season "unknown" becomes "all-season" (i.e. works year-round);
+    # room "unknown"/"any" becomes "multiple" (i.e. fits anywhere). Claude's
+    # string for "I don't know" is truthy so we can't rely on the `or` fallback
+    # to the NLP result either — we coerce here instead.
+    def _season(val):
+        if not val: return None
+        s = str(val).strip().lower()
+        if s in ("unknown", "null", ""): return "all-season"
+        return s
+
+    def _room(val):
+        if not val: return None
+        r = str(val).strip().lower()
+        if r in ("unknown", "any", "null", ""): return "multiple"
+        return r
+
+    season = _season(v.get("season")) or _season(n.get("season")) or "all-season"
+    room = _room(v.get("room")) or _room(n.get("room")) or "multiple"
+
     return {
         "colours": v.get("colours", []),
         "colour_hex": v.get("colour_hex", []),
@@ -107,9 +128,9 @@ async def _analyse(product: Product) -> dict:
         "materials": n.get("materials", []),
         "patterns": n.get("patterns", []),
         "fragrance": (n.get("fragrance") or "")[:500] or None,
-        "season": v.get("season") or n.get("season"),
+        "season": season,
         "occasion": n.get("occasion"),
-        "room": v.get("room") or n.get("room"),
+        "room": room,
         "function_tags": n.get("function_tags", []),
         "embedding": embedding,
         "vision_confidence": v.get("confidence"),
