@@ -233,6 +233,7 @@ async def list_items(
             "product_name": item.product_name,
             "category": item.category,
             "prominence": item.prominence,
+            "has_crop": bool(item.cropped_file_path),
             "colours": item.colours or [],
             "materials": item.materials or [],
             "patterns": item.patterns or [],
@@ -245,6 +246,57 @@ async def list_items(
         for item, image in rows
     ]
     return {"total": total, "items": items}
+
+
+# ── Per-item cropped image ────────────────────────────────────────────────────
+
+@router.get("/items/{item_id}/image")
+async def get_item_image(item_id: int, db: AsyncSession = Depends(get_db)):
+    """Serve the cropped thumbnail for a detected item. Falls back to the
+    parent image (HEIC-converted if needed) when no crop exists."""
+    item = await db.get(InStoreCatalogueItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if item.cropped_file_path:
+        p = Path(item.cropped_file_path)
+        if p.exists():
+            return FileResponse(
+                item.cropped_file_path,
+                media_type="image/jpeg",
+                headers={"Content-Disposition": "inline", "Cache-Control": "public, max-age=86400"},
+            )
+
+    # Fallback: serve the parent image (reuses the same conversion logic)
+    image = await db.get(InStoreCatalogueImage, item.image_id)
+    if not image:
+        raise HTTPException(status_code=404, detail="Parent image missing")
+    path = Path(image.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    if image.file_type == "heic":
+        import io
+        from PIL import Image
+        try:
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+        except ImportError:
+            pass
+        data = path.read_bytes()
+        img = Image.open(io.BytesIO(data))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return Response(content=buf.getvalue(), media_type="image/jpeg",
+                        headers={"Content-Disposition": "inline",
+                                 "Cache-Control": "public, max-age=86400"})
+
+    media_types = {"jpeg": "image/jpeg", "png": "image/png", "pdf": "application/pdf"}
+    return FileResponse(
+        image.file_path,
+        media_type=media_types.get(image.file_type, "application/octet-stream"),
+        headers={"Content-Disposition": "inline", "Cache-Control": "public, max-age=86400"},
+    )
 
 
 # ── Retailers endpoint — populate the filter dropdown + autocomplete ──────────
@@ -444,6 +496,7 @@ async def get_image_detail(image_id: int, db: AsyncSession = Depends(get_db)):
                 "product_name": it.product_name,
                 "category": it.category,
                 "prominence": it.prominence,
+                "has_crop": bool(it.cropped_file_path),
                 "colours": it.colours or [],
                 "materials": it.materials or [],
                 "patterns": it.patterns or [],
@@ -548,8 +601,14 @@ async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
     item = await db.get(InStoreCatalogueItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Not found")
+    crop_path = item.cropped_file_path
     await db.delete(item)
     await db.commit()
+    if crop_path:
+        try:
+            Path(crop_path).unlink(missing_ok=True)
+        except Exception:
+            pass
     return {"deleted": True, "id": item_id}
 
 
@@ -567,9 +626,15 @@ async def bulk_delete_items(body: BulkDeleteBody, db: AsyncSession = Depends(get
         select(InStoreCatalogueItem).where(InStoreCatalogueItem.id.in_(ids))
     )
     items = result.scalars().all()
+    crop_paths = [it.cropped_file_path for it in items if it.cropped_file_path]
     for item in items:
         await db.delete(item)
     await db.commit()
+    for p in crop_paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except Exception:
+            pass
     return {"deleted": len(items)}
 
 
@@ -605,6 +670,14 @@ async def delete_everything(
             unlinked += 1
         except Exception:
             pass
+    # Nuke the crops/ subdir too
+    crops_dir = Path(settings.instore_catalogue_dir) / "crops"
+    if crops_dir.exists():
+        for f in crops_dir.iterdir():
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     log.info("catalogue_everything_deleted", images=image_count, files_unlinked=unlinked)
     return {"deleted_images": image_count, "files_unlinked": unlinked}

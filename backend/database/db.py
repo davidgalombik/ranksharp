@@ -116,6 +116,11 @@ async def init_db():
              _col("instore_catalogue_images", "retailer")),
             ("CREATE INDEX IF NOT EXISTS ix_catalogue_images_retailer ON instore_catalogue_images (retailer)",
              _idx("ix_catalogue_images_retailer")),
+            # In-store catalogue: bbox + cropped file path for per-product cropped thumbnails
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS bbox JSONB",
+             _col("instore_catalogue_items", "bbox")),
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS cropped_file_path VARCHAR(500)",
+             _col("instore_catalogue_items", "cropped_file_path")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

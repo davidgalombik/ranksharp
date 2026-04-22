@@ -521,6 +521,8 @@ class InStoreCatalogueItem(Base):
     product_name = mapped_column(String, nullable=False)
     category = mapped_column(String(50), nullable=False, index=True)   # Kitchen & Dining | Home & Decor | Candles | Other
     prominence = mapped_column(String(20), nullable=True, index=True)  # hero | main | peripheral | background
+    bbox = mapped_column(JSON, nullable=True)                          # [x, y, w, h] normalized 0..1
+    cropped_file_path = mapped_column(String, nullable=True)           # disk path to cropped JPEG
     colours = mapped_column(JSON, nullable=True)
     materials = mapped_column(JSON, nullable=True)
     patterns = mapped_column(JSON, nullable=True)

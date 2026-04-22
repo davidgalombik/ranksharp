@@ -44,6 +44,7 @@ interface CatalogueItem {
   product_name: string;
   category: string;
   prominence: string | null;
+  has_crop?: boolean;
   colours: string[];
   materials: string[];
   patterns: string[];
@@ -80,6 +81,7 @@ interface ImageDetailItem {
   product_name: string;
   category: string;
   prominence: string | null;
+  has_crop?: boolean;
   colours: string[];
   materials: string[];
   patterns: string[];
@@ -690,6 +692,113 @@ function FailedImagesPanel({ onRetryAll, reload }: { onRetryAll: () => void; rel
   );
 }
 
+// ── Product card (one per detected item, using Claude's per-product crop) ────
+
+function CatalogueProductCard({
+  item,
+  selected,
+  onToggleSelect,
+  onUpdate,
+  onDelete,
+  onOpenSource,
+}: {
+  item: CatalogueItem;
+  selected: boolean;
+  onToggleSelect: (id: number, e: React.MouseEvent) => void;
+  onUpdate: (id: number, patch: { product_name?: string; category?: string }) => Promise<void>;
+  onDelete: (id: number) => void;
+  onOpenSource: (imageId: number) => void;
+}) {
+  return (
+    <div
+      className={clsx(
+        "bg-white rounded-xl border overflow-hidden flex flex-col transition-colors",
+        selected ? "border-stone-900 ring-2 ring-stone-900" : "border-stone-200",
+      )}
+    >
+      <div className="relative aspect-square bg-stone-100 overflow-hidden group">
+        <button
+          onClick={() => onOpenSource(item.image_id)}
+          className="w-full h-full"
+          title="Click to view source photo"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={api.instoreCatalogue.itemImageUrl(item.id)}
+            alt={item.product_name}
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            loading="lazy"
+          />
+        </button>
+        {/* Select checkbox */}
+        <label
+          className={clsx(
+            "absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-opacity",
+            selected
+              ? "bg-stone-900 text-white opacity-100"
+              : "bg-white/90 text-stone-400 opacity-0 group-hover:opacity-100 hover:bg-white border border-stone-300",
+          )}
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(item.id, e); }}
+          title="Select (shift-click to range-select)"
+        >
+          <input type="checkbox" checked={selected} onChange={() => {}} className="sr-only" />
+          {selected ? "✓" : ""}
+        </label>
+        {!item.has_crop && (
+          <span
+            className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-stone-900/70 text-white"
+            title="No crop available — showing full source image"
+          >
+            full image
+          </span>
+        )}
+      </div>
+      <div className="p-3 space-y-2 flex-1 flex flex-col">
+        <EditableName value={item.product_name} onSave={(v) => onUpdate(item.id, { product_name: v })} />
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <EditableCategory value={item.category} onSave={(v) => onUpdate(item.id, { category: v })} />
+          {item.prominence && PROMINENCE_LABEL[item.prominence] && (
+            <span
+              className={clsx("px-1.5 py-0.5 rounded-full text-[10px] font-medium", PROMINENCE_COLOURS[item.prominence] || "bg-stone-100 text-stone-500")}
+              title="AI-assessed prominence"
+            >
+              {PROMINENCE_LABEL[item.prominence]}
+            </span>
+          )}
+          {item.retailer && (
+            <span
+              className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-violet-100 text-violet-700 border border-violet-200"
+              title={`Uploaded from ${item.retailer}`}
+            >
+              {item.retailer}
+            </span>
+          )}
+        </div>
+        {(item.colours?.length || 0) > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {item.colours.slice(0, 3).map((c, i) => (
+              <span key={i} className="text-xs bg-stone-50 px-1.5 py-0.5 rounded text-stone-600">{c}</span>
+            ))}
+          </div>
+        )}
+        {(item.materials?.length || 0) > 0 && (
+          <p className="text-xs text-stone-400 line-clamp-1">{item.materials.slice(0, 3).join(" · ")}</p>
+        )}
+        <div className="flex items-center justify-between mt-auto pt-1">
+          <p className="text-[10px] text-stone-300 truncate max-w-[10rem]" title={item.source_filename}>{item.source_filename}</p>
+          <button
+            onClick={() => onDelete(item.id)}
+            className="text-xs text-stone-300 hover:text-red-500"
+            title="Delete product"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Image card (one per uploaded photo) ──────────────────────────────────────
 
 function ImageCard({
@@ -922,11 +1031,23 @@ function ImageDetailModal({
             )}
             {detail?.items.map((item) => (
               <div key={item.id} className="bg-stone-50 rounded-xl border border-stone-200 p-3 space-y-2">
-                <div className="flex items-start justify-between gap-2">
-                  <EditableName
-                    value={item.product_name}
-                    onSave={(v) => handleItemPatch(item.id, { product_name: v })}
-                  />
+                <div className="flex items-start gap-3">
+                  {/* Cropped thumbnail when available */}
+                  {item.has_crop && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={api.instoreCatalogue.itemImageUrl(item.id)}
+                      alt={item.product_name}
+                      className="w-16 h-16 object-cover rounded-lg border border-stone-200 flex-shrink-0"
+                      loading="lazy"
+                    />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <EditableName
+                      value={item.product_name}
+                      onSave={(v) => handleItemPatch(item.id, { product_name: v })}
+                    />
+                  </div>
                   <button
                     onClick={() => handleItemDelete(item.id)}
                     className="text-xs text-stone-300 hover:text-red-500 leading-none"
@@ -968,7 +1089,9 @@ function ImageDetailModal({
 // ── Main page ────────────────────────────────────────────────────────────────
 
 export default function InStoreProductsPage() {
+  const [viewMode, setViewMode] = useState<"image" | "product">("image");
   const [images, setImages] = useState<ImageRow[]>([]);
+  const [products, setProducts] = useState<CatalogueItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
@@ -1015,10 +1138,10 @@ export default function InStoreProductsPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  // Reset to page 0 when filters change
+  // Reset to page 0 when filters or view mode change
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, category, retailerFilter, showAll]);
+  }, [debouncedSearch, category, retailerFilter, showAll, viewMode]);
 
   // Load images (image-centric grid)
   const loadImages = useCallback(async () => {
@@ -1042,7 +1165,37 @@ export default function InStoreProductsPage() {
     }
   }, [debouncedSearch, category, retailerFilter, showAll, page]);
 
-  useEffect(() => { loadImages(); }, [loadImages]);
+  // Load products (flat item list)
+  const loadProducts = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.instoreCatalogue.listItems({
+        q: debouncedSearch || undefined,
+        category: category || undefined,
+        retailer: retailerFilter || undefined,
+        show_all: showAll,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+      });
+      setProducts((data.items as CatalogueItem[]) || []);
+      setTotal(data.total || 0);
+    } catch {
+      setProducts([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [debouncedSearch, category, retailerFilter, showAll, page]);
+
+  // Refresh both the current view and stats
+  const reloadCurrentView = useCallback(async () => {
+    if (viewMode === "image") { await loadImages(); } else { await loadProducts(); }
+  }, [viewMode, loadImages, loadProducts]);
+
+  useEffect(() => {
+    if (viewMode === "image") loadImages();
+    else loadProducts();
+  }, [viewMode, loadImages, loadProducts]);
 
   // Load stats
   const loadStats = useCallback(async () => {
@@ -1077,9 +1230,9 @@ export default function InStoreProductsPage() {
       (stats.images_by_status?.analysing || 0) > 0
     );
     if (!anyActive) return;
-    const t = setInterval(() => { loadStats(); loadImages(); }, 4000);
+    const t = setInterval(() => { loadStats(); reloadCurrentView(); }, 4000);
     return () => clearInterval(t);
-  }, [stats, loadStats, loadImages]);
+  }, [stats, loadStats, reloadCurrentView]);
 
   // ── Upload pipeline ──────────────────────────────────────────────────────
 
@@ -1155,9 +1308,9 @@ export default function InStoreProductsPage() {
       window.localStorage.setItem(RETAILER_STORAGE_KEY, uploadRetailer.trim());
     }
     await loadStats();
-    await loadImages();
+    await reloadCurrentView();
     await loadRetailers();
-  }, [pendingFiles, uploadRetailer, loadStats, loadImages, loadRetailers]);
+  }, [pendingFiles, uploadRetailer, loadStats, reloadCurrentView, loadRetailers]);
 
   const cancelUpload = useCallback(() => {
     cancelRef.current = true;
@@ -1177,10 +1330,9 @@ export default function InStoreProductsPage() {
     try {
       await api.instoreCatalogue.deleteItem(id);
       loadStats();
-      // Refresh the image list so counts update
-      loadImages();
+      reloadCurrentView();
     } catch { /* ignore */ }
-  }, [loadStats, loadImages]);
+  }, [loadStats, reloadCurrentView]);
 
   const retryAllFailed = useCallback(async () => {
     if (!confirm("Re-queue all failed images for analysis?")) return;
@@ -1196,19 +1348,19 @@ export default function InStoreProductsPage() {
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
   // Clear selection on filter change so old IDs don't linger after they scroll off
-  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, retailerFilter, showAll, page]);
+  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, retailerFilter, showAll, page, viewMode]);
 
   const toggleSelect = useCallback((id: number, e: React.MouseEvent) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
+      const visibleIds = viewMode === "image" ? images.map((img) => img.id) : products.map((p) => p.id);
       // Shift-click = range select using the last clicked anchor
       if (e.shiftKey && lastClickedIdRef.current != null && lastClickedIdRef.current !== id) {
-        const ids = images.map((img) => img.id);
-        const a = ids.indexOf(lastClickedIdRef.current);
-        const b = ids.indexOf(id);
+        const a = visibleIds.indexOf(lastClickedIdRef.current);
+        const b = visibleIds.indexOf(id);
         if (a !== -1 && b !== -1) {
           const [lo, hi] = [Math.min(a, b), Math.max(a, b)];
-          for (let i = lo; i <= hi; i++) next.add(ids[i]);
+          for (let i = lo; i <= hi; i++) next.add(visibleIds[i]);
           lastClickedIdRef.current = id;
           return next;
         }
@@ -1217,20 +1369,29 @@ export default function InStoreProductsPage() {
       lastClickedIdRef.current = id;
       return next;
     });
-  }, [images]);
+  }, [viewMode, images, products]);
 
   const selectAllOnPage = useCallback(() => {
-    setSelectedIds(new Set(images.map((img) => img.id)));
-  }, [images]);
+    const ids = viewMode === "image" ? images.map((i) => i.id) : products.map((p) => p.id);
+    setSelectedIds(new Set(ids));
+  }, [viewMode, images, products]);
 
   const bulkDeleteSelected = useCallback(async () => {
     if (selectedIds.size === 0) return;
-    if (!confirm(`Delete ${selectedIds.size} selected image${selectedIds.size !== 1 ? "s" : ""} (and every product detected in them)? This cannot be undone.`)) return;
+    const isImageView = viewMode === "image";
+    const noun = isImageView ? "image" : "product";
+    const cascade = isImageView ? " (and every product detected in them)" : "";
+    if (!confirm(`Delete ${selectedIds.size} selected ${noun}${selectedIds.size !== 1 ? "s" : ""}${cascade}? This cannot be undone.`)) return;
     setBulkDeleting(true);
     try {
       const ids = Array.from(selectedIds);
-      await api.instoreCatalogue.bulkDeleteImages(ids);
-      setImages((prev) => prev.filter((img) => !selectedIds.has(img.id)));
+      if (isImageView) {
+        await api.instoreCatalogue.bulkDeleteImages(ids);
+        setImages((prev) => prev.filter((img) => !selectedIds.has(img.id)));
+      } else {
+        await api.instoreCatalogue.bulkDeleteItems(ids);
+        setProducts((prev) => prev.filter((it) => !selectedIds.has(it.id)));
+      }
       setTotal((t) => Math.max(0, t - selectedIds.size));
       clearSelection();
       loadStats();
@@ -1240,7 +1401,7 @@ export default function InStoreProductsPage() {
     } finally {
       setBulkDeleting(false);
     }
-  }, [selectedIds, clearSelection, loadStats, loadRetailers]);
+  }, [viewMode, selectedIds, clearSelection, loadStats, loadRetailers]);
 
   const deleteEverything = useCallback(async () => {
     setBulkDeleting(true);
@@ -1248,6 +1409,7 @@ export default function InStoreProductsPage() {
       await api.instoreCatalogue.deleteEverything();
       clearSelection();
       setImages([]);
+      setProducts([]);
       setTotal(0);
       setPage(0);
       await loadStats();
@@ -1285,7 +1447,11 @@ export default function InStoreProductsPage() {
           <div className="text-sm text-stone-500 text-right">
             {loading ? "Loading…" : (
               <>
-                <div>{images.length} of {total.toLocaleString()} images</div>
+                <div>
+                  {viewMode === "image"
+                    ? `${images.length} of ${total.toLocaleString()} images`
+                    : `${products.length} of ${total.toLocaleString()} products`}
+                </div>
                 {stats && (
                   <div className="text-xs text-stone-400">
                     {stats.items_total.toLocaleString()} products catalogued
@@ -1349,6 +1515,32 @@ export default function InStoreProductsPage() {
 
       {mode === "catalogue" ? (
         <>
+          {/* View toggle */}
+          <div className="flex items-center gap-1 bg-white rounded-xl border border-stone-200 p-1 w-fit">
+            <button
+              onClick={() => setViewMode("image")}
+              className={clsx(
+                "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
+                viewMode === "image"
+                  ? "bg-stone-900 text-white"
+                  : "text-stone-600 hover:bg-stone-100"
+              )}
+            >
+              By image
+            </button>
+            <button
+              onClick={() => setViewMode("product")}
+              className={clsx(
+                "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
+                viewMode === "product"
+                  ? "bg-stone-900 text-white"
+                  : "text-stone-600 hover:bg-stone-100"
+              )}
+            >
+              By product
+            </button>
+          </div>
+
           {/* Filter bar */}
           <div className="bg-white rounded-xl border border-stone-200 p-4">
             <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-center">
@@ -1424,18 +1616,31 @@ export default function InStoreProductsPage() {
                 </div>
               ))}
             </div>
-          ) : images.length > 0 ? (
+          ) : (viewMode === "image" ? images.length : products.length) > 0 ? (
             <>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                {images.map((img) => (
-                  <ImageCard
-                    key={img.id}
-                    image={img}
-                    selected={selectedIds.has(img.id)}
-                    onToggleSelect={toggleSelect}
-                    onOpen={() => setOpenImageId(img.id)}
-                  />
-                ))}
+                {viewMode === "image"
+                  ? images.map((img) => (
+                    <ImageCard
+                      key={img.id}
+                      image={img}
+                      selected={selectedIds.has(img.id)}
+                      onToggleSelect={toggleSelect}
+                      onOpen={() => setOpenImageId(img.id)}
+                    />
+                  ))
+                  : products.map((it) => (
+                    <CatalogueProductCard
+                      key={it.id}
+                      item={it}
+                      selected={selectedIds.has(it.id)}
+                      onToggleSelect={toggleSelect}
+                      onUpdate={updateItem}
+                      onDelete={deleteItem}
+                      onOpenSource={(imageId) => setOpenImageId(imageId)}
+                    />
+                  ))
+                }
               </div>
               <div className="flex items-center justify-center gap-3 pt-2">
                 <button
@@ -1448,7 +1653,7 @@ export default function InStoreProductsPage() {
                 <span className="text-sm text-stone-500">Page {page + 1}</span>
                 <button
                   onClick={() => setPage((p) => p + 1)}
-                  disabled={images.length < PAGE_SIZE}
+                  disabled={(viewMode === "image" ? images.length : products.length) < PAGE_SIZE}
                   className="px-4 py-2 rounded-lg border border-stone-200 text-sm font-medium disabled:opacity-40 hover:bg-stone-50"
                 >
                   Next →
@@ -1460,12 +1665,12 @@ export default function InStoreProductsPage() {
               <p className="text-4xl mb-3">🏪</p>
               {hasFilters ? (
                 <>
-                  <p className="font-medium">No images match your filters</p>
+                  <p className="font-medium">No {viewMode === "image" ? "images" : "products"} match your filters</p>
                   <button onClick={() => { setSearch(""); setCategory(""); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
                 </>
               ) : (
                 <>
-                  <p className="font-medium">No images yet</p>
+                  <p className="font-medium">No {viewMode === "image" ? "images" : "products"} yet</p>
                   <p className="text-sm mt-1">Upload in-store photos above to get started</p>
                 </>
               )}
@@ -1485,9 +1690,10 @@ export default function InStoreProductsPage() {
           onItemDeleted={deleteItem}
           onImageDeleted={(id) => {
             setImages((prev) => prev.filter((img) => img.id !== id));
-            setTotal((t) => Math.max(0, t - 1));
+            setProducts((prev) => prev.filter((it) => it.image_id !== id));
             loadStats();
             loadRetailers();
+            reloadCurrentView();
           }}
         />
       )}
@@ -1502,7 +1708,7 @@ export default function InStoreProductsPage() {
             onClick={selectAllOnPage}
             className="px-3 py-1 text-xs rounded-full hover:bg-stone-800 transition-colors"
           >
-            Select all on page ({images.length})
+            Select all on page ({viewMode === "image" ? images.length : products.length})
           </button>
           <button
             onClick={clearSelection}

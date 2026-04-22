@@ -26,6 +26,7 @@ typically contains shelving and products from other displays that the photograph
 
 For each product visible, extract:
 - product_name: a short descriptive name (e.g. "Red lobster-handle ceramic mug", "Sea turtle ceramic plate")
+- bbox_norm: REQUIRED for hero and main products — normalized bounding box [x, y, w, h] where each value is between 0.0 and 1.0 (origin is top-left of the image, x/y are the top-left corner of the box, w/h are width/height). Fit the box TIGHTLY around the product — don't include neighbouring products or excessive background. Set to null for peripheral and background products.
 - category: exactly one of: "Kitchen & Dining", "Home & Decor", "Candles", "Other"
   - Kitchen & Dining: mugs, plates, bowls, cutlery, cookware, bakeware, glassware, tea towels, placemats, serving ware, food storage, utensils, aprons, lunch boxes
   - Home & Decor: vases, figurines, picture frames, decor objects, throws, cushions, wall art, ornaments, books (decorative/coffee-table)
@@ -59,6 +60,7 @@ Return ONLY valid JSON — an array of objects, one per distinct visible product
     "product_name": "...",
     "category": "...",
     "prominence": "hero",
+    "bbox_norm": [0.12, 0.35, 0.18, 0.42],
     "colours": [...],
     "materials": [...],
     "patterns": [...],
@@ -112,10 +114,12 @@ class CatalogueVision:
         prominence = (item.get("prominence") or "").strip().lower()
         if prominence not in PROMINENCE_VALUES:
             prominence = "main"  # sensible default if Claude omits it
+        bbox = _coerce_bbox(item.get("bbox_norm") or item.get("bbox"))
         return {
             "product_name": (item.get("product_name") or "Unknown product").strip()[:300],
             "category": cat,
             "prominence": prominence,
+            "bbox": bbox,
             "colours": _coerce_list(item.get("colours")),
             "materials": _coerce_list(item.get("materials")),
             "patterns": _coerce_list(item.get("patterns")),
@@ -160,6 +164,27 @@ class CatalogueVision:
                 return []
         log.warning("catalogue_unsupported_file_type", file_type=file_type)
         return []
+
+
+def _coerce_bbox(val) -> list[float] | None:
+    """Return a normalised [x, y, w, h] list if the value is sensible, else None."""
+    if not isinstance(val, (list, tuple)) or len(val) != 4:
+        return None
+    try:
+        x, y, w, h = (float(v) for v in val)
+    except (TypeError, ValueError):
+        return None
+    # Require sensible coordinates within [0, 1] with non-zero size
+    if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0):
+        return None
+    if not (0.0 < w <= 1.0 and 0.0 < h <= 1.0):
+        return None
+    # Clamp overflow so x+w and y+h stay <= 1
+    w = min(w, 1.0 - x)
+    h = min(h, 1.0 - y)
+    if w < 0.01 or h < 0.01:  # degenerate — reject sub-1% boxes
+        return None
+    return [round(x, 5), round(y, 5), round(w, 5), round(h, 5)]
 
 
 def _coerce_list(val) -> list[str]:

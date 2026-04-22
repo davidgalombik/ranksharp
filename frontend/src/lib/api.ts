@@ -360,6 +360,7 @@ export const api = {
       return res.json();
     },
     imageUrl: (id: number) => `${API_BASE}/api/instore-catalogue/images/${id}/file`,
+    itemImageUrl: (itemId: number) => `${API_BASE}/api/instore-catalogue/items/${itemId}/image`,
   },
   fragranceTrends: {
     latestReport: (generation?: number) =>
