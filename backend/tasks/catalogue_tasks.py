@@ -109,7 +109,6 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         if file_b64:
             raw_bytes = _b64.b64decode(file_b64)
         else:
-            from pathlib import Path
             p = Path(image.file_path)
             if not p.exists():
                 image.status = "failed"
