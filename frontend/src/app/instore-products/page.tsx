@@ -716,34 +716,31 @@ function CatalogueProductCard({
         selected ? "border-stone-900 ring-2 ring-stone-900" : "border-stone-200",
       )}
     >
-      <div className="relative aspect-square bg-stone-100 overflow-hidden group">
+      <div
+        className="relative aspect-square bg-stone-100 overflow-hidden group cursor-pointer"
+        onClick={() => onOpenSource(item.image_id)}
+        title="Click to view source photo"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={api.instoreCatalogue.itemImageUrl(item.id)}
+          alt={item.product_name}
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          loading="lazy"
+        />
         <button
-          onClick={() => onOpenSource(item.image_id)}
-          className="w-full h-full"
-          title="Click to view source photo"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={api.instoreCatalogue.itemImageUrl(item.id)}
-            alt={item.product_name}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-            loading="lazy"
-          />
-        </button>
-        {/* Select checkbox */}
-        <label
-          className={clsx(
-            "absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-opacity",
-            selected
-              ? "bg-stone-900 text-white opacity-100"
-              : "bg-white/90 text-stone-400 opacity-0 group-hover:opacity-100 hover:bg-white border border-stone-300",
-          )}
+          type="button"
           onClick={(e) => { e.stopPropagation(); onToggleSelect(item.id, e); }}
+          className={clsx(
+            "absolute top-2 left-2 w-7 h-7 rounded-md flex items-center justify-center cursor-pointer transition-opacity border",
+            selected
+              ? "bg-stone-900 text-white border-stone-900 opacity-100"
+              : "bg-white/90 text-stone-400 border-stone-300 opacity-0 group-hover:opacity-100 hover:bg-white",
+          )}
           title="Select (shift-click to range-select)"
         >
-          <input type="checkbox" checked={selected} onChange={() => {}} className="sr-only" />
           {selected ? "✓" : ""}
-        </label>
+        </button>
         {!item.has_crop && (
           <span
             className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-stone-900/70 text-white"
@@ -824,35 +821,33 @@ function ImageCard({
         selected ? "border-stone-900 ring-2 ring-stone-900" : "border-stone-200",
       )}
     >
-      <div className="relative aspect-square bg-stone-100 overflow-hidden group">
-        <button
-          onClick={onOpen}
-          className="w-full h-full"
-          title="Click to view all detected products"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={api.instoreCatalogue.imageUrl(image.id)}
-            alt={image.filename}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-            loading="lazy"
-          />
-        </button>
+      <div
+        className="relative aspect-square bg-stone-100 overflow-hidden group cursor-pointer"
+        onClick={onOpen}
+        title="Click to view all detected products"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={api.instoreCatalogue.imageUrl(image.id)}
+          alt={image.filename}
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+          loading="lazy"
+        />
 
-        {/* Select checkbox */}
-        <label
-          className={clsx(
-            "absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center cursor-pointer transition-opacity",
-            selected
-              ? "bg-stone-900 text-white opacity-100"
-              : "bg-white/90 text-stone-400 opacity-0 group-hover:opacity-100 hover:bg-white border border-stone-300",
-          )}
+        {/* Select checkbox — button swallows its own click so onOpen doesn't fire */}
+        <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); onToggleSelect(image.id, e); }}
+          className={clsx(
+            "absolute top-2 left-2 w-7 h-7 rounded-md flex items-center justify-center cursor-pointer transition-opacity border",
+            selected
+              ? "bg-stone-900 text-white border-stone-900 opacity-100"
+              : "bg-white/90 text-stone-400 border-stone-300 opacity-0 group-hover:opacity-100 hover:bg-white",
+          )}
           title="Select image (shift-click to range-select)"
         >
-          <input type="checkbox" checked={selected} onChange={() => {}} className="sr-only" />
           {selected ? "✓" : ""}
-        </label>
+        </button>
 
         {/* Retailer chip */}
         {image.retailer && (
