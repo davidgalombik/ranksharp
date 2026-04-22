@@ -43,6 +43,12 @@ app.conf.update(
     },
     worker_prefetch_multiplier=1,
     task_acks_late=True,
+    # Celery stores the return value of every task in Redis by default, forever.
+    # That fills the Redis volume and causes MISCONF errors when snapshot writes
+    # fail. Expire results after 1 hour — we never read them after the fact.
+    result_expires=3600,
+    # Also don't keep sent-event state for the default queue.
+    task_ignore_result=False,
 )
 
 # Explicitly include task modules so Celery registers them on startup

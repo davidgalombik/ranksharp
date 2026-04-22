@@ -707,6 +707,38 @@ async def retry_image(image_id: int, db: AsyncSession = Depends(get_db)):
     return {"queued": True, "image_id": image_id}
 
 
+@router.post("/retry-all-pending")
+async def retry_all_pending(db: AsyncSession = Depends(get_db)):
+    """Re-queue images stuck in pending/analysing state. Useful after a
+    Redis outage when Celery tasks were lost but the DB rows remain."""
+    rows = (await db.execute(
+        select(InStoreCatalogueImage).where(
+            InStoreCatalogueImage.status.in_(["pending", "analysing"])
+        )
+    )).scalars().all()
+    from tasks.catalogue_tasks import analyse_catalogue_image
+    import base64 as _b64
+    from datetime import datetime as _dt, timedelta as _td
+    queued = 0
+    missing = 0
+    for i, image in enumerate(rows):
+        path = Path(image.file_path)
+        if not path.exists():
+            missing += 1
+            continue
+        image.status = "pending"
+        image.error_message = None
+        eta = _dt.utcnow() + _td(milliseconds=i * 200)
+        analyse_catalogue_image.apply_async(
+            args=[image.id],
+            kwargs={"file_b64": _b64.b64encode(path.read_bytes()).decode()},
+            eta=eta,
+        )
+        queued += 1
+    await db.commit()
+    return {"queued": queued, "missing_files": missing}
+
+
 @router.post("/retry-all-failed")
 async def retry_all_failed(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(
