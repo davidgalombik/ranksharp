@@ -923,13 +923,11 @@ function ImageDetailModal({
   onClose,
   onItemUpdated,
   onItemDeleted,
-  onImageDeleted,
 }: {
   imageId: number;
   onClose: () => void;
   onItemUpdated: (id: number, patch: { product_name?: string; category?: string }) => Promise<void>;
   onItemDeleted: (id: number) => Promise<void>;
-  onImageDeleted: (id: number) => void;
 }) {
   const [detail, setDetail] = useState<ImageDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -959,14 +957,6 @@ function ImageDetailModal({
     if (!confirm("Delete this detected product?")) return;
     await onItemDeleted(id);
     setDetail((prev) => prev ? { ...prev, items: prev.items.filter((it) => it.id !== id) } : prev);
-  };
-
-  const handleImageDelete = async () => {
-    if (!detail) return;
-    if (!confirm(`Delete this image and all ${detail.items.length} detected product${detail.items.length !== 1 ? "s" : ""}? This cannot be undone.`)) return;
-    await api.instoreCatalogue.deleteImage(detail.id);
-    onImageDeleted(detail.id);
-    onClose();
   };
 
   return (
@@ -1001,22 +991,13 @@ function ImageDetailModal({
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleImageDelete}
-                className="text-xs text-red-500 hover:text-red-700"
-                title="Delete this image and all its detected products"
-              >
-                Delete image
-              </button>
-              <button
-                onClick={onClose}
-                className="text-2xl text-stone-400 hover:text-stone-900 leading-none"
-                title="Close (Esc)"
-              >
-                ×
-              </button>
-            </div>
+            <button
+              onClick={onClose}
+              className="text-2xl text-stone-400 hover:text-stone-900 leading-none"
+              title="Close (Esc)"
+            >
+              ×
+            </button>
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -1683,13 +1664,6 @@ export default function InStoreProductsPage() {
           onClose={() => setOpenImageId(null)}
           onItemUpdated={updateItem}
           onItemDeleted={deleteItem}
-          onImageDeleted={(id) => {
-            setImages((prev) => prev.filter((img) => img.id !== id));
-            setProducts((prev) => prev.filter((it) => it.image_id !== id));
-            loadStats();
-            loadRetailers();
-            reloadCurrentView();
-          }}
         />
       )}
 
