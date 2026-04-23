@@ -126,6 +126,7 @@ export default function HistoricalProductsPage() {
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [bestSellerOnly, setBestSellerOnly] = useState(false);
+  const [patentOnly, setPatentOnly] = useState(false);
   const [showInactive, setShowInactive] = useState<"all" | "active" | "inactive">("all");
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
 
@@ -149,6 +150,7 @@ export default function HistoricalProductsPage() {
     if (minPrice) params.set("min_price", minPrice);
     if (maxPrice) params.set("max_price", maxPrice);
     if (bestSellerOnly) params.set("best_seller", "true");
+    if (patentOnly) params.set("has_patent", "true");
     params.set("limit", String(PAGE_SIZE));
     params.set("offset", String(page * PAGE_SIZE));
 
@@ -169,12 +171,12 @@ export default function HistoricalProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, showInactive, page]);
+  }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly, showInactive, page]);
 
-  useEffect(() => { setPage(0); }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, showInactive]);
+  useEffect(() => { setPage(0); }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly, showInactive]);
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
-  const hasFilters = debouncedSearch || retailer || minPrice || maxPrice || bestSellerOnly || showInactive !== "all";
+  const hasFilters = debouncedSearch || retailer || minPrice || maxPrice || bestSellerOnly || patentOnly || showInactive !== "all";
   const inactiveCount = products.filter((p) => !p.is_active).length;
 
   return (
@@ -261,11 +263,25 @@ export default function HistoricalProductsPage() {
             <span>★</span>
             <span>Best Sellers</span>
           </button>
+
+          {/* Patent toggle */}
+          <button
+            onClick={() => setPatentOnly((v) => !v)}
+            className={clsx(
+              "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+              patentOnly
+                ? "bg-sky-100 border-sky-300 text-sky-800"
+                : "bg-white border-stone-200 text-stone-600 hover:border-sky-300 hover:text-sky-700"
+            )}
+          >
+            <span>⚙</span>
+            <span>Patent</span>
+          </button>
         </div>
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setShowInactive("all"); }}
+            onClick={() => { setSearch(""); setRetailer(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setShowInactive("all"); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters

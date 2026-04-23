@@ -141,6 +141,7 @@ async def search_historical_products(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     best_seller: Optional[bool] = None,
+    has_patent: Optional[bool] = None,
     limit: int = Query(default=48, le=200),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
@@ -161,6 +162,8 @@ async def search_historical_products(
         base = base.where(Product.price <= max_price)
     if best_seller is True:
         base = base.where(Product.is_best_seller == True)
+    if has_patent is True:
+        base = base.where(Product.has_patent == True)
 
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_stmt)).scalar_one()
