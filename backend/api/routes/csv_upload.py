@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Product, Retailer, ScrapeStatus
@@ -113,12 +113,18 @@ def _parse_csv_bytes(data: bytes) -> list[dict]:
 
 
 async def _load_retailer_map(db: AsyncSession, slugs: set[str]) -> dict[str, Retailer]:
+    """Case-insensitive slug lookup. Returned dict is keyed by the ORIGINAL
+    (lowercased) CSV slug so callers can match directly without worrying
+    about case. Both sides are compared lowercased."""
     if not slugs:
         return {}
+    # Normalise the CSV's slugs for comparison
+    lowered = {s.lower() for s in slugs}
     result = await db.execute(
-        select(Retailer).where(Retailer.slug.in_(slugs))
+        select(Retailer).where(func.lower(Retailer.slug).in_(lowered))
     )
-    return {r.slug: r for r in result.scalars().all()}
+    rows = result.scalars().all()
+    return {r.slug.lower(): r for r in rows}
 
 
 async def _validate_rows(
@@ -131,11 +137,13 @@ async def _validate_rows(
     - retailer_map: slug → Retailer for everyone referenced
     - missing_slugs: slugs used in the CSV that don't exist in DB
     """
-    # First pass: collect referenced slugs
+    # First pass: collect referenced slugs (lowercased for case-insensitive match)
     all_slugs = {(r.get("retailer_slug") or "").strip() for r in rows}
     all_slugs.discard("")
-    retailer_map = await _load_retailer_map(db, all_slugs)
-    missing_slugs = all_slugs - set(retailer_map.keys())
+    all_slugs_lc = {s.lower() for s in all_slugs}
+    retailer_map = await _load_retailer_map(db, all_slugs_lc)
+    # Missing = slugs (lowercased) present in CSV but not found in DB
+    missing_slugs = all_slugs_lc - set(retailer_map.keys())
 
     valid: list[dict] = []
     rejects: list[RejectRow] = []
@@ -167,8 +175,8 @@ async def _validate_rows(
                                      reason="primary_image_url must start with http:// or https://"))
             continue
 
-        # Retailer lookup
-        retailer = retailer_map.get(slug)
+        # Retailer lookup (case-insensitive)
+        retailer = retailer_map.get(slug.lower())
         if not retailer:
             # If the whole-file policy kicks in, this gets rejected at the
             # outer level before commit. For preview we still mark individuals
