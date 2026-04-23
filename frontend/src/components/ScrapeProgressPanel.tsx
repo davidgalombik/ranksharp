@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import clsx from "clsx";
+import { CsvUploadModal } from "@/components/CsvUploadModal";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const POLL_INTERVAL = 4000;
@@ -167,11 +168,12 @@ function OverallBar({ data }: { data: OverallProgress }) {
 }
 
 function RetailerRow({
-  job, onScrape, onCancel, scraping, cancelling,
+  job, onScrape, onCancel, onUploadCsv, scraping, cancelling,
 }: {
   job: ScrapeJob;
   onScrape: (id: number) => void;
   onCancel: (jobId: number) => void;
+  onUploadCsv: (retailerSlug: string) => void;
   scraping: boolean;
   cancelling: boolean;
 }) {
@@ -236,6 +238,14 @@ function RetailerRow({
           </button>
         )}
         <button
+          onClick={() => onUploadCsv(job.retailer_slug)}
+          className="px-2 py-1.5 text-xs font-medium border border-stone-200 bg-white rounded-lg hover:bg-stone-50 transition-colors"
+          title="Upload products from a CSV file for this retailer"
+          aria-label="Upload CSV"
+        >
+          📤
+        </button>
+        <button
           onClick={() => onScrape(job.retailer_id)}
           disabled={scraping || job.status === "running" || job.status === "pending"}
           className="px-3 py-1.5 text-xs font-medium border border-stone-200 bg-white rounded-lg hover:bg-stone-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -256,6 +266,7 @@ export default function ScrapeProgressPanel() {
   const [stoppingAll, setStoppingAll] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [filter, setFilter] = useState<string>("all");
+  const [uploadRetailerSlug, setUploadRetailerSlug] = useState<string | null>(null);
   const [skipAnalysis, setSkipAnalysis] = useState(false);
 
   const fetchProgress = useCallback(async () => {
@@ -430,6 +441,7 @@ export default function ScrapeProgressPanel() {
                   job={job}
                   onScrape={triggerScrape}
                   onCancel={cancelJob}
+                  onUploadCsv={setUploadRetailerSlug}
                   scraping={!!scraping[job.retailer_id]}
                   cancelling={!!cancelling[job.job_id]}
                 />
@@ -440,6 +452,13 @@ export default function ScrapeProgressPanel() {
 
       {filteredJobs.length === 0 && (
         <div className="text-center py-12 text-stone-400">No retailers match this filter.</div>
+      )}
+
+      {uploadRetailerSlug && (
+        <CsvUploadModal
+          retailerSlug={uploadRetailerSlug}
+          onClose={() => setUploadRetailerSlug(null)}
+        />
       )}
     </div>
   );
