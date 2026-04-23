@@ -828,11 +828,16 @@ function CatalogueProductCard({
         {(item.materials?.length || 0) > 0 && (
           <p className="text-xs text-stone-400 line-clamp-1">{item.materials.slice(0, 3).join(" · ")}</p>
         )}
-        <div className="flex items-center justify-between mt-auto pt-1">
-          <p className="text-[10px] text-stone-300 truncate max-w-[10rem]" title={item.source_filename}>{item.source_filename}</p>
+        <div className="flex items-center justify-between mt-auto pt-1 gap-2">
+          <p className="text-[10px] text-stone-300 truncate flex-1 min-w-0" title={item.source_filename}>{item.source_filename}</p>
+          {item.created_at && (
+            <p className="text-[10px] text-stone-400 flex-shrink-0">
+              {new Date(item.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+            </p>
+          )}
           <button
             onClick={() => onDelete(item.id)}
-            className="text-xs text-stone-300 hover:text-red-500"
+            className="text-xs text-stone-300 hover:text-red-500 flex-shrink-0"
             title="Delete product"
           >
             ×
@@ -955,9 +960,16 @@ function ImageCard({
           </ul>
         )}
 
-        <p className="text-[10px] text-stone-300 mt-auto pt-1 truncate" title={image.filename}>
-          {image.filename}
-        </p>
+        <div className="flex items-center justify-between gap-2 mt-auto pt-1">
+          <p className="text-[10px] text-stone-300 truncate" title={image.filename}>
+            {image.filename}
+          </p>
+          {image.created_at && (
+            <p className="text-[10px] text-stone-400 flex-shrink-0">
+              {new Date(image.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
