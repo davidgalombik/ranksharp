@@ -154,6 +154,27 @@ export interface Product {
   last_seen_at: string;
 }
 
+export interface CsvRejectRow {
+  row_number: number;
+  url: string | null;
+  reason: string;
+}
+
+export interface CsvPreviewResult {
+  total_rows: number;
+  valid_rows: number;
+  new_count: number;
+  update_count: number;
+  rejects: CsvRejectRow[];
+  retailers_referenced: string[];
+}
+
+export interface CsvCommitResult extends CsvPreviewResult {
+  inserted: number;
+  updated: number;
+  analysis_queued: number;
+}
+
 export interface Retailer {
   id: number;
   slug: string;
@@ -389,5 +410,27 @@ export const api = {
       fetch(`${API_BASE}/api/retailers/${id}/analyse`, { method: "POST" }).then((r) => r.json()),
     analyseAll: () =>
       fetch(`${API_BASE}/api/retailers/analyse-all`, { method: "POST" }).then((r) => r.json()),
+    csvPreview: async (file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`${API_BASE}/api/retailers/csv-upload/preview`, { method: "POST", body: fd });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<CsvPreviewResult>;
+    },
+    csvCommit: async (file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`${API_BASE}/api/retailers/csv-upload/commit`, { method: "POST", body: fd });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<CsvCommitResult>;
+    },
   },
 };
