@@ -212,227 +212,274 @@ async function maybeDownscale(file: File): Promise<File> {
   }
 }
 
-// ── Upload Zone ──────────────────────────────────────────────────────────────
+// ── Upload Modal (two phases: pick → review+cost) ────────────────────────────
 
-function UploadZone({
+function InStoreUploadModal({
   retailer,
   onRetailerChange,
   retailers,
-  onFilesSelected,
-  disabled,
+  onStart,
+  onClose,
 }: {
   retailer: string;
   onRetailerChange: (v: string) => void;
   retailers: Retailer[];
-  onFilesSelected: (files: File[]) => void;
-  disabled: boolean;
+  onStart: (files: File[]) => void;
+  onClose: () => void;
 }) {
+  const [phase, setPhase] = useState<"pick" | "review">("pick");
+  const [files, setFiles] = useState<File[]>([]);
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const retailerValid = retailer.trim().length > 0;
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+  const estCost = files.length * COST_PER_IMAGE;
 
-  const handleFiles = (fileList: FileList | null | File[]) => {
-    if (!fileList) return;
-    if (!retailerValid) return;
-    const files = Array.from(fileList as ArrayLike<File>).filter(isAcceptedFile);
-    if (files.length) onFilesSelected(files);
+  const ingest = (fileList: FileList | null) => {
+    if (!fileList || !retailerValid) return;
+    const accepted = Array.from(fileList).filter(isAcceptedFile);
+    if (!accepted.length) return;
+    setFiles(accepted);
+    setPhase("review");
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
-    if (disabled || !retailerValid) return;
-    if (e.dataTransfer.files && e.dataTransfer.files.length) {
-      handleFiles(e.dataTransfer.files);
-    }
+    if (!retailerValid) return;
+    if (e.dataTransfer.files?.length) ingest(e.dataTransfer.files);
+  };
+
+  const formatBytes = (n: number) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   };
 
   return (
-    <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
-      {/* Retailer input — required before uploading */}
-      <div>
-        <label className="block text-xs font-semibold text-stone-600 mb-1">
-          Retailer <span className="text-red-500">*</span>
-        </label>
-        <input
-          type="text"
-          list="instore-retailer-options"
-          value={retailer}
-          onChange={(e) => onRetailerChange(e.target.value)}
-          placeholder="e.g. World Market, Target, HomeGoods…"
-          className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-300"
-        />
-        <datalist id="instore-retailer-options">
-          {retailers.map((r) => <option key={r.name} value={r.name}>{`${r.count} images`}</option>)}
-        </datalist>
-        {!retailerValid && (
-          <p className="text-xs text-stone-400 mt-1">
-            Tag these uploads with a store name so you can filter by retailer later. Autocompletes from retailers you&apos;ve used before.
-          </p>
-        )}
-      </div>
-
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div
-        onDragOver={(e) => { e.preventDefault(); if (!disabled && retailerValid) setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
-        className={clsx(
-          "border-2 border-dashed rounded-xl p-8 text-center transition-colors",
-          dragging ? "border-stone-500 bg-stone-50" : "border-stone-300",
-          (disabled || !retailerValid) && "opacity-50 pointer-events-none",
-        )}
+        className="bg-white rounded-xl shadow-xl max-w-xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-3xl mb-2">🏪</div>
-        <p className="text-sm font-medium text-stone-700 mb-1">
-          {retailerValid ? "Drag a folder, drop files, or pick below" : "Enter a retailer first ↑"}
-        </p>
-        <p className="text-xs text-stone-400">
-          JPG, PNG, HEIC or PDF · up to 10,000+ files · dupes skipped automatically
-        </p>
-
-        <div className="flex items-center gap-2 justify-center mt-4">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={!retailerValid}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Choose files…
-          </button>
-          <button
-            type="button"
-            onClick={() => folderInputRef.current?.click()}
-            disabled={!retailerValid}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Choose folder…
+        <div className="flex items-center justify-between p-5 border-b border-stone-200">
+          <h2 className="text-lg font-bold text-stone-900">
+            {phase === "pick" ? "Upload in-store photos" : "Review upload"}
+          </h2>
+          <button onClick={onClose} className="text-2xl text-stone-400 hover:text-stone-900 leading-none">
+            ×
           </button>
         </div>
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".jpg,.jpeg,.png,.heic,.heif,.pdf,image/jpeg,image/png,image/heic,image/heif,application/pdf"
-          className="hidden"
-          onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          multiple
-          // webkitdirectory lets the user pick a whole folder tree
-          // @ts-expect-error non-standard attribute
-          webkitdirectory=""
-          directory=""
-          className="hidden"
-          onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
-        />
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {phase === "pick" && (
+            <>
+              <div>
+                <label className="block text-xs font-semibold text-stone-600 mb-1">
+                  Retailer <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  list="instore-retailer-options"
+                  value={retailer}
+                  onChange={(e) => onRetailerChange(e.target.value)}
+                  placeholder="e.g. World Market, Target, HomeGoods…"
+                  className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-300"
+                  autoFocus
+                />
+                <datalist id="instore-retailer-options">
+                  {retailers.map((r) => <option key={r.name} value={r.name}>{`${r.count} images`}</option>)}
+                </datalist>
+                <p className="text-xs text-stone-400 mt-1">
+                  {retailerValid
+                    ? "Autocompletes from retailers you've used before."
+                    : "Enter a store name first — you can filter by retailer later."}
+                </p>
+              </div>
+
+              <div
+                onDragOver={(e) => { e.preventDefault(); if (retailerValid) setDragging(true); }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={onDrop}
+                className={clsx(
+                  "border-2 border-dashed rounded-xl p-6 text-center transition-colors",
+                  dragging ? "border-stone-500 bg-stone-50" : "border-stone-300",
+                  !retailerValid && "opacity-50 pointer-events-none",
+                )}
+              >
+                <div className="text-3xl mb-2">🏪</div>
+                <p className="text-sm font-medium text-stone-700 mb-1">
+                  {retailerValid ? "Drag a folder, drop files, or pick below" : "Enter a retailer first ↑"}
+                </p>
+                <p className="text-xs text-stone-400">
+                  JPG, PNG, HEIC or PDF · up to 10,000+ files · dupes skipped automatically
+                </p>
+                <div className="flex items-center gap-2 justify-center mt-4">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={!retailerValid}
+                    className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Choose files…
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => folderInputRef.current?.click()}
+                    disabled={!retailerValid}
+                    className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-sm font-medium text-stone-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Choose folder…
+                  </button>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept=".jpg,.jpeg,.png,.heic,.heif,.pdf,image/jpeg,image/png,image/heic,image/heif,application/pdf"
+                  className="hidden"
+                  onChange={(e) => { ingest(e.target.files); e.target.value = ""; }}
+                />
+                <input
+                  ref={folderInputRef}
+                  type="file"
+                  multiple
+                  // @ts-expect-error webkitdirectory is a non-standard attribute
+                  webkitdirectory=""
+                  directory=""
+                  className="hidden"
+                  onChange={(e) => { ingest(e.target.files); e.target.value = ""; }}
+                />
+              </div>
+            </>
+          )}
+
+          {phase === "review" && (
+            <div className="space-y-4">
+              <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-500">Retailer</span>
+                  <span className="font-semibold text-stone-900">{retailer}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-500">Files</span>
+                  <span className="font-semibold text-stone-900">{files.length.toLocaleString()} photo{files.length !== 1 ? "s" : ""}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-500">Total size</span>
+                  <span className="font-semibold text-stone-900">{formatBytes(totalBytes)}</span>
+                </div>
+                <div className="flex items-center justify-between pt-2 border-t border-stone-200">
+                  <span className="text-stone-500">Estimated Claude API cost</span>
+                  <span className="font-semibold text-stone-900">~${estCost.toFixed(2)}</span>
+                </div>
+              </div>
+
+              <div className="text-xs text-stone-500 space-y-1.5">
+                <p>Actual cost depends on how many products Claude detects per photo.</p>
+                <p>Images will be downscaled and deduplicated before upload — duplicates of existing photos are skipped automatically at no cost.</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 p-4 border-t border-stone-200 bg-stone-50">
+          {phase === "pick" && (
+            <button onClick={onClose} className="px-4 py-2 rounded-lg border border-stone-300 text-sm font-medium text-stone-700 hover:bg-white">
+              Cancel
+            </button>
+          )}
+          {phase === "review" && (
+            <>
+              <button
+                onClick={() => { setPhase("pick"); setFiles([]); }}
+                className="px-4 py-2 rounded-lg border border-stone-300 text-sm font-medium text-stone-700 hover:bg-white"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => onStart(files)}
+                className="px-4 py-2 rounded-lg bg-stone-900 text-white text-sm font-medium hover:bg-stone-800"
+              >
+                Start upload — {files.length.toLocaleString()} photo{files.length !== 1 ? "s" : ""}
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-// ── Cost Estimate Modal ──────────────────────────────────────────────────────
+// ── Floating Upload Progress Pill (replaces the big inline panel) ────────────
 
-function CostEstimateModal({
-  fileCount,
-  onCancel,
-  onConfirm,
-}: {
-  fileCount: number;
+function UploadProgressPill({ progress, onCancel, onDismiss }: {
+  progress: UploadProgress;
   onCancel: () => void;
-  onConfirm: () => void;
+  onDismiss: () => void;
 }) {
-  const cost = fileCount * COST_PER_IMAGE;
+  const pct = progress.totalFiles ? Math.round((progress.processed / progress.totalFiles) * 100) : 0;
+  const inFlight = progress.currentPhase === "hashing" || progress.currentPhase === "downscaling" || progress.currentPhase === "uploading";
+  const isDone = progress.currentPhase === "done";
+  const isCancelled = progress.currentPhase === "cancelled";
+  const label =
+    progress.currentPhase === "hashing" ? "Hashing & deduplicating" :
+    progress.currentPhase === "downscaling" ? "Resizing images" :
+    progress.currentPhase === "uploading" ? `Uploading batch ${progress.currentBatch}/${progress.totalBatches}` :
+    isDone ? "Upload complete ✓" :
+    isCancelled ? "Upload cancelled" :
+    "";
+
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
-        <h2 className="text-lg font-bold text-stone-900">Confirm upload</h2>
-        <div className="text-sm text-stone-600 space-y-2">
-          <p>About to analyse <strong className="text-stone-900">{fileCount.toLocaleString()}</strong> file{fileCount !== 1 ? "s" : ""}.</p>
-          <p>
-            Estimated Claude API cost: <strong className="text-stone-900">~${cost.toFixed(2)}</strong>.
-            Actual cost depends on image content (number of products per photo).
-          </p>
+    <div className="fixed bottom-6 right-6 z-40 bg-stone-900 text-white rounded-xl shadow-xl w-80 overflow-hidden">
+      <div className="px-4 py-3 flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold truncate">{label}</p>
           <p className="text-xs text-stone-400">
-            Images are downscaled and deduplicated before upload. Duplicates are free — already-analysed images are skipped.
+            {progress.processed.toLocaleString()} / {progress.totalFiles.toLocaleString()} files · {pct}%
           </p>
         </div>
-        <div className="flex gap-2 justify-end pt-2">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 rounded-lg border border-stone-300 text-sm font-medium text-stone-700 hover:bg-stone-50"
-          >
+        {inFlight && (
+          <button onClick={onCancel} className="text-xs text-stone-400 hover:text-red-400 px-2 py-1 rounded">
             Cancel
           </button>
-          <button
-            onClick={onConfirm}
-            className="px-4 py-2 rounded-lg bg-stone-900 text-white text-sm font-medium hover:bg-stone-800"
-          >
-            Start upload
+        )}
+        {(isDone || isCancelled) && (
+          <button onClick={onDismiss} className="text-xl text-stone-400 hover:text-white leading-none px-2">
+            ×
           </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Upload Progress ──────────────────────────────────────────────────────────
-
-function UploadProgressPanel({ progress, onCancel }: { progress: UploadProgress; onCancel: () => void }) {
-  const pct = progress.totalFiles ? Math.round((progress.processed / progress.totalFiles) * 100) : 0;
-  const label =
-    progress.currentPhase === "hashing" ? "Hashing & deduplicating…" :
-    progress.currentPhase === "downscaling" ? "Resizing images…" :
-    progress.currentPhase === "uploading" ? `Uploading batch ${progress.currentBatch}/${progress.totalBatches}…` :
-    progress.currentPhase === "done" ? "Upload complete. Analysis queued." :
-    progress.currentPhase === "cancelled" ? "Upload cancelled." :
-    "Idle";
-
-  return (
-    <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-sm font-semibold text-stone-800">{label}</p>
-        {progress.currentPhase !== "done" && progress.currentPhase !== "cancelled" && progress.currentPhase !== "idle" && (
-          <button onClick={onCancel} className="text-xs text-stone-400 hover:text-red-500">Cancel</button>
         )}
       </div>
-      <div className="w-full bg-stone-100 rounded-full h-2 overflow-hidden">
+      <div className="h-1.5 bg-stone-800">
         <div
           className={clsx(
-            "h-2 rounded-full transition-all duration-300",
-            progress.currentPhase === "done" ? "bg-emerald-500" : "bg-amber-500"
+            "h-full transition-all duration-300",
+            isDone ? "bg-emerald-400" : isCancelled ? "bg-stone-500" : "bg-amber-400",
           )}
           style={{ width: `${pct}%` }}
         />
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
-        <Counter label="Total" value={progress.totalFiles} />
-        <Counter label="Added" value={progress.added} className="text-emerald-600" />
-        <Counter label="Duplicates" value={progress.dupes} className="text-stone-500" />
-        <Counter label="Invalid" value={progress.invalid} className="text-amber-600" />
-        <Counter label="Failed" value={progress.failed} className="text-red-500" />
+      <div className="px-4 py-2 grid grid-cols-4 gap-1 text-[10px] text-stone-300 border-t border-stone-800">
+        <PillCounter label="Added" value={progress.added} className="text-emerald-400" />
+        <PillCounter label="Dupes" value={progress.dupes} />
+        <PillCounter label="Invalid" value={progress.invalid} className="text-amber-400" />
+        <PillCounter label="Failed" value={progress.failed} className="text-red-400" />
       </div>
       {progress.error && (
-        <p className="text-xs text-red-500">{progress.error}</p>
-      )}
-      {progress.currentPhase === "done" && (
-        <p className="text-xs text-stone-500">
-          {progress.added} image{progress.added !== 1 ? "s" : ""} queued for Claude analysis. They'll appear below as they're processed.
-        </p>
+        <p className="px-4 pb-2 text-[10px] text-red-400">{progress.error}</p>
       )}
     </div>
   );
 }
 
-function Counter({ label, value, className }: { label: string; value: number; className?: string }) {
+function PillCounter({ label, value, className }: { label: string; value: number; className?: string }) {
   return (
-    <div className="bg-stone-50 rounded-lg p-2 text-center">
-      <p className="text-stone-400">{label}</p>
-      <p className={clsx("text-sm font-semibold", className || "text-stone-800")}>{value.toLocaleString()}</p>
+    <div className="text-center">
+      <p className="text-stone-500 uppercase tracking-wide text-[9px]">{label}</p>
+      <p className={clsx("font-semibold", className || "text-white")}>{value.toLocaleString()}</p>
     </div>
   );
 }
@@ -1089,8 +1136,9 @@ export default function InStoreProductsPage() {
   const [uploadRetailer, setUploadRetailer] = useState<string>("");
 
   // Upload state
-  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [progress, setProgress] = useState<UploadProgress>(INITIAL_PROGRESS);
+  const [progressVisible, setProgressVisible] = useState(false);   // pill is mounted
   const cancelRef = useRef(false);
 
   // Stats
@@ -1212,14 +1260,10 @@ export default function InStoreProductsPage() {
 
   // ── Upload pipeline ──────────────────────────────────────────────────────
 
-  const onFilesSelected = useCallback((files: File[]) => {
-    setPendingFiles(files);
-  }, []);
-
-  const startUpload = useCallback(async () => {
-    const files = pendingFiles;
-    if (!files) return;
-    setPendingFiles(null);
+  const startUpload = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setUploadModalOpen(false);
+    setProgressVisible(true);
     cancelRef.current = false;
 
     const totalFiles = files.length;
@@ -1286,7 +1330,7 @@ export default function InStoreProductsPage() {
     await loadStats();
     await reloadCurrentView();
     await loadRetailers();
-  }, [pendingFiles, uploadRetailer, loadStats, reloadCurrentView, loadRetailers]);
+  }, [uploadRetailer, loadStats, reloadCurrentView, loadRetailers]);
 
   const cancelUpload = useCallback(() => {
     cancelRef.current = true;
@@ -1411,6 +1455,15 @@ export default function InStoreProductsPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-2xl font-bold text-stone-900">In-store Products</h1>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setUploadModalOpen(true)}
+            disabled={progressVisible && (progress.currentPhase === "hashing" || progress.currentPhase === "downscaling" || progress.currentPhase === "uploading")}
+            className="px-3 py-1.5 rounded-lg bg-stone-900 text-white hover:bg-stone-800 text-xs font-medium flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Upload in-store photos"
+          >
+            <span>📤</span>
+            <span>Upload</span>
+          </button>
           {stats && stats.images_total > 0 && (
             <button
               onClick={() => setConfirmingDeleteAll(true)}
@@ -1440,29 +1493,6 @@ export default function InStoreProductsPage() {
           </div>
         </div>
       </div>
-
-      {/* Upload zone */}
-      <UploadZone
-        retailer={uploadRetailer}
-        onRetailerChange={setUploadRetailer}
-        retailers={retailers}
-        onFilesSelected={onFilesSelected}
-        disabled={progress.currentPhase === "hashing" || progress.currentPhase === "downscaling" || progress.currentPhase === "uploading"}
-      />
-
-      {/* Cost estimate modal */}
-      {pendingFiles && (
-        <CostEstimateModal
-          fileCount={pendingFiles.length}
-          onCancel={() => setPendingFiles(null)}
-          onConfirm={startUpload}
-        />
-      )}
-
-      {/* Progress */}
-      {progress.currentPhase !== "idle" && (
-        <UploadProgressPanel progress={progress} onCancel={cancelUpload} />
-      )}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-stone-200">
@@ -1664,6 +1694,26 @@ export default function InStoreProductsPage() {
           onClose={() => setOpenImageId(null)}
           onItemUpdated={updateItem}
           onItemDeleted={deleteItem}
+        />
+      )}
+
+      {/* Upload modal — opens from the header 📤 Upload button */}
+      {uploadModalOpen && (
+        <InStoreUploadModal
+          retailer={uploadRetailer}
+          onRetailerChange={setUploadRetailer}
+          retailers={retailers}
+          onStart={startUpload}
+          onClose={() => setUploadModalOpen(false)}
+        />
+      )}
+
+      {/* Floating upload progress pill */}
+      {progressVisible && (
+        <UploadProgressPill
+          progress={progress}
+          onCancel={cancelUpload}
+          onDismiss={() => setProgressVisible(false)}
         />
       )}
 
