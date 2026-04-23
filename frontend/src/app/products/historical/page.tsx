@@ -129,6 +129,7 @@ export default function HistoricalProductsPage() {
   const [patentOnly, setPatentOnly] = useState(false);
   const [showInactive, setShowInactive] = useState<"all" | "active" | "inactive">("all");
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
+  const [facets, setFacets] = useState<{ best_seller: number; has_patent: number } | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 400);
@@ -175,6 +176,21 @@ export default function HistoricalProductsPage() {
 
   useEffect(() => { setPage(0); }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly, showInactive]);
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
+
+  // Fetch facet counts so zero-reach toggles can be hidden.
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (debouncedSearch) params.set("q", debouncedSearch);
+    if (retailer) params.set("retailer", retailer);
+    if (minPrice) params.set("min_price", minPrice);
+    if (maxPrice) params.set("max_price", maxPrice);
+    if (bestSellerOnly) params.set("best_seller", "true");
+    if (patentOnly) params.set("has_patent", "true");
+    fetch(`${API_BASE}/api/products/historical/facets?${params}`)
+      .then((r) => r.json())
+      .then((f) => setFacets(f))
+      .catch(() => setFacets(null));
+  }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly]);
 
   const hasFilters = debouncedSearch || retailer || minPrice || maxPrice || bestSellerOnly || patentOnly || showInactive !== "all";
   const inactiveCount = products.filter((p) => !p.is_active).length;
@@ -251,32 +267,36 @@ export default function HistoricalProductsPage() {
             />
           </div>
 
-          <button
-            onClick={() => setBestSellerOnly((v) => !v)}
-            className={clsx(
-              "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
-              bestSellerOnly
-                ? "bg-amber-400 border-amber-400 text-amber-900"
-                : "bg-white border-stone-200 text-stone-600 hover:border-amber-300 hover:text-amber-700"
-            )}
-          >
-            <span>★</span>
-            <span>Best Sellers</span>
-          </button>
+          {(!facets || bestSellerOnly || facets.best_seller > 0) && (
+            <button
+              onClick={() => setBestSellerOnly((v) => !v)}
+              className={clsx(
+                "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+                bestSellerOnly
+                  ? "bg-amber-400 border-amber-400 text-amber-900"
+                  : "bg-white border-stone-200 text-stone-600 hover:border-amber-300 hover:text-amber-700"
+              )}
+            >
+              <span>★</span>
+              <span>Best Sellers</span>
+            </button>
+          )}
 
-          {/* Patent toggle */}
-          <button
-            onClick={() => setPatentOnly((v) => !v)}
-            className={clsx(
-              "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
-              patentOnly
-                ? "bg-sky-100 border-sky-300 text-sky-800"
-                : "bg-white border-stone-200 text-stone-600 hover:border-sky-300 hover:text-sky-700"
-            )}
-          >
-            <span>⚙</span>
-            <span>Patent</span>
-          </button>
+          {/* Patent toggle — hidden when no reachable patented products */}
+          {(!facets || patentOnly || facets.has_patent > 0) && (
+            <button
+              onClick={() => setPatentOnly((v) => !v)}
+              className={clsx(
+                "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+                patentOnly
+                  ? "bg-sky-100 border-sky-300 text-sky-800"
+                  : "bg-white border-stone-200 text-stone-600 hover:border-sky-300 hover:text-sky-700"
+              )}
+            >
+              <span>⚙</span>
+              <span>Patent</span>
+            </button>
+          )}
         </div>
 
         {hasFilters && (

@@ -1144,6 +1144,9 @@ export default function InStoreProductsPage() {
   const [retailers, setRetailers] = useState<Retailer[]>([]);
   const [untaggedCount, setUntaggedCount] = useState(0);
 
+  // Facet counts per category (for zero-hiding the Category dropdown)
+  const [facets, setFacets] = useState<{ categories: Record<string, number> } | null>(null);
+
   // Retailer currently selected in the upload zone (remembered across sessions)
   const [uploadRetailer, setUploadRetailer] = useState<string>("");
 
@@ -1251,6 +1254,17 @@ export default function InStoreProductsPage() {
     } catch { /* ignore */ }
   }, []);
   useEffect(() => { loadRetailers(); }, [loadRetailers]);
+
+  // Load category facet counts so zero-reach options can be hidden
+  useEffect(() => {
+    api.instoreCatalogue.facets({
+      q: debouncedSearch || undefined,
+      retailer: retailerFilter || undefined,
+      show_all: showAll,
+    })
+      .then((f) => setFacets(f))
+      .catch(() => setFacets(null));
+  }, [debouncedSearch, retailerFilter, showAll]);
 
   // Hydrate uploadRetailer from localStorage on mount
   useEffect(() => {
@@ -1590,7 +1604,9 @@ export default function InStoreProductsPage() {
                 className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
               >
                 <option value="">All categories</option>
-                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                {CATEGORIES
+                  .filter((c) => !facets || c === category || (facets.categories[c] ?? 0) > 0)
+                  .map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
               <button
                 onClick={() => setShowAll((v) => !v)}

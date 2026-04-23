@@ -337,6 +337,15 @@ export const api = {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
+    facets: async (params: { q?: string; retailer?: string; show_all?: boolean } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.q) qs.set("q", params.q);
+      if (params.retailer) qs.set("retailer", params.retailer);
+      if (params.show_all) qs.set("show_all", "true");
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/facets?${qs}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ categories: Record<string, number> }>;
+    },
     patchItem: async (id: number, body: { product_name?: string; category?: string }) => {
       const res = await fetch(`${API_BASE}/api/instore-catalogue/items/${id}`, {
         method: "PATCH",

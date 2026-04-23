@@ -248,6 +248,41 @@ async def list_items(
     return {"total": total, "items": items}
 
 
+# ── Facets — count per category given current filters ────────────────────────
+
+@router.get("/facets")
+async def get_facets(
+    q: Optional[str] = None,
+    retailer: Optional[str] = None,
+    show_all: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Count of items per category given current search/retailer/show_all filters.
+    The `category` filter itself is deliberately *not* applied, so zero-reach
+    categories can be hidden in the UI dropdown."""
+    stmt = (
+        select(InStoreCatalogueItem.category, func.count())
+        .select_from(InStoreCatalogueItem)
+        .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
+        .group_by(InStoreCatalogueItem.category)
+    )
+    if q:
+        stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
+    if retailer:
+        if retailer == "__none__":
+            stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
+        else:
+            stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
+    if not show_all:
+        stmt = stmt.where(or_(
+            InStoreCatalogueItem.prominence.in_(DEFAULT_PROMINENCE),
+            InStoreCatalogueItem.prominence.is_(None),
+        ))
+
+    categories = {c: n for c, n in (await db.execute(stmt)).all() if c}
+    return {"categories": categories}
+
+
 # ── Per-item cropped image ────────────────────────────────────────────────────
 
 @router.get("/items/{item_id}/image")
