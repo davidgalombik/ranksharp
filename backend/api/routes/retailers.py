@@ -32,7 +32,7 @@ class RetailerOut(BaseModel):
 
 @router.get("/", response_model=list[RetailerOut])
 async def list_retailers(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Retailer).order_by(Retailer.country, Retailer.name))
+    result = await db.execute(select(Retailer).order_by(func.lower(Retailer.name)))
     retailers = result.scalars().all()
 
     output = []
