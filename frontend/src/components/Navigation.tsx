@@ -7,7 +7,7 @@ import clsx from "clsx";
 
 const topLinks = [
   { href: "/", label: "Dashboard", exact: true },
-  { href: "/products", label: "Current Products", exact: true },
+  { href: "/products", label: "Online Products", exact: true },
   { href: "/retailers", label: "Retailers" },
   { href: "/products/historical", label: "Historical Products", exact: true },
 ];
@@ -65,7 +65,7 @@ export default function Navigation() {
             Dashboard
           </Link>
 
-          {/* Current Products */}
+          {/* Online Products */}
           <Link
             href="/products"
             className={clsx(
@@ -73,7 +73,7 @@ export default function Navigation() {
               path === "/products" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
             )}
           >
-            Current Products
+            Online Products
           </Link>
 
           {/* In-store Products */}

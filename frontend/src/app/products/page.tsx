@@ -251,7 +251,7 @@ export default function ProductsPage() {
     <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1 className="text-2xl font-bold text-stone-900">Current Products</h1>
+        <h1 className="text-2xl font-bold text-stone-900">Online Products</h1>
         <p className="text-sm text-stone-500">
           {loading ? "Loading…" : `${products.length} of ${total.toLocaleString()}`}
         </p>
