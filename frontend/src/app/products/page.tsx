@@ -15,6 +15,7 @@ interface Product {
   currency: string;
   category: string | null;
   subcategory: string | null;
+  product_segment: string | null;
   primary_image_url: string | null;
   colours: string[];
   materials: string[];
@@ -155,13 +156,23 @@ export default function ProductsPage() {
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
   const [availableCategories, setAvailableCategories] = useState<string[]>([]);
   const [subcategory, setSubcategory] = useState("");
+  const [productSegment, setProductSegment] = useState("");
   const [taxonomy, setTaxonomy] = useState<{
     has_catalog: boolean;
-    tree: { category: string; category_slug: string; subcategories: { label: string; slug: string }[] }[];
+    tree: {
+      category: string;
+      category_slug: string;
+      subcategories: {
+        label: string;
+        slug: string;
+        product_segments: { label: string; slug: string }[];
+      }[];
+    }[];
   } | null>(null);
   const [facets, setFacets] = useState<{
     categories: Record<string, number>;
     subcategories: Record<string, number>;
+    product_segments: Record<string, number>;
     seasons: Record<string, number>;
     rooms: Record<string, number>;
     best_seller: number;
@@ -188,6 +199,7 @@ export default function ProductsPage() {
   useEffect(() => {
     setCategory("");
     setSubcategory("");
+    setProductSegment("");
     if (!retailer) {
       setAvailableCategories([]);
       setTaxonomy(null);
@@ -203,10 +215,14 @@ export default function ProductsPage() {
       .catch(() => setAvailableCategories([]));
   }, [retailer]);
 
-  // Clear subcategory when category changes (cascading behavior)
+  // Cascading clears: changing a level clears every deeper level
   useEffect(() => {
     setSubcategory("");
+    setProductSegment("");
   }, [category]);
+  useEffect(() => {
+    setProductSegment("");
+  }, [subcategory]);
 
   const fetchProducts = useCallback(async () => {
     setLoading(true);
@@ -215,6 +231,7 @@ export default function ProductsPage() {
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
     if (subcategory) params.set("subcategory", subcategory);
+    if (productSegment) params.set("product_segment", productSegment);
     if (season) params.set("season", season);
     if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
@@ -235,11 +252,11 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, category, subcategory, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
+  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
 
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, retailer, category, subcategory, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
+  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
 
   useEffect(() => {
     fetchProducts();
@@ -253,6 +270,7 @@ export default function ProductsPage() {
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
     if (subcategory) params.set("subcategory", subcategory);
+    if (productSegment) params.set("product_segment", productSegment);
     if (season) params.set("season", season);
     if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
@@ -264,9 +282,9 @@ export default function ProductsPage() {
       .then((r) => r.json())
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, retailer, category, subcategory, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
+  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
 
-  const hasFilters = debouncedSearch || retailer || category || subcategory || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
+  const hasFilters = debouncedSearch || retailer || category || subcategory || productSegment || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
 
   return (
     <div className="space-y-5">
@@ -334,6 +352,25 @@ export default function ProductsPage() {
                   >
                     <option value="">All subcategories</option>
                     {subs.map((s) => (
+                      <option key={s.slug} value={s.label}>{s.label}</option>
+                    ))}
+                  </select>
+                );
+              })()}
+              {category && subcategory && (() => {
+                const catNode = taxonomy.tree.find((n) => n.category === category);
+                const subNode = catNode?.subcategories.find((s) => s.label === subcategory);
+                const segs = (subNode?.product_segments ?? [])
+                  .filter((s) => !facets || s.label === productSegment || (facets.product_segments[s.label] ?? 0) > 0);
+                if (segs.length === 0) return null;
+                return (
+                  <select
+                    value={productSegment}
+                    onChange={(e) => setProductSegment(e.target.value)}
+                    className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  >
+                    <option value="">All product segments</option>
+                    {segs.map((s) => (
                       <option key={s.slug} value={s.label}>{s.label}</option>
                     ))}
                   </select>
@@ -455,7 +492,7 @@ export default function ProductsPage() {
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -500,7 +537,7 @@ export default function ProductsPage() {
             <>
               <p className="font-medium">No products match your filters</p>
               <button
-                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
                 className="mt-2 text-sm text-stone-600 underline hover:text-stone-900"
               >
                 Clear filters

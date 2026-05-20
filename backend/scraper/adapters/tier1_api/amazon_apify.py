@@ -48,18 +48,19 @@ class AmazonApifyAdapter(BaseAdapter):
             log.error("apify_not_configured", hint="Set APIFY_API_TOKEN in .env")
             return
 
-        # Each tagged_items entry is (category, subcategory, item_dict)
+        # Each tagged_items entry is (category, subcategory, product_segment, item_dict)
         tagged_items = await asyncio.get_event_loop().run_in_executor(
             None, self._run_actor
         )
-        for category, subcategory, item in tagged_items:
+        for category, subcategory, product_segment, item in tagged_items:
             product = self._map_item(item)
             if product:
                 product.category = category
                 product.subcategory = subcategory
+                product.product_segment = product_segment
                 yield product
 
-    def _run_actor(self) -> list[tuple[str, str, dict]]:
+    def _run_actor(self) -> list[tuple[str, str, str, dict]]:
         client = ApifyClient(settings.apify_api_token)
         entries = cc.all_entries(self.RETAILER_SLUG)
 
@@ -70,13 +71,14 @@ class AmazonApifyAdapter(BaseAdapter):
 
         log.info("apify_run_starting", actor=_ACTOR_ID, total_urls=len(entries))
 
-        tagged: list[tuple[str, str, dict]] = []
+        tagged: list[tuple[str, str, str, dict]] = []
         seen_asins: set[str] = set()
 
         for i, entry in enumerate(entries, start=1):
             url = entry.url
             log.info("apify_url_starting", index=i, total=len(entries),
-                     category=entry.category, subcategory=entry.subcategory, url=url)
+                     category=entry.category, subcategory=entry.subcategory,
+                     product_segment=entry.product_segment, url=url)
 
             try:
                 run = client.actor(_ACTOR_ID).call(
@@ -113,7 +115,7 @@ class AmazonApifyAdapter(BaseAdapter):
                     continue
                 if asin:
                     seen_asins.add(asin)
-                tagged.append((entry.category, entry.subcategory, item))
+                tagged.append((entry.category, entry.subcategory, entry.product_segment, item))
                 new_count += 1
 
             log.info(

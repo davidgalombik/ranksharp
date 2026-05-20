@@ -37,7 +37,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB — generous for 5000 rows
 
 REQUIRED_COLUMNS = {"url", "name", "primary_image_url", "retailer_slug"}
 OPTIONAL_COLUMNS = {
-    "price", "currency", "category", "subcategory",
+    "price", "currency", "category", "subcategory", "product_segment",
     "is_best_seller", "is_new", "has_patent",
     "description", "sku", "brand",
 }
@@ -192,15 +192,18 @@ async def _validate_rows(
         row["_is_new"] = _parse_bool(row.get("is_new"))
         row["_has_patent"] = _parse_bool(row.get("has_patent"))
 
-        # Category/subcategory validation against the taxonomy catalog.
-        # If the retailer has a catalog, any provided category + subcategory
-        # must form a valid pair; unknown values reject the row.
+        # Category/subcategory/product_segment validation against the taxonomy
+        # catalog. If the retailer has a catalog, any provided value(s) must
+        # form a valid (category, subcategory, product_segment) path; unknown
+        # or mismatched values reject the row.
         from scraper import category_catalog as cc
         row_cat_raw = (row.get("category") or "").strip()
         row_sub_raw = (row.get("subcategory") or "").strip()
+        row_seg_raw = (row.get("product_segment") or "").strip()
         if cc.has_catalog(retailer.slug):
             row_cat = cc.resolve_label(retailer.slug, row_cat_raw, kind="category") if row_cat_raw else None
             row_sub = cc.resolve_label(retailer.slug, row_sub_raw, kind="subcategory") if row_sub_raw else None
+            row_seg = cc.resolve_label(retailer.slug, row_seg_raw, kind="product_segment") if row_seg_raw else None
             if row_cat_raw and not row_cat:
                 rejects.append(RejectRow(row_number=idx, url=url,
                                          reason=f"unknown category '{row_cat_raw}' for retailer '{retailer.slug}'"))
@@ -209,6 +212,11 @@ async def _validate_rows(
                 rejects.append(RejectRow(row_number=idx, url=url,
                                          reason=f"unknown subcategory '{row_sub_raw}' for retailer '{retailer.slug}'"))
                 continue
+            if row_seg_raw and not row_seg:
+                rejects.append(RejectRow(row_number=idx, url=url,
+                                         reason=f"unknown product_segment '{row_seg_raw}' for retailer '{retailer.slug}'"))
+                continue
+            # Validate the path holds together at each provided level
             if row_cat and row_sub and not cc.is_valid(retailer.slug, row_cat, row_sub):
                 rejects.append(RejectRow(
                     row_number=idx, url=url,
@@ -216,9 +224,17 @@ async def _validate_rows(
                            f"for retailer '{retailer.slug}'",
                 ))
                 continue
+            if row_cat and row_sub and row_seg and not cc.is_valid(retailer.slug, row_cat, row_sub, row_seg):
+                rejects.append(RejectRow(
+                    row_number=idx, url=url,
+                    reason=f"product_segment '{row_seg}' is not under '{row_cat}' > '{row_sub}' "
+                           f"for retailer '{retailer.slug}'",
+                ))
+                continue
             # Normalise to canonical display labels for storage
             row["category"] = row_cat or ""
             row["subcategory"] = row_sub or ""
+            row["product_segment"] = row_seg or ""
 
         valid.append(row)
 
@@ -413,6 +429,9 @@ async def commit_csv_upload(
         subcategory = (row.get("subcategory") or "").strip()
         if subcategory:
             product.subcategory = subcategory[:500]
+        product_segment = (row.get("product_segment") or "").strip()
+        if product_segment:
+            product.product_segment = product_segment[:500]
         desc = (row.get("description") or "").strip()
         if desc:
             product.description = desc

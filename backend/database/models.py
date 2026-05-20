@@ -92,6 +92,7 @@ class Product(Base):
     currency: Mapped[str] = mapped_column(String(5), default="USD")
     category: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     subcategory: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    product_segment: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     brand: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
     # Images

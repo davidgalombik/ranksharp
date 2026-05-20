@@ -21,6 +21,7 @@ class ProductOut(BaseModel):
     currency: str
     category: Optional[str]
     subcategory: Optional[str] = None
+    product_segment: Optional[str] = None
     primary_image_url: Optional[str]
     colours: list[str] = []
     materials: list[str] = []
@@ -52,6 +53,7 @@ async def search_products(
     retailer: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
+    product_segment: Optional[str] = None,
     colour: Optional[str] = None,
     material: Optional[str] = None,
     style: Optional[str] = None,
@@ -87,6 +89,8 @@ async def search_products(
         stmt = stmt.where(Product.category == category)
     if subcategory:
         stmt = stmt.where(Product.subcategory == subcategory)
+    if product_segment:
+        stmt = stmt.where(Product.product_segment == product_segment)
     if min_price:
         stmt = stmt.where(Product.price >= min_price)
     if max_price:
@@ -118,6 +122,8 @@ async def search_products(
         count_stmt = count_stmt.where(Product.category == category)
     if subcategory:
         count_stmt = count_stmt.where(Product.subcategory == subcategory)
+    if product_segment:
+        count_stmt = count_stmt.where(Product.product_segment == product_segment)
     if min_price:
         count_stmt = count_stmt.where(Product.price >= min_price)
     if max_price:
@@ -143,6 +149,7 @@ async def search_products(
 class FacetsOut(BaseModel):
     categories: dict[str, int] = {}
     subcategories: dict[str, int] = {}
+    product_segments: dict[str, int] = {}
     seasons: dict[str, int] = {}
     rooms: dict[str, int] = {}
     best_seller: int = 0
@@ -157,6 +164,7 @@ def _apply_current_filters(
     retailer: Optional[str],
     category: Optional[str],
     subcategory: Optional[str],
+    product_segment: Optional[str],
     season: Optional[str],
     room: Optional[str],
     min_price: Optional[float],
@@ -180,6 +188,8 @@ def _apply_current_filters(
         stmt = stmt.where(Product.category == category)
     if subcategory and "subcategory" not in exclude:
         stmt = stmt.where(Product.subcategory == subcategory)
+    if product_segment and "product_segment" not in exclude:
+        stmt = stmt.where(Product.product_segment == product_segment)
     if min_price is not None:
         stmt = stmt.where(Product.price >= min_price)
     if max_price is not None:
@@ -203,6 +213,7 @@ async def current_product_facets(
     retailer: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
+    product_segment: Optional[str] = None,
     season: Optional[str] = None,
     room: Optional[str] = None,
     min_price: Optional[float] = None,
@@ -216,6 +227,7 @@ async def current_product_facets(
     options can be hidden in the UI."""
     kwargs = dict(
         q=q, retailer=retailer, category=category, subcategory=subcategory,
+        product_segment=product_segment,
         season=season, room=room,
         min_price=min_price, max_price=max_price,
         best_seller=best_seller, has_patent=has_patent, is_new=is_new,
@@ -249,15 +261,33 @@ async def current_product_facets(
     # so picking a category narrows the subcategory options.
     categories: dict[str, int] = {}
     subcategories: dict[str, int] = {}
+    product_segments: dict[str, int] = {}
     if retailer:
-        cat_rows = await db.execute(_base_grouped(Product.category, {"category", "subcategory"}))
+        # Category facet ignores its own filter AND deeper-level filters, so
+        # picking a deeper filter doesn't shrink the category list.
+        cat_rows = await db.execute(_base_grouped(
+            Product.category, {"category", "subcategory", "product_segment"},
+        ))
         for cat, cnt in cat_rows.all():
             if cat:
                 categories[cat] = cnt
-        sub_rows = await db.execute(_base_grouped(Product.subcategory, {"subcategory"}))
+        # Subcategory facet keeps current category filter but ignores
+        # subcategory + product_segment, so picking a category narrows
+        # the subcategory list to those reachable under it.
+        sub_rows = await db.execute(_base_grouped(
+            Product.subcategory, {"subcategory", "product_segment"},
+        ))
         for sub, cnt in sub_rows.all():
             if sub:
                 subcategories[sub] = cnt
+        # Product-segment facet keeps category + subcategory filters but
+        # ignores its own, so segments narrow as you drill down.
+        seg_rows = await db.execute(_base_grouped(
+            Product.product_segment, {"product_segment"},
+        ))
+        for seg, cnt in seg_rows.all():
+            if seg:
+                product_segments[seg] = cnt
 
     season_rows = await db.execute(_base_grouped(ProductAttributes.season, {"season"}))
     seasons = {s: c for s, c in season_rows.all() if s}
@@ -272,6 +302,7 @@ async def current_product_facets(
     return FacetsOut(
         categories=categories,
         subcategories=subcategories,
+        product_segments=product_segments,
         seasons=seasons,
         rooms=rooms,
         best_seller=best_seller_ct,
@@ -376,6 +407,7 @@ def _to_out(product, attrs, retailer_obj) -> ProductOut:
         currency=product.currency,
         category=product.category,
         subcategory=product.subcategory,
+        product_segment=product.product_segment,
         primary_image_url=product.primary_image_url,
         colours=attrs.colours if attrs else [],
         materials=attrs.materials if attrs else [],

@@ -49,13 +49,13 @@ def main() -> int:
         stmt = update(Product).where(Product.retailer_id == retailer.id)
         if not args.include_csv:
             stmt = stmt.where(Product.scrape_job_id.is_not(None))
-        stmt = stmt.values(category=None, subcategory=None)
+        stmt = stmt.values(category=None, subcategory=None, product_segment=None)
 
         result = session.execute(stmt)
         session.commit()
 
         scope = "all products" if args.include_csv else "scraper-sourced products only"
-        print(f"Wiped category/subcategory on {result.rowcount} {scope} "
+        print(f"Wiped category/subcategory/product_segment on {result.rowcount} {scope} "
               f"for retailer '{retailer.slug}' ({retailer.name}).")
         if not args.include_csv:
             print("CSV-uploaded products preserved. Use --include-csv to wipe those too.")

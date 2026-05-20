@@ -38,10 +38,10 @@ async def reset_taxonomy(
     _: bool = Depends(_require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Null out `category` and `subcategory` for every product belonging to
-    this retailer. By default, only scraper-sourced products are touched
-    (those with `scrape_job_id IS NOT NULL`) so CSV-uploaded products that
-    the user manually categorised are preserved.
+    """Null out `category`, `subcategory`, and `product_segment` for every
+    product belonging to this retailer. By default, only scraper-sourced
+    products are touched (those with `scrape_job_id IS NOT NULL`) so
+    CSV-uploaded products that the user manually categorised are preserved.
 
     Pass `?include_csv=true` to wipe everything.
 
@@ -57,7 +57,7 @@ async def reset_taxonomy(
     stmt = update(Product).where(Product.retailer_id == retailer.id)
     if not include_csv:
         stmt = stmt.where(Product.scrape_job_id.is_not(None))
-    stmt = stmt.values(category=None, subcategory=None)
+    stmt = stmt.values(category=None, subcategory=None, product_segment=None)
 
     result = await db.execute(stmt)
     await db.commit()

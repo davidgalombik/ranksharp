@@ -37,6 +37,7 @@ class RawProduct:
     currency: str = "USD"
     category: Optional[str] = None
     subcategory: Optional[str] = None
+    product_segment: Optional[str] = None
     brand: Optional[str] = None
 
     # Images — list of absolute URLs, primary first

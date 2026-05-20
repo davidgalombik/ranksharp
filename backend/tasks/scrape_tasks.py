@@ -163,6 +163,8 @@ async def _run_scrape(retailer_config: dict, retailer_id: int, job_id: int, sess
                 existing.category = raw_product.category
             if raw_product.subcategory:
                 existing.subcategory = raw_product.subcategory
+            if raw_product.product_segment:
+                existing.product_segment = raw_product.product_segment
             if raw_product.price is not None:
                 existing.price = raw_product.price
             existing.name = raw_product.name
@@ -190,6 +192,7 @@ async def _run_scrape(retailer_config: dict, retailer_id: int, job_id: int, sess
                 currency=raw_product.currency,
                 category=raw_product.category,
                 subcategory=raw_product.subcategory,
+                product_segment=raw_product.product_segment,
                 brand=raw_product.brand,
                 image_urls=raw_product.image_urls,
                 primary_image_url=raw_product.primary_image_url,
