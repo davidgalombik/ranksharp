@@ -20,6 +20,7 @@ class ProductOut(BaseModel):
     price: Optional[float]
     currency: str
     category: Optional[str]
+    subcategory: Optional[str] = None
     primary_image_url: Optional[str]
     colours: list[str] = []
     materials: list[str] = []
@@ -50,6 +51,7 @@ async def search_products(
     q: Optional[str] = None,
     retailer: Optional[str] = None,
     category: Optional[str] = None,
+    subcategory: Optional[str] = None,
     colour: Optional[str] = None,
     material: Optional[str] = None,
     style: Optional[str] = None,
@@ -83,6 +85,8 @@ async def search_products(
         stmt = stmt.where(Retailer.slug == retailer)
     if category:
         stmt = stmt.where(Product.category == category)
+    if subcategory:
+        stmt = stmt.where(Product.subcategory == subcategory)
     if min_price:
         stmt = stmt.where(Product.price >= min_price)
     if max_price:
@@ -112,6 +116,8 @@ async def search_products(
         count_stmt = count_stmt.where(Retailer.slug == retailer)
     if category:
         count_stmt = count_stmt.where(Product.category == category)
+    if subcategory:
+        count_stmt = count_stmt.where(Product.subcategory == subcategory)
     if min_price:
         count_stmt = count_stmt.where(Product.price >= min_price)
     if max_price:
@@ -136,6 +142,7 @@ async def search_products(
 
 class FacetsOut(BaseModel):
     categories: dict[str, int] = {}
+    subcategories: dict[str, int] = {}
     seasons: dict[str, int] = {}
     rooms: dict[str, int] = {}
     best_seller: int = 0
@@ -149,6 +156,7 @@ def _apply_current_filters(
     q: Optional[str],
     retailer: Optional[str],
     category: Optional[str],
+    subcategory: Optional[str],
     season: Optional[str],
     room: Optional[str],
     min_price: Optional[float],
@@ -170,6 +178,8 @@ def _apply_current_filters(
         stmt = stmt.where(Retailer.slug == retailer)
     if category and "category" not in exclude:
         stmt = stmt.where(Product.category == category)
+    if subcategory and "subcategory" not in exclude:
+        stmt = stmt.where(Product.subcategory == subcategory)
     if min_price is not None:
         stmt = stmt.where(Product.price >= min_price)
     if max_price is not None:
@@ -192,6 +202,7 @@ async def current_product_facets(
     q: Optional[str] = None,
     retailer: Optional[str] = None,
     category: Optional[str] = None,
+    subcategory: Optional[str] = None,
     season: Optional[str] = None,
     room: Optional[str] = None,
     min_price: Optional[float] = None,
@@ -204,7 +215,8 @@ async def current_product_facets(
     """Count per filter value for the Current Products page, so zero-reach
     options can be hidden in the UI."""
     kwargs = dict(
-        q=q, retailer=retailer, category=category, season=season, room=room,
+        q=q, retailer=retailer, category=category, subcategory=subcategory,
+        season=season, room=room,
         min_price=min_price, max_price=max_price,
         best_seller=best_seller, has_patent=has_patent, is_new=is_new,
     )
@@ -231,14 +243,21 @@ async def current_product_facets(
         )
         return _apply_current_filters(stmt, **kwargs, exclude=exclude)
 
-    # Categories — retailer-gated in the UI, but we compute it when a retailer
-    # is selected so the dropdown can hide zero-count options.
+    # Categories + subcategories — retailer-gated in the UI, but we compute
+    # them when a retailer is selected so the dropdowns can hide zero-count
+    # options. Subcategory count uses all-other-filters (incl. current category)
+    # so picking a category narrows the subcategory options.
     categories: dict[str, int] = {}
+    subcategories: dict[str, int] = {}
     if retailer:
-        rows = await db.execute(_base_grouped(Product.category, {"category"}))
-        for cat, cnt in rows.all():
+        cat_rows = await db.execute(_base_grouped(Product.category, {"category", "subcategory"}))
+        for cat, cnt in cat_rows.all():
             if cat:
                 categories[cat] = cnt
+        sub_rows = await db.execute(_base_grouped(Product.subcategory, {"subcategory"}))
+        for sub, cnt in sub_rows.all():
+            if sub:
+                subcategories[sub] = cnt
 
     season_rows = await db.execute(_base_grouped(ProductAttributes.season, {"season"}))
     seasons = {s: c for s, c in season_rows.all() if s}
@@ -252,6 +271,7 @@ async def current_product_facets(
 
     return FacetsOut(
         categories=categories,
+        subcategories=subcategories,
         seasons=seasons,
         rooms=rooms,
         best_seller=best_seller_ct,
@@ -355,6 +375,7 @@ def _to_out(product, attrs, retailer_obj) -> ProductOut:
         price=product.price,
         currency=product.currency,
         category=product.category,
+        subcategory=product.subcategory,
         primary_image_url=product.primary_image_url,
         colours=attrs.colours if attrs else [],
         materials=attrs.materials if attrs else [],

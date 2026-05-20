@@ -7,14 +7,16 @@ Output: title, url, asin, price, brand, stars, reviewsCount, thumbnailImage,
         highResolutionImages, description, features, breadCrumbs, isAmazonChoice,
         monthlyPurchaseVolume
 
-Each search URL yields up to MAX_ITEMS_PER_URL products.
-40 search terms × 48 items = up to ~1,920 unique products per run.
+URLs to scrape come from the taxonomy catalog at
+`backend/scraper/catalogs/amazon-us.csv`. Each product is stamped with the
+(category, subcategory) of the URL it was found at.
 """
 import asyncio
 from typing import AsyncIterator, Optional
 import structlog
 from apify_client import ApifyClient
 from scraper.base_adapter import BaseAdapter, RawProduct
+from scraper import category_catalog as cc
 from config import settings
 
 log = structlog.get_logger()
@@ -22,69 +24,18 @@ log = structlog.get_logger()
 _ACTOR_ID = "junglee/Amazon-crawler"
 MAX_ITEMS_PER_URL = 48  # 2 pages of Amazon search results per term
 
-SEARCH_URLS = [
-    # Candles & fragrance
-    "https://www.amazon.com/s?k=scented+candles&s=popularity-rank",
-    "https://www.amazon.com/s?k=wax+melts&s=popularity-rank",
-    "https://www.amazon.com/s?k=reed+diffuser&s=popularity-rank",
-    "https://www.amazon.com/s?k=essential+oil+diffuser&s=popularity-rank",
-    # Soft furnishings
-    "https://www.amazon.com/s?k=throw+pillows&s=popularity-rank",
-    "https://www.amazon.com/s?k=throw+blankets&s=popularity-rank",
-    "https://www.amazon.com/s?k=curtain+panels&s=popularity-rank",
-    "https://www.amazon.com/s?k=area+rugs&s=popularity-rank",
-    # Storage & organisation
-    "https://www.amazon.com/s?k=storage+baskets&s=popularity-rank",
-    "https://www.amazon.com/s?k=floating+shelves&s=popularity-rank",
-    "https://www.amazon.com/s?k=desk+organizers&s=popularity-rank",
-    "https://www.amazon.com/s?k=kitchen+canisters&s=popularity-rank",
-    "https://www.amazon.com/s?k=bathroom+organizer&s=popularity-rank",
-    "https://www.amazon.com/s?k=closet+organizer&s=popularity-rank",
-    # Decorative objects
-    "https://www.amazon.com/s?k=decorative+vases&s=popularity-rank",
-    "https://www.amazon.com/s?k=decorative+bowls&s=popularity-rank",
-    "https://www.amazon.com/s?k=decorative+trays&s=popularity-rank",
-    "https://www.amazon.com/s?k=picture+frames&s=popularity-rank",
-    "https://www.amazon.com/s?k=wall+mirrors&s=popularity-rank",
-    "https://www.amazon.com/s?k=wall+clocks&s=popularity-rank",
-    "https://www.amazon.com/s?k=wall+art+prints&s=popularity-rank",
-    "https://www.amazon.com/s?k=decorative+figurines&s=popularity-rank",
-    "https://www.amazon.com/s?k=bookends&s=popularity-rank",
-    "https://www.amazon.com/s?k=decorative+lanterns&s=popularity-rank",
-    # Lighting
-    "https://www.amazon.com/s?k=table+lamps&s=popularity-rank",
-    "https://www.amazon.com/s?k=floor+lamps&s=popularity-rank",
-    "https://www.amazon.com/s?k=string+lights&s=popularity-rank",
-    "https://www.amazon.com/s?k=led+night+light&s=popularity-rank",
-    # Plants & outdoors
-    "https://www.amazon.com/s?k=indoor+planters&s=popularity-rank",
-    "https://www.amazon.com/s?k=artificial+plants&s=popularity-rank",
-    # Kitchen & dining
-    "https://www.amazon.com/s?k=serving+boards&s=popularity-rank",
-    "https://www.amazon.com/s?k=salad+bowls&s=popularity-rank",
-    "https://www.amazon.com/s?k=coffee+mugs&s=popularity-rank",
-    "https://www.amazon.com/s?k=kitchen+towels&s=popularity-rank",
-    # Bedroom & bath
-    "https://www.amazon.com/s?k=decorative+mirrors+bedroom&s=popularity-rank",
-    "https://www.amazon.com/s?k=bath+accessories+set&s=popularity-rank",
-    "https://www.amazon.com/s?k=soap+dispenser&s=popularity-rank",
-    # Seasonal & trending
-    "https://www.amazon.com/s?k=boho+home+decor&s=popularity-rank",
-    "https://www.amazon.com/s?k=minimalist+home+decor&s=popularity-rank",
-    "https://www.amazon.com/s?k=coastal+home+decor&s=popularity-rank",
-]
-
 
 class AmazonApifyAdapter(BaseAdapter):
     """
     Tier-1 adapter: junglee/Amazon-crawler via Apify.
-    Runs one actor call per search URL to avoid cross-URL deduplication.
+    Runs one actor call per catalog URL so we can tag products with their
+    (category, subcategory) based on the URL they were found at.
     """
 
     RETAILER_SLUG = "amazon-us"
 
     async def get_category_urls(self) -> list[str]:
-        return SEARCH_URLS
+        return [e.url for e in cc.all_entries(self.RETAILER_SLUG)]
 
     async def get_product_urls(self, category_url: str) -> list[str]:
         return []
@@ -97,24 +48,35 @@ class AmazonApifyAdapter(BaseAdapter):
             log.error("apify_not_configured", hint="Set APIFY_API_TOKEN in .env")
             return
 
-        items = await asyncio.get_event_loop().run_in_executor(
+        # Each tagged_items entry is (category, subcategory, item_dict)
+        tagged_items = await asyncio.get_event_loop().run_in_executor(
             None, self._run_actor
         )
-        for item in items:
+        for category, subcategory, item in tagged_items:
             product = self._map_item(item)
             if product:
+                product.category = category
+                product.subcategory = subcategory
                 yield product
 
-    def _run_actor(self) -> list[dict]:
+    def _run_actor(self) -> list[tuple[str, str, dict]]:
         client = ApifyClient(settings.apify_api_token)
+        entries = cc.all_entries(self.RETAILER_SLUG)
 
-        log.info("apify_run_starting", actor=_ACTOR_ID, total_urls=len(SEARCH_URLS))
+        if not entries:
+            log.error("catalog_empty", retailer=self.RETAILER_SLUG,
+                      hint="Add entries to backend/scraper/catalogs/amazon-us.csv")
+            return []
 
-        all_items: list[dict] = []
+        log.info("apify_run_starting", actor=_ACTOR_ID, total_urls=len(entries))
+
+        tagged: list[tuple[str, str, dict]] = []
         seen_asins: set[str] = set()
 
-        for i, url in enumerate(SEARCH_URLS, start=1):
-            log.info("apify_url_starting", index=i, total=len(SEARCH_URLS), url=url)
+        for i, entry in enumerate(entries, start=1):
+            url = entry.url
+            log.info("apify_url_starting", index=i, total=len(entries),
+                     category=entry.category, subcategory=entry.subcategory, url=url)
 
             try:
                 run = client.actor(_ACTOR_ID).call(
@@ -144,28 +106,28 @@ class AmazonApifyAdapter(BaseAdapter):
 
             items = list(client.dataset(dataset_id).iterate_items())
 
-            new_items = []
+            new_count = 0
             for item in items:
                 asin = item.get("asin")
                 if asin and asin in seen_asins:
                     continue
                 if asin:
                     seen_asins.add(asin)
-                new_items.append(item)
+                tagged.append((entry.category, entry.subcategory, item))
+                new_count += 1
 
-            all_items.extend(new_items)
             log.info(
                 "apify_url_complete",
                 index=i,
                 url=url,
                 status=status,
                 items_this_url=len(items),
-                new_unique=len(new_items),
-                total_so_far=len(all_items),
+                new_unique=new_count,
+                total_so_far=len(tagged),
             )
 
-        log.info("apify_all_urls_complete", total_unique_items=len(all_items))
-        return all_items
+        log.info("apify_all_urls_complete", total_unique_items=len(tagged))
+        return tagged
 
     def _map_item(self, item: dict) -> Optional[RawProduct]:
         name = item.get("title")

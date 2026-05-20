@@ -37,7 +37,8 @@ MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB — generous for 5000 rows
 
 REQUIRED_COLUMNS = {"url", "name", "primary_image_url", "retailer_slug"}
 OPTIONAL_COLUMNS = {
-    "price", "currency", "category", "is_best_seller", "is_new", "has_patent",
+    "price", "currency", "category", "subcategory",
+    "is_best_seller", "is_new", "has_patent",
     "description", "sku", "brand",
 }
 ALL_COLUMNS = REQUIRED_COLUMNS | OPTIONAL_COLUMNS
@@ -190,6 +191,35 @@ async def _validate_rows(
         row["_is_best_seller"] = _parse_bool(row.get("is_best_seller"))
         row["_is_new"] = _parse_bool(row.get("is_new"))
         row["_has_patent"] = _parse_bool(row.get("has_patent"))
+
+        # Category/subcategory validation against the taxonomy catalog.
+        # If the retailer has a catalog, any provided category + subcategory
+        # must form a valid pair; unknown values reject the row.
+        from scraper import category_catalog as cc
+        row_cat_raw = (row.get("category") or "").strip()
+        row_sub_raw = (row.get("subcategory") or "").strip()
+        if cc.has_catalog(retailer.slug):
+            row_cat = cc.resolve_label(retailer.slug, row_cat_raw, kind="category") if row_cat_raw else None
+            row_sub = cc.resolve_label(retailer.slug, row_sub_raw, kind="subcategory") if row_sub_raw else None
+            if row_cat_raw and not row_cat:
+                rejects.append(RejectRow(row_number=idx, url=url,
+                                         reason=f"unknown category '{row_cat_raw}' for retailer '{retailer.slug}'"))
+                continue
+            if row_sub_raw and not row_sub:
+                rejects.append(RejectRow(row_number=idx, url=url,
+                                         reason=f"unknown subcategory '{row_sub_raw}' for retailer '{retailer.slug}'"))
+                continue
+            if row_cat and row_sub and not cc.is_valid(retailer.slug, row_cat, row_sub):
+                rejects.append(RejectRow(
+                    row_number=idx, url=url,
+                    reason=f"subcategory '{row_sub}' is not under category '{row_cat}' "
+                           f"for retailer '{retailer.slug}'",
+                ))
+                continue
+            # Normalise to canonical display labels for storage
+            row["category"] = row_cat or ""
+            row["subcategory"] = row_sub or ""
+
         valid.append(row)
 
     return valid, rejects, retailer_map, missing_slugs
@@ -380,6 +410,9 @@ async def commit_csv_upload(
         category = (row.get("category") or "").strip()
         if category:
             product.category = category[:500]
+        subcategory = (row.get("subcategory") or "").strip()
+        if subcategory:
+            product.subcategory = subcategory[:500]
         desc = (row.get("description") or "").strip()
         if desc:
             product.description = desc

@@ -14,6 +14,7 @@ interface Product {
   price: number | null;
   currency: string;
   category: string | null;
+  subcategory: string | null;
   primary_image_url: string | null;
   colours: string[];
   materials: string[];
@@ -153,8 +154,14 @@ export default function ProductsPage() {
   const [newOnly, setNewOnly] = useState(false);
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
   const [availableCategories, setAvailableCategories] = useState<string[]>([]);
+  const [subcategory, setSubcategory] = useState("");
+  const [taxonomy, setTaxonomy] = useState<{
+    has_catalog: boolean;
+    tree: { category: string; category_slug: string; subcategories: { label: string; slug: string }[] }[];
+  } | null>(null);
   const [facets, setFacets] = useState<{
     categories: Record<string, number>;
+    subcategories: Record<string, number>;
     seasons: Record<string, number>;
     rooms: Record<string, number>;
     best_seller: number;
@@ -176,18 +183,30 @@ export default function ProductsPage() {
       .catch(() => {});
   }, []);
 
-  // When retailer changes, load its categories and reset category filter
+  // When retailer changes, load taxonomy (catalog-defined) + legacy categories,
+  // and reset the category/subcategory filters.
   useEffect(() => {
     setCategory("");
+    setSubcategory("");
     if (!retailer) {
       setAvailableCategories([]);
+      setTaxonomy(null);
       return;
     }
+    fetch(`${API_BASE}/api/retailers/${retailer}/taxonomy`)
+      .then((r) => r.json())
+      .then((t) => setTaxonomy(t))
+      .catch(() => setTaxonomy(null));
     fetch(`${API_BASE}/api/retailers/${retailer}/categories`)
       .then((r) => r.json())
       .then((cats: string[]) => setAvailableCategories(cats))
       .catch(() => setAvailableCategories([]));
   }, [retailer]);
+
+  // Clear subcategory when category changes (cascading behavior)
+  useEffect(() => {
+    setSubcategory("");
+  }, [category]);
 
   const fetchProducts = useCallback(async () => {
     setLoading(true);
@@ -195,6 +214,7 @@ export default function ProductsPage() {
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
+    if (subcategory) params.set("subcategory", subcategory);
     if (season) params.set("season", season);
     if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
@@ -215,11 +235,11 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
+  }, [debouncedSearch, retailer, category, subcategory, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
 
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
+  }, [debouncedSearch, retailer, category, subcategory, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
 
   useEffect(() => {
     fetchProducts();
@@ -232,6 +252,7 @@ export default function ProductsPage() {
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
+    if (subcategory) params.set("subcategory", subcategory);
     if (season) params.set("season", season);
     if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
@@ -243,9 +264,9 @@ export default function ProductsPage() {
       .then((r) => r.json())
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, retailer, category, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
+  }, [debouncedSearch, retailer, category, subcategory, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
 
-  const hasFilters = debouncedSearch || retailer || category || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
+  const hasFilters = debouncedSearch || retailer || category || subcategory || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
 
   return (
     <div className="space-y-5">
@@ -283,20 +304,57 @@ export default function ProductsPage() {
             ))}
           </select>
 
-          {/* Category — only shown when a retailer with multiple categories is selected */}
-          {availableCategories.length > 1 && (
-            <select
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
-            >
-              <option value="">All categories</option>
-              {availableCategories
-                .filter((c) => !facets || c === category || (facets.categories[c] ?? 0) > 0)
-                .map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-            </select>
+          {/* Category + Subcategory — cascading. When the retailer has a
+              catalog (taxonomy.has_catalog), use the catalog's tree;
+              otherwise fall back to the legacy DB-derived category list. */}
+          {taxonomy?.has_catalog ? (
+            <>
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All categories</option>
+                {taxonomy.tree
+                  .filter((node) => !facets || node.category === category || (facets.categories[node.category] ?? 0) > 0)
+                  .map((node) => (
+                    <option key={node.category_slug} value={node.category}>{node.category}</option>
+                  ))}
+              </select>
+              {category && (() => {
+                const node = taxonomy.tree.find((n) => n.category === category);
+                const subs = (node?.subcategories ?? [])
+                  .filter((s) => !facets || s.label === subcategory || (facets.subcategories[s.label] ?? 0) > 0);
+                if (subs.length === 0) return null;
+                return (
+                  <select
+                    value={subcategory}
+                    onChange={(e) => setSubcategory(e.target.value)}
+                    className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  >
+                    <option value="">All subcategories</option>
+                    {subs.map((s) => (
+                      <option key={s.slug} value={s.label}>{s.label}</option>
+                    ))}
+                  </select>
+                );
+              })()}
+            </>
+          ) : (
+            availableCategories.length > 1 && (
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All categories</option>
+                {availableCategories
+                  .filter((c) => !facets || c === category || (facets.categories[c] ?? 0) > 0)
+                  .map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+              </select>
+            )
           )}
 
           {/* Season */}
@@ -397,7 +455,7 @@ export default function ProductsPage() {
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -442,7 +500,7 @@ export default function ProductsPage() {
             <>
               <p className="font-medium">No products match your filters</p>
               <button
-                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
                 className="mt-2 text-sm text-stone-600 underline hover:text-stone-900"
               >
                 Clear filters

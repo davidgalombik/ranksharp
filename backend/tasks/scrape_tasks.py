@@ -161,6 +161,8 @@ async def _run_scrape(retailer_config: dict, retailer_id: int, job_id: int, sess
             # Always update category/price/name so re-scrapes can fix bad data
             if raw_product.category:
                 existing.category = raw_product.category
+            if raw_product.subcategory:
+                existing.subcategory = raw_product.subcategory
             if raw_product.price is not None:
                 existing.price = raw_product.price
             existing.name = raw_product.name

@@ -90,6 +90,20 @@ async def get_retailer_categories(slug: str, db: AsyncSession = Depends(get_db))
     return categories
 
 
+@router.get("/{slug}/taxonomy")
+async def get_retailer_taxonomy(slug: str):
+    """Return the catalog-defined category → subcategory tree for a retailer.
+
+    UI uses this to drive cascading Category → Subcategory dropdowns on
+    Online Products. When `has_catalog` is False, callers fall back to the
+    legacy /categories endpoint (DB-derived strings)."""
+    from scraper import category_catalog as cc
+    return {
+        "has_catalog": cc.has_catalog(slug),
+        "tree": cc.get_tree(slug),
+    }
+
+
 @router.post("/{retailer_id}/scrape")
 async def trigger_scrape(
     retailer_id: int,
