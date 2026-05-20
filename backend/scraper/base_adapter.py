@@ -116,14 +116,64 @@ class BaseAdapter(ABC):
     # ── Orchestration ───────────────────────────────────────────────────────
 
     async def scrape(self) -> AsyncIterator[RawProduct]:
-        """Full scrape pipeline: categories → product URLs → parsed products."""
+        """Full scrape pipeline.
+
+        Two modes:
+          • Catalog mode — used automatically when the retailer has a CSV at
+            `backend/scraper/catalogs/<slug>.csv`. Each yielded product is
+            stamped with the catalog entry's (category, subcategory,
+            product_segment).
+          • Legacy mode — falls back to `get_category_urls()` if no catalog.
+        """
+        from scraper import category_catalog as cc
+
         await self.before_scrape()
         try:
+            if cc.has_catalog(self.RETAILER_SLUG):
+                entries = cc.all_entries(self.RETAILER_SLUG)
+                self.log.info("scrape_via_catalog", entry_count=len(entries))
+                for entry in entries:
+                    cat_lower = entry.url.lower()
+                    is_best_seller_cat = any(kw in cat_lower for kw in _BEST_SELLER_KEYWORDS)
+                    self.log.info(
+                        "catalog_entry_starting",
+                        category=entry.category,
+                        subcategory=entry.subcategory,
+                        product_segment=entry.product_segment,
+                        url=entry.url,
+                    )
+                    try:
+                        product_urls = await self.get_product_urls(entry.url)
+                    except Exception as exc:
+                        self.log.warning("catalog_entry_url_error",
+                                         url=entry.url, error=str(exc))
+                        continue
+                    self.log.info(
+                        "catalog_entry_complete",
+                        product_segment=entry.product_segment,
+                        url=entry.url,
+                        product_count=len(product_urls),
+                    )
+                    for product_url in product_urls:
+                        await self._polite_delay()
+                        try:
+                            product = await self.parse_product(product_url)
+                            if product:
+                                product.category = entry.category
+                                product.subcategory = entry.subcategory
+                                product.product_segment = entry.product_segment
+                                if is_best_seller_cat:
+                                    product.is_best_seller = True
+                                yield product
+                        except Exception as exc:
+                            self.log.warning("parse_error", url=product_url, error=str(exc))
+                return
+
+            # Legacy mode: no catalog defined for this retailer
             category_urls = await self.get_category_urls()
             self.log.info("categories_found", count=len(category_urls))
 
             for cat_url in category_urls:
-                # Auto-flag products from known best-seller category pages
                 cat_lower = cat_url.lower()
                 is_best_seller_cat = any(kw in cat_lower for kw in _BEST_SELLER_KEYWORDS)
 

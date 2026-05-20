@@ -2,12 +2,16 @@
 At Home adapter (athome.com).
 
 At Home is a US home decor superstore with server-side rendered pages and JSON-LD.
-Category pages use /category/{slug}/ pattern.
+URLs to scrape come from the taxonomy catalog at
+`backend/scraper/catalogs/at-home.csv` (search URLs of the form
+/search/?q=...). Legacy /category/{slug}/ URLs are still supported as a
+fallback when no catalog is present.
 """
 import json
 import httpx
 from bs4 import BeautifulSoup
 from typing import Optional
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from scraper.base_adapter import BaseAdapter, RawProduct
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -19,6 +23,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Used only when no catalog is defined for this retailer (legacy fallback).
 CATEGORY_PATHS = [
     "/category/storage/",
     "/category/kitchen-storage/",
@@ -29,6 +34,19 @@ CATEGORY_PATHS = [
     "/category/wall-decor/",
     "/category/decorative-accessories/",
 ]
+
+# At Home search returns 24 items per page; max pages we'll walk per URL
+SEARCH_PAGE_SIZE = 24
+MAX_PAGES = 5
+
+
+def _paginate_search_url(search_url: str, page: int) -> str:
+    """Build a paginated search URL by setting `start` based on page number."""
+    parsed = urlparse(search_url)
+    params = parse_qs(parsed.query)
+    params["start"] = [str((page - 1) * SEARCH_PAGE_SIZE)]
+    params["sz"] = [str(SEARCH_PAGE_SIZE)]
+    return urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
 
 class AtHomeAdapter(BaseAdapter):
@@ -48,14 +66,21 @@ class AtHomeAdapter(BaseAdapter):
             await self._client.aclose()
 
     async def get_category_urls(self):
+        # Only used in legacy mode when no catalog exists. Catalog mode reads
+        # URLs directly from the catalog via BaseAdapter.scrape().
         return [self.base_url + p for p in CATEGORY_PATHS]
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=8))
     async def get_product_urls(self, category_url: str) -> list[str]:
-        urls = []
-        for page in range(1, 6):
-            params = {"page": page} if page > 1 else {}
-            resp = await self._client.get(category_url, params=params)
+        is_search = "/search/" in category_url
+        urls: list[str] = []
+        for page in range(1, MAX_PAGES + 1):
+            if is_search:
+                page_url = category_url if page == 1 else _paginate_search_url(category_url, page)
+                resp = await self._client.get(page_url)
+            else:
+                params = {"page": page} if page > 1 else {}
+                resp = await self._client.get(category_url, params=params)
             if resp.status_code != 200:
                 break
             soup = BeautifulSoup(resp.text, "lxml")
@@ -73,7 +98,9 @@ class AtHomeAdapter(BaseAdapter):
                     added += 1
             if added == 0:
                 break
-            if not soup.select_one("a[rel='next'], .pagination__next"):
+            # On category pages we honour pagination markup; on search we keep
+            # walking until we hit a page with no new products.
+            if not is_search and not soup.select_one("a[rel='next'], .pagination__next"):
                 break
         return urls
 
