@@ -165,6 +165,7 @@ export interface CsvPreviewResult {
   valid_rows: number;
   new_count: number;
   update_count: number;
+  would_deactivate: number;
   rejects: CsvRejectRow[];
   retailers_referenced: string[];
 }
@@ -172,6 +173,7 @@ export interface CsvPreviewResult {
 export interface CsvCommitResult extends CsvPreviewResult {
   inserted: number;
   updated: number;
+  deactivated: number;
   analysis_queued: number;
 }
 

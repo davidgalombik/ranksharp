@@ -138,12 +138,23 @@ export function CsvUploadModal({
 
           {phase === "previewed" && preview && (
             <div className="space-y-3">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 <Counter label="Total rows" value={preview.total_rows} />
                 <Counter label="Will insert" value={preview.new_count} className="text-emerald-600" />
                 <Counter label="Will update" value={preview.update_count} className="text-amber-600" />
+                <Counter label="Will move to Historical" value={preview.would_deactivate} className="text-stone-600" />
                 <Counter label="Rejects" value={preview.rejects.length} className="text-red-500" />
               </div>
+              {preview.would_deactivate > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <p className="text-xs text-amber-900">
+                    <span className="font-semibold">Heads-up:</span> {preview.would_deactivate} active product
+                    {preview.would_deactivate !== 1 ? "s" : ""} not in this CSV will be moved to Historical
+                    Products. This treats the CSV as the complete current inventory for the retailer
+                    {preview.retailers_referenced.length === 1 ? "" : "s"} listed.
+                  </p>
+                </div>
+              )}
               {preview.retailers_referenced.length > 0 && (
                 <p className="text-xs text-stone-500">
                   Retailers referenced: <span className="font-medium text-stone-700">{preview.retailers_referenced.join(", ")}</span>
@@ -185,7 +196,9 @@ export function CsvUploadModal({
               <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4">
                 <p className="text-sm font-semibold text-emerald-800">Upload complete ✓</p>
                 <p className="text-xs text-emerald-700 mt-1">
-                  {commit.inserted} inserted · {commit.updated} updated · {commit.analysis_queued} queued for analysis
+                  {commit.inserted} inserted · {commit.updated} updated
+                  {commit.deactivated > 0 && ` · ${commit.deactivated} moved to Historical`}
+                  {" · "}{commit.analysis_queued} queued for analysis
                 </p>
               </div>
               {commit.rejects.length > 0 && (

@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Product, Retailer, ScrapeStatus
@@ -59,6 +59,8 @@ class PreviewSummary(BaseModel):
     valid_rows: int                # rows that would be inserted/updated
     new_count: int                 # rows without an existing match
     update_count: int              # rows matching an existing (retailer_id, url)
+    would_deactivate: int = 0      # active products absent from this CSV that
+                                   # would move to Historical (per-retailer)
     rejects: list[RejectRow]
     retailers_referenced: list[str]
 
@@ -66,6 +68,7 @@ class PreviewSummary(BaseModel):
 class CommitSummary(PreviewSummary):
     inserted: int
     updated: int
+    deactivated: int = 0           # active products moved to Historical
     analysis_queued: int
 
 
@@ -311,6 +314,35 @@ async def _classify_new_vs_update(
     return new_count, update_count, existing
 
 
+def _urls_by_retailer(valid: list[dict]) -> dict[int, set[str]]:
+    """Group the valid CSV rows' URLs by retailer_id. Used by the snapshot
+    sweep to scope deactivation per retailer."""
+    out: dict[int, set[str]] = {}
+    for row in valid:
+        out.setdefault(row["_retailer"].id, set()).add(row["url"])
+    return out
+
+
+async def _count_would_deactivate(
+    valid: list[dict], db: AsyncSession,
+) -> int:
+    """Count active products that would be moved to Historical if this CSV
+    were committed — i.e. active products for any retailer in the CSV whose
+    URL is NOT in the CSV. Read-only; used by /preview."""
+    total = 0
+    for retailer_id, urls in _urls_by_retailer(valid).items():
+        stmt = (
+            select(func.count(Product.id))
+            .where(
+                Product.retailer_id == retailer_id,
+                Product.is_active == True,
+                Product.url.notin_(urls),
+            )
+        )
+        total += (await db.execute(stmt)).scalar_one() or 0
+    return total
+
+
 # ── /preview ─────────────────────────────────────────────────────────────────
 
 @router.post("/preview", response_model=PreviewSummary)
@@ -329,12 +361,14 @@ async def preview_csv_upload(
         pass
 
     new_count, update_count, _ = await _classify_new_vs_update(valid, db)
+    would_deactivate = await _count_would_deactivate(valid, db)
 
     return PreviewSummary(
         total_rows=len(rows),
         valid_rows=len(valid),
         new_count=new_count,
         update_count=update_count,
+        would_deactivate=would_deactivate,
         rejects=rejects,
         retailers_referenced=sorted(list({r["_retailer"].slug for r in valid} | missing_slugs)),
     )
@@ -412,6 +446,10 @@ async def commit_csv_upload(
             product.primary_image_url = row["primary_image_url"][:2000]
             product.last_seen_at = now
             product.is_active = True
+            # Existing products appearing in this CSV are no longer "new" —
+            # the "new" tag is reserved for rows that didn't previously exist.
+            # An explicit is_new=true in the CSV row below will re-promote.
+            product.is_new = False
             # Re-analyse since image/details may have changed
             product.analysis_status = ScrapeStatus.PENDING
             updated += 1
@@ -452,6 +490,22 @@ async def commit_csv_upload(
         elif row.get("_is_new") is True:
             product.is_new = True
 
+    # CSV-as-snapshot sweep: per retailer in this CSV, deactivate any active
+    # product whose URL is NOT in the CSV. Moves orphaned products from
+    # Online -> Historical. Scoped per-retailer so a CSV for X never touches Y.
+    deactivated = 0
+    for retailer_id, urls in _urls_by_retailer(valid).items():
+        result = await db.execute(
+            update(Product)
+            .where(
+                Product.retailer_id == retailer_id,
+                Product.is_active == True,
+                Product.url.notin_(urls),
+            )
+            .values(is_active=False)
+        )
+        deactivated += result.rowcount or 0
+
     await db.commit()
 
     # Re-fetch products to get their ids (especially for new rows)
@@ -484,8 +538,8 @@ async def commit_csv_upload(
 
     log.info(
         "csv_upload_commit",
-        inserted=inserted, updated=updated, queued=len(queued),
-        rejects=len(rejects),
+        inserted=inserted, updated=updated, deactivated=deactivated,
+        queued=len(queued), rejects=len(rejects),
     )
 
     return CommitSummary(
@@ -493,9 +547,11 @@ async def commit_csv_upload(
         valid_rows=len(valid),
         new_count=new_count,
         update_count=update_count,
+        would_deactivate=deactivated,
         rejects=rejects,
         retailers_referenced=sorted(list({r["_retailer"].slug for r in valid})),
         inserted=inserted,
         updated=updated,
+        deactivated=deactivated,
         analysis_queued=len(queued),
     )
