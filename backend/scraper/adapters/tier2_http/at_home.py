@@ -84,9 +84,17 @@ class AtHomeAdapter(BaseAdapter):
             if resp.status_code != 200:
                 break
             soup = BeautifulSoup(resp.text, "lxml")
-            links = soup.select(
-                "a.product-card__title-link, a[href*='/product/'], a[href*='/p/']"
-            )
+            # Target real product tiles only — the search grid wraps each tile
+            # in `.product[data-pid]` with an `a.product-image` inside. Earlier
+            # broad selectors like `a[href*='/p/']` also matched recommendation
+            # carousels ("you may also like", "recently viewed"), producing
+            # massive cross-page dedup (13k scraped -> 218 unique).
+            links = soup.select("div.product[data-pid] a.product-image")
+            if not links:
+                # Legacy /category/ pages may still use the older markup
+                links = soup.select(
+                    "a.product-card__title-link, a[href*='/product/']"
+                )
             if not links:
                 break
             added = 0
