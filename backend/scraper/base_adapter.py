@@ -131,8 +131,13 @@ class BaseAdapter(ABC):
         try:
             if cc.has_catalog(self.RETAILER_SLUG):
                 entries = cc.all_entries(self.RETAILER_SLUG)
-                self.log.info("scrape_via_catalog", entry_count=len(entries))
-                for entry in entries:
+                # Skip entries without a URL — those exist purely to drive UI
+                # dropdowns and CSV-upload validation for retailers that don't
+                # have a scraper (e.g. CSV-only retailers).
+                scrapeable = [e for e in entries if e.url]
+                self.log.info("scrape_via_catalog",
+                              entry_count=len(entries), scrapeable=len(scrapeable))
+                for entry in scrapeable:
                     cat_lower = entry.url.lower()
                     is_best_seller_cat = any(kw in cat_lower for kw in _BEST_SELLER_KEYWORDS)
                     self.log.info(

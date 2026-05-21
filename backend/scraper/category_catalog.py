@@ -96,7 +96,9 @@ def _load() -> dict[str, list[CatalogEntry]]:
                 sub = (row[si] or "").strip()
                 seg = (row[pi] or "").strip()
                 url = (row[ui] or "").strip()
-                if not (cat and sub and seg and url):
+                # URL is optional — CSV-only retailers (no scraper) keep it
+                # blank but still drive UI dropdowns + upload validation.
+                if not (cat and sub and seg):
                     continue
                 entries.append(CatalogEntry(
                     category=cat, subcategory=sub, product_segment=seg, url=url,
