@@ -354,18 +354,19 @@ async def _count_would_deactivate(
 ) -> int:
     """Count active products that would be moved to Historical if this CSV
     were committed — i.e. active products for any retailer in the CSV whose
-    URL is NOT in the CSV. Read-only; used by /preview."""
+    URL is NOT in the CSV. Computed via Python-side set difference so we
+    avoid sending NOT IN with thousands of bind parameters (asyncpg/Postgres
+    chokes on those). Read-only; used by /preview."""
     total = 0
-    for retailer_id, urls in _urls_by_retailer(valid).items():
-        stmt = (
-            select(func.count(Product.id))
-            .where(
+    for retailer_id, csv_urls in _urls_by_retailer(valid).items():
+        result = await db.execute(
+            select(Product.url).where(
                 Product.retailer_id == retailer_id,
                 Product.is_active == True,
-                Product.url.notin_(urls),
             )
         )
-        total += (await db.execute(stmt)).scalar_one() or 0
+        active_urls = {row[0] for row in result.all()}
+        total += len(active_urls - csv_urls)
     return total
 
 
@@ -517,18 +518,36 @@ async def commit_csv_upload(
     # CSV-as-snapshot sweep: per retailer in this CSV, deactivate any active
     # product whose URL is NOT in the CSV. Moves orphaned products from
     # Online -> Historical. Scoped per-retailer so a CSV for X never touches Y.
+    #
+    # Implementation note: we compute the diff in Python and UPDATE with IN
+    # rather than UPDATE WHERE url NOT IN (csv_urls). Building a NOT IN with
+    # thousands of bind parameters causes asyncpg/Postgres to fail. The IN
+    # list is bounded by the much smaller diff set.
     deactivated = 0
-    for retailer_id, urls in _urls_by_retailer(valid).items():
+    for retailer_id, csv_urls in _urls_by_retailer(valid).items():
         result = await db.execute(
-            update(Product)
-            .where(
+            select(Product.url).where(
                 Product.retailer_id == retailer_id,
                 Product.is_active == True,
-                Product.url.notin_(urls),
             )
-            .values(is_active=False)
         )
-        deactivated += result.rowcount or 0
+        active_urls = {row[0] for row in result.all()}
+        to_deactivate = list(active_urls - csv_urls)
+        if not to_deactivate:
+            continue
+        # Chunk the UPDATE so an enormous deactivation list still stays
+        # within DB driver limits.
+        for i in range(0, len(to_deactivate), 500):
+            chunk = to_deactivate[i:i+500]
+            res = await db.execute(
+                update(Product)
+                .where(
+                    Product.retailer_id == retailer_id,
+                    Product.url.in_(chunk),
+                )
+                .values(is_active=False)
+            )
+            deactivated += res.rowcount or 0
 
     await db.commit()
 
