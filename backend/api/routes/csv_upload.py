@@ -556,14 +556,13 @@ async def commit_csv_upload(
     # post-commit SELECT is unnecessary.
     product_ids: list[int] = [p.id for p in touched_products if p.id is not None]
 
-    # Queue analysis
+    # Queue analysis — fan out via the existing analyse_pending_products task
+    # (one per retailer in the CSV) so the request handler doesn't sit through
+    # N apply_async() round-trips to Redis for a large upload.
     try:
-        from tasks.analysis_tasks import analyse_product
-        from datetime import timedelta
-        # Pace dispatch at 5/sec so a 5000-row upload doesn't saturate Anthropic
-        for i, pid in enumerate(product_ids):
-            eta = now + timedelta(milliseconds=i * 200)
-            analyse_product.apply_async(args=[pid], eta=eta)
+        from tasks.analysis_tasks import analyse_pending_products
+        for retailer_id in _urls_by_retailer(valid).keys():
+            analyse_pending_products.delay(retailer_id=retailer_id)
         queued = product_ids
     except Exception as exc:
         log.warning("csv_upload_analysis_dispatch_failed", error=str(exc))
