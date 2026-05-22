@@ -473,8 +473,10 @@ async def commit_csv_upload(
             # the "new" tag is reserved for rows that didn't previously exist.
             # An explicit is_new=true in the CSV row below will re-promote.
             product.is_new = False
-            # Re-analyse since image/details may have changed
-            product.analysis_status = ScrapeStatus.PENDING
+            # Intentionally NOT re-flagging analysis_status — products that
+            # have already been analysed (DONE) stay DONE so we don't pay for
+            # Claude vision again on re-uploads of the same inventory. Use the
+            # "Run analysis" button on the Retailers page to force re-analysis.
             updated += 1
 
         # Optional fields — only set if the CSV provided a non-empty value
@@ -551,22 +553,25 @@ async def commit_csv_upload(
 
     await db.commit()
 
-    # After commit, SQLAlchemy populates auto-increment IDs on inserted rows
-    # and existing rows already had IDs from the bulk-fetch — so a per-row
-    # post-commit SELECT is unnecessary.
-    product_ids: list[int] = [p.id for p in touched_products if p.id is not None]
+    # Only newly-inserted products get queued for analysis. Existing products
+    # keep their previous analysis_status so we don't pay for Claude vision
+    # on every re-upload of the same inventory.
+    new_products = [
+        p for p in touched_products
+        if p.id is not None and p.analysis_status == ScrapeStatus.PENDING
+    ]
+    queued: list[int] = [p.id for p in new_products]
 
-    # Queue analysis — fan out via the existing analyse_pending_products task
-    # (one per retailer in the CSV) so the request handler doesn't sit through
-    # N apply_async() round-trips to Redis for a large upload.
-    try:
-        from tasks.analysis_tasks import analyse_pending_products
-        for retailer_id in _urls_by_retailer(valid).keys():
-            analyse_pending_products.delay(retailer_id=retailer_id)
-        queued = product_ids
-    except Exception as exc:
-        log.warning("csv_upload_analysis_dispatch_failed", error=str(exc))
-        queued = []
+    # Fire analyse_pending_products once per retailer (rather than N
+    # apply_async() round-trips) so the request handler returns fast.
+    if queued:
+        try:
+            from tasks.analysis_tasks import analyse_pending_products
+            for retailer_id in _urls_by_retailer(valid).keys():
+                analyse_pending_products.delay(retailer_id=retailer_id)
+        except Exception as exc:
+            log.warning("csv_upload_analysis_dispatch_failed", error=str(exc))
+            queued = []
 
     log.info(
         "csv_upload_commit",
