@@ -32,8 +32,8 @@ import structlog
 log = structlog.get_logger()
 router = APIRouter()
 
-MAX_ROWS_PER_UPLOAD = 5000
-MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB — generous for 5000 rows
+MAX_ROWS_PER_UPLOAD = 20000
+MAX_FILE_BYTES = 40 * 1024 * 1024  # 40 MB — generous for 20000 rows
 
 REQUIRED_COLUMNS = {"url", "name", "primary_image_url", "retailer_slug"}
 OPTIONAL_COLUMNS = {
