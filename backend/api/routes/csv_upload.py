@@ -314,6 +314,32 @@ async def _classify_new_vs_update(
     return new_count, update_count, existing
 
 
+async def _bulk_fetch_existing(
+    valid: list[dict], db: AsyncSession,
+) -> dict[tuple[int, str], Product]:
+    """Bulk-fetch every existing Product matching (retailer_id, url) for the
+    valid CSV rows. Returns a dict keyed by (retailer_id, url) for O(1)
+    lookup during commit, replacing one SELECT-per-row with one SELECT
+    per-retailer-chunk."""
+    by_retailer: dict[int, list[str]] = {}
+    for row in valid:
+        by_retailer.setdefault(row["_retailer"].id, []).append(row["url"])
+    existing: dict[tuple[int, str], Product] = {}
+    for retailer_id, urls in by_retailer.items():
+        # Chunk to stay well under Postgres' parameter limit
+        for i in range(0, len(urls), 500):
+            chunk = urls[i:i+500]
+            result = await db.execute(
+                select(Product).where(
+                    Product.retailer_id == retailer_id,
+                    Product.url.in_(chunk),
+                )
+            )
+            for product in result.scalars().all():
+                existing[(product.retailer_id, product.url)] = product
+    return existing
+
+
 def _urls_by_retailer(valid: list[dict]) -> dict[int, set[str]]:
     """Group the valid CSV rows' URLs by retailer_id. Used by the snapshot
     sweep to scope deactivation per retailer."""
@@ -396,28 +422,24 @@ async def commit_csv_upload(
             ),
         )
 
-    new_count, update_count, existing_keys = await _classify_new_vs_update(valid, db)
+    # Bulk-fetch existing products once instead of one SELECT per row.
+    # Brings 5000-row commits from ~minutes to seconds.
+    existing_products = await _bulk_fetch_existing(valid, db)
+    new_count = sum(1 for r in valid if (r["_retailer"].id, r["url"]) not in existing_products)
+    update_count = len(valid) - new_count
 
     inserted = 0
     updated = 0
     queued: list[int] = []
     now = datetime.utcnow()
+    touched_products: list[Product] = []   # for post-commit ID retrieval
 
     for row in valid:
         retailer: Retailer = row["_retailer"]
         url = row["url"]
         key = (retailer.id, url)
 
-        # Grab existing record (for update path)
-        product = None
-        if key in existing_keys:
-            result = await db.execute(
-                select(Product).where(
-                    Product.retailer_id == retailer.id,
-                    Product.url == url,
-                )
-            )
-            product = result.scalar_one_or_none()
+        product = existing_products.get(key)
 
         if product is None:
             # Default currency heuristic from country — CSV value (if provided)
@@ -490,6 +512,8 @@ async def commit_csv_upload(
         elif row.get("_is_new") is True:
             product.is_new = True
 
+        touched_products.append(product)
+
     # CSV-as-snapshot sweep: per retailer in this CSV, deactivate any active
     # product whose URL is NOT in the CSV. Moves orphaned products from
     # Online -> Historical. Scoped per-retailer so a CSV for X never touches Y.
@@ -508,20 +532,10 @@ async def commit_csv_upload(
 
     await db.commit()
 
-    # Re-fetch products to get their ids (especially for new rows)
-    # We'll dispatch analysis tasks after commit so we have persisted IDs.
-    product_ids: list[int] = []
-    for row in valid:
-        key = (row["_retailer"].id, row["url"])
-        result = await db.execute(
-            select(Product.id).where(
-                Product.retailer_id == row["_retailer"].id,
-                Product.url == row["url"],
-            )
-        )
-        pid = result.scalar_one_or_none()
-        if pid is not None:
-            product_ids.append(pid)
+    # After commit, SQLAlchemy populates auto-increment IDs on inserted rows
+    # and existing rows already had IDs from the bulk-fetch — so a per-row
+    # post-commit SELECT is unnecessary.
+    product_ids: list[int] = [p.id for p in touched_products if p.id is not None]
 
     # Queue analysis
     try:
