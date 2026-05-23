@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Product, Retailer, ScrapeStatus
@@ -433,89 +433,104 @@ async def commit_csv_upload(
     updated = 0
     queued: list[int] = []
     now = datetime.utcnow()
-    touched_products: list[Product] = []   # for post-commit ID retrieval
+    new_rows: list[dict] = []          # bulk-insert payload for brand-new products
+    updated_products: list[Product] = []  # existing ORM objects we mutated
+
+    country_currency = {
+        "AU": "AUD", "NZ": "NZD", "US": "USD", "CA": "CAD",
+        "GB": "GBP", "UK": "GBP", "EU": "EUR",
+    }
 
     for row in valid:
         retailer: Retailer = row["_retailer"]
         url = row["url"]
         key = (retailer.id, url)
 
+        # Parse the optional fields once
+        price = row.get("_price_parsed")
+        currency = (row.get("currency") or "").strip()
+        category = (row.get("category") or "").strip()
+        subcategory = (row.get("subcategory") or "").strip()
+        product_segment = (row.get("product_segment") or "").strip()
+        desc = (row.get("description") or "").strip()
+        sku = (row.get("sku") or "").strip()
+        brand = (row.get("brand") or "").strip()
+        is_best_seller = row.get("_is_best_seller") is True
+        has_patent = row.get("_has_patent") is True
+        is_new_flag = row.get("_is_new")   # True / False / None
+
         product = existing_products.get(key)
 
         if product is None:
-            # Default currency heuristic from country — CSV value (if provided)
-            # overrides this below.
-            country_currency = {
-                "AU": "AUD", "NZ": "NZD", "US": "USD", "CA": "CAD",
-                "GB": "GBP", "UK": "GBP", "EU": "EUR",
-            }
-            default_currency = country_currency.get((retailer.country or "US").upper(), "USD")
-            product = Product(
-                retailer_id=retailer.id,
-                url=url,
-                name=row["name"][:1000],
-                primary_image_url=row["primary_image_url"][:2000],
-                currency=default_currency,
-                analysis_status=ScrapeStatus.PENDING,
-                is_active=True,
-                first_seen_at=now,
-                last_seen_at=now,
-            )
-            db.add(product)
+            # Build a complete insert dict (all keys identical across rows so
+            # the bulk INSERT executes as one statement). Optional values fall
+            # back to None / column defaults.
+            new_rows.append({
+                "retailer_id": retailer.id,
+                "url": url,
+                "name": row["name"][:1000],
+                "primary_image_url": row["primary_image_url"][:2000],
+                "currency": (currency[:5].upper() if currency
+                             else country_currency.get((retailer.country or "US").upper(), "USD")),
+                "price": price,
+                "category": category[:500] or None,
+                "subcategory": subcategory[:500] or None,
+                "product_segment": product_segment[:500] or None,
+                "description": desc or None,
+                "sku": sku[:200] or None,
+                "brand": brand[:200] or None,
+                "is_best_seller": is_best_seller,
+                "has_patent": has_patent,
+                "is_new": False if is_new_flag is False else True,
+                "analysis_status": ScrapeStatus.PENDING,
+                "is_active": True,
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "image_urls": [],
+                "raw_attributes": {},
+            })
             inserted += 1
         else:
-            # Update path
+            # Update path (ORM, in place) — usually a much smaller set
             product.name = row["name"][:1000]
             product.primary_image_url = row["primary_image_url"][:2000]
             product.last_seen_at = now
             product.is_active = True
-            # Existing products appearing in this CSV are no longer "new" —
-            # the "new" tag is reserved for rows that didn't previously exist.
-            # An explicit is_new=true in the CSV row below will re-promote.
+            # Returning products are no longer "new" unless the CSV says so.
             product.is_new = False
-            # Intentionally NOT re-flagging analysis_status — products that
-            # have already been analysed (DONE) stay DONE so we don't pay for
-            # Claude vision again on re-uploads of the same inventory. Use the
-            # "Run analysis" button on the Retailers page to force re-analysis.
+            # Intentionally NOT re-flagging analysis_status — already-analysed
+            # (DONE) products stay DONE so re-uploads don't re-pay for Claude.
+            if price is not None:
+                product.price = price
+            if currency:
+                product.currency = currency[:5].upper()
+            if category:
+                product.category = category[:500]
+            if subcategory:
+                product.subcategory = subcategory[:500]
+            if product_segment:
+                product.product_segment = product_segment[:500]
+            if desc:
+                product.description = desc
+            if sku:
+                product.sku = sku[:200]
+            if brand:
+                product.brand = brand[:200]
+            if is_best_seller:
+                product.is_best_seller = True
+            if has_patent:
+                product.has_patent = True
+            if is_new_flag is False:
+                product.is_new = False
+            elif is_new_flag is True:
+                product.is_new = True
+            updated_products.append(product)
             updated += 1
 
-        # Optional fields — only set if the CSV provided a non-empty value
-        price = row.get("_price_parsed")
-        if price is not None:
-            product.price = price
-        currency = (row.get("currency") or "").strip()
-        if currency:
-            product.currency = currency[:5].upper()
-        category = (row.get("category") or "").strip()
-        if category:
-            product.category = category[:500]
-        subcategory = (row.get("subcategory") or "").strip()
-        if subcategory:
-            product.subcategory = subcategory[:500]
-        product_segment = (row.get("product_segment") or "").strip()
-        if product_segment:
-            product.product_segment = product_segment[:500]
-        desc = (row.get("description") or "").strip()
-        if desc:
-            product.description = desc
-        sku = (row.get("sku") or "").strip()
-        if sku:
-            product.sku = sku[:200]
-        brand = (row.get("brand") or "").strip()
-        if brand:
-            product.brand = brand[:200]
-
-        # Bools — only override when CSV explicitly set true
-        if row.get("_is_best_seller") is True:
-            product.is_best_seller = True
-        if row.get("_has_patent") is True:
-            product.has_patent = True
-        if row.get("_is_new") is False:
-            product.is_new = False
-        elif row.get("_is_new") is True:
-            product.is_new = True
-
-        touched_products.append(product)
+    # Single bulk INSERT for all brand-new products (chunked to stay within
+    # driver limits). Orders of magnitude faster than ORM add()-per-row.
+    for i in range(0, len(new_rows), 1000):
+        await db.execute(insert(Product), new_rows[i:i+1000])
 
     # CSV-as-snapshot sweep: per retailer in this CSV, deactivate any active
     # product whose URL is NOT in the CSV. Moves orphaned products from
@@ -553,30 +568,24 @@ async def commit_csv_upload(
 
     await db.commit()
 
-    # Only newly-inserted products get queued for analysis. Existing products
-    # keep their previous analysis_status so we don't pay for Claude vision
-    # on every re-upload of the same inventory.
-    new_products = [
-        p for p in touched_products
-        if p.id is not None and p.analysis_status == ScrapeStatus.PENDING
-    ]
-    queued: list[int] = [p.id for p in new_products]
-
-    # Fire analyse_pending_products once per retailer (rather than N
-    # apply_async() round-trips) so the request handler returns fast.
-    if queued:
+    # Only newly-inserted products need analysis (they're committed with
+    # status PENDING). Existing products keep their previous analysis_status
+    # so re-uploads don't re-pay for Claude vision. We don't need the new
+    # IDs here — analyse_pending_products finds PENDING rows itself.
+    queued_count = inserted
+    if inserted > 0:
         try:
             from tasks.analysis_tasks import analyse_pending_products
             for retailer_id in _urls_by_retailer(valid).keys():
                 analyse_pending_products.delay(retailer_id=retailer_id)
         except Exception as exc:
             log.warning("csv_upload_analysis_dispatch_failed", error=str(exc))
-            queued = []
+            queued_count = 0
 
     log.info(
         "csv_upload_commit",
         inserted=inserted, updated=updated, deactivated=deactivated,
-        queued=len(queued), rejects=len(rejects),
+        queued=queued_count, rejects=len(rejects),
     )
 
     return CommitSummary(
@@ -590,5 +599,5 @@ async def commit_csv_upload(
         inserted=inserted,
         updated=updated,
         deactivated=deactivated,
-        analysis_queued=len(queued),
+        analysis_queued=queued_count,
     )
