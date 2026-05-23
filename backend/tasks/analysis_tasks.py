@@ -77,19 +77,25 @@ async def _analyse(product: Product) -> dict:
     nlp = NLPExtractor()
     embedder = EmbeddingGenerator()
 
-    # Vision + NLP can run concurrently
-    vision_result, nlp_result = await asyncio.gather(
-        vision.analyse_product(product.image_urls or []),
-        nlp.extract(product.name, product.description or "", product.raw_attributes or {}),
-    )
+    try:
+        # Vision + NLP can run concurrently
+        vision_result, nlp_result = await asyncio.gather(
+            vision.analyse_product(product.image_urls or []),
+            nlp.extract(product.name, product.description or "", product.raw_attributes or {}),
+        )
 
-    # Embedding uses both results
-    embedding = await embedder.generate(
-        product.name,
-        product.description or "",
-        vision_result,
-        nlp_result,
-    )
+        # Embedding uses both results
+        embedding = await embedder.generate(
+            product.name,
+            product.description or "",
+            vision_result,
+            nlp_result,
+        )
+    finally:
+        # Close the Anthropic clients while the event loop is still alive so
+        # their httpx connections don't get torn down on a closed loop.
+        await vision.aclose()
+        await nlp.aclose()
 
     v = vision_result or {}
     n = nlp_result or {}

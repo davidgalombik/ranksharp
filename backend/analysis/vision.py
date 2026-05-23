@@ -40,6 +40,15 @@ class VisionAnalyser:
         self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.model = settings.vision_model
 
+    async def aclose(self):
+        """Close the underlying Anthropic httpx client so it doesn't try to
+        clean up after the event loop has been torn down (which raises
+        'RuntimeError: Event loop is closed' under Celery's asyncio.run)."""
+        try:
+            await self.client.close()
+        except Exception:
+            pass
+
     async def analyse(self, image_url: str) -> Optional[dict]:
         """
         Download image and send to Claude vision model.
