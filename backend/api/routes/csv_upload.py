@@ -151,6 +151,11 @@ async def _validate_rows(
 
     valid: list[dict] = []
     rejects: list[RejectRow] = []
+    # Track (retailer_id, url) already accepted in THIS file. A product can
+    # appear under several taxonomy buckets in the CSV, but the DB stores one
+    # row per (retailer, url) — so we keep the first occurrence and reject the
+    # rest as duplicates (avoids a UniqueViolation on bulk insert).
+    seen_keys: set[tuple[int, str]] = set()
 
     for idx, row in enumerate(rows, start=2):   # row 1 is header
         url = (row.get("url") or "").strip()
@@ -188,6 +193,16 @@ async def _validate_rows(
             rejects.append(RejectRow(row_number=idx, url=url,
                                      reason=f"unknown retailer_slug '{slug}'"))
             continue
+
+        # Reject intra-file duplicate (retailer, url) — keep first occurrence
+        dedup_key = (retailer.id, url)
+        if dedup_key in seen_keys:
+            rejects.append(RejectRow(
+                row_number=idx, url=url,
+                reason="duplicate (retailer, url) in CSV — first occurrence kept",
+            ))
+            continue
+        seen_keys.add(dedup_key)
 
         row["_retailer"] = retailer
         row["_price_parsed"] = _parse_price(row.get("price"))
