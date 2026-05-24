@@ -16,7 +16,7 @@ def _get_session():
     return sessionmaker(bind=engine)()
 
 
-@app.task(bind=True, max_retries=3, queue="analysis", rate_limit="10/m",
+@app.task(bind=True, max_retries=3, queue="analysis", rate_limit="60/m",
           soft_time_limit=120, time_limit=150)
 def analyse_product(self, product_id: int):
     """Run vision + NLP + embedding analysis on a single product."""

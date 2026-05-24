@@ -72,6 +72,53 @@ async def reset_taxonomy(
     }
 
 
+@router.post("/purge-analysis-queue")
+async def purge_analysis_queue(
+    _: bool = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Purge all queued analyse_product tasks from the Celery 'analysis' queue
+    and report active vs inactive pending counts.
+
+    Use when the queue is clogged with stale tasks (e.g. an "Analyse all"
+    fired before Historical products were excluded). After purging, re-trigger
+    analysis from the Retailers page — the dispatcher now only queues ACTIVE
+    products, so the worker stops wasting throughput on Historical items.
+    """
+    from sqlalchemy import or_
+    from database.models import ScrapeStatus
+
+    # Diagnostic counts before purge
+    active_pending = (await db.execute(
+        select(func.count(Product.id)).where(
+            Product.is_active == True,
+            Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED]),
+        )
+    )).scalar_one()
+    inactive_pending = (await db.execute(
+        select(func.count(Product.id)).where(
+            Product.is_active == False,
+            Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED]),
+        )
+    )).scalar_one()
+
+    purged = 0
+    try:
+        from tasks.celery_app import app as celery_app
+        with celery_app.connection_for_write() as conn:
+            purged = conn.default_channel.queue_purge("analysis")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Purge failed: {exc}")
+
+    return {
+        "purged_tasks": purged,
+        "active_pending": active_pending,
+        "inactive_pending": inactive_pending,
+        "note": ("Queue cleared. Re-trigger analysis from the Retailers page — "
+                 "only ACTIVE products will be queued now."),
+    }
+
+
 @router.delete("/products/{retailer_slug}")
 async def delete_all_products(
     retailer_slug: str,
