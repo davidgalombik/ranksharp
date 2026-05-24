@@ -47,6 +47,7 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
         pending_analysis_result = await db.execute(
             select(func.count(Product.id)).where(
                 Product.retailer_id == r.id,
+                Product.is_active == True,
                 Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED]),
             )
         )
@@ -164,6 +165,7 @@ async def trigger_analyse(retailer_id: int, db: AsyncSession = Depends(get_db)):
     pending_result = await db.execute(
         select(func.count(Product.id)).where(
             Product.retailer_id == retailer_id,
+            Product.is_active == True,
             Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED]),
         )
     )
@@ -186,6 +188,7 @@ async def trigger_analyse_all(db: AsyncSession = Depends(get_db)):
 
     pending_result = await db.execute(
         select(func.count(Product.id)).where(
+            Product.is_active == True,
             Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED]),
         )
     )

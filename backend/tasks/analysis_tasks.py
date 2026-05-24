@@ -157,8 +157,11 @@ def analyse_pending_products(retailer_id: int | None = None):
         from database.models import Product
         from sqlalchemy import select
 
+        # Only analyse ACTIVE products — Historical (deactivated) products
+        # shouldn't consume Claude tokens.
         q = select(Product).where(
-            Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED])
+            Product.is_active == True,
+            Product.analysis_status.in_([ScrapeStatus.PENDING, ScrapeStatus.FAILED]),
         )
         if retailer_id is not None:
             q = q.where(Product.retailer_id == retailer_id)
