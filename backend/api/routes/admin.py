@@ -12,7 +12,7 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import select, update, delete, text
+from sqlalchemy import select, update, delete, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db import get_db
@@ -85,7 +85,6 @@ async def purge_analysis_queue(
     analysis from the Retailers page — the dispatcher now only queues ACTIVE
     products, so the worker stops wasting throughput on Historical items.
     """
-    from sqlalchemy import or_
     from database.models import ScrapeStatus
 
     # Diagnostic counts before purge
