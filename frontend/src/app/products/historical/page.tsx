@@ -14,6 +14,8 @@ interface Product {
   price: number | null;
   currency: string;
   category: string | null;
+  subcategory: string | null;
+  product_segment: string | null;
   primary_image_url: string | null;
   colours: string[];
   materials: string[];
@@ -25,10 +27,13 @@ interface Product {
   room: string | null;
   is_best_seller: boolean;
   has_patent: boolean;
+  is_new: boolean;
   is_active: boolean;
   last_seen_at: string;
 }
 
+const SEASONS = ["spring", "summer", "autumn", "winter", "all-season"];
+const ROOMS = ["kitchen", "living room", "bedroom", "bathroom", "dining room", "office", "outdoor", "multiple"];
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
 
 function ProductCard({ product }: { product: Product }) {
@@ -120,16 +125,47 @@ export default function HistoricalProductsPage() {
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 48;
 
+  // Filters — mirrors Online Products plus a "No longer listed" toggle
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [retailer, setRetailer] = useState("");
+  const [category, setCategory] = useState("");
+  const [subcategory, setSubcategory] = useState("");
+  const [productSegment, setProductSegment] = useState("");
+  const [season, setSeason] = useState("");
+  const [room, setRoom] = useState("");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [bestSellerOnly, setBestSellerOnly] = useState(false);
   const [patentOnly, setPatentOnly] = useState(false);
-  const [showInactive, setShowInactive] = useState<"all" | "active" | "inactive">("all");
+  const [newOnly, setNewOnly] = useState(false);
+  const [inactiveOnly, setInactiveOnly] = useState(false);
+
   const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
-  const [facets, setFacets] = useState<{ best_seller: number; has_patent: number } | null>(null);
+  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
+  const [taxonomy, setTaxonomy] = useState<{
+    has_catalog: boolean;
+    tree: {
+      category: string;
+      category_slug: string;
+      subcategories: {
+        label: string;
+        slug: string;
+        product_segments: { label: string; slug: string }[];
+      }[];
+    }[];
+  } | null>(null);
+  const [facets, setFacets] = useState<{
+    categories: Record<string, number>;
+    subcategories: Record<string, number>;
+    product_segments: Record<string, number>;
+    seasons: Record<string, number>;
+    rooms: Record<string, number>;
+    best_seller: number;
+    has_patent: number;
+    is_new: number;
+    inactive: number;
+  } | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 400);
@@ -143,28 +179,58 @@ export default function HistoricalProductsPage() {
       .catch(() => {});
   }, []);
 
+  // Load taxonomy + legacy category list when retailer changes; reset cascade
+  useEffect(() => {
+    setCategory("");
+    setSubcategory("");
+    setProductSegment("");
+    if (!retailer) {
+      setAvailableCategories([]);
+      setTaxonomy(null);
+      return;
+    }
+    fetch(`${API_BASE}/api/retailers/${retailer}/taxonomy`)
+      .then((r) => r.json())
+      .then((t) => setTaxonomy(t))
+      .catch(() => setTaxonomy(null));
+    fetch(`${API_BASE}/api/retailers/${retailer}/categories`)
+      .then((r) => r.json())
+      .then((cats: string[]) => setAvailableCategories(cats))
+      .catch(() => setAvailableCategories([]));
+  }, [retailer]);
+
+  // Cascading clears: changing a level clears every deeper level
+  useEffect(() => {
+    setSubcategory("");
+    setProductSegment("");
+  }, [category]);
+  useEffect(() => {
+    setProductSegment("");
+  }, [subcategory]);
+
   const fetchProducts = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (retailer) params.set("retailer", retailer);
+    if (category) params.set("category", category);
+    if (subcategory) params.set("subcategory", subcategory);
+    if (productSegment) params.set("product_segment", productSegment);
+    if (season) params.set("season", season);
+    if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
     if (maxPrice) params.set("max_price", maxPrice);
     if (bestSellerOnly) params.set("best_seller", "true");
     if (patentOnly) params.set("has_patent", "true");
+    if (newOnly) params.set("is_new", "true");
+    if (inactiveOnly) params.set("inactive_only", "true");
     params.set("limit", String(PAGE_SIZE));
     params.set("offset", String(page * PAGE_SIZE));
 
     try {
       const res = await fetch(`${API_BASE}/api/products/historical?${params}`);
       const json = await res.json();
-      let data: Product[] = json.items ?? [];
-
-      // Client-side filter for active/inactive toggle
-      if (showInactive === "active") data = data.filter((p) => p.is_active);
-      if (showInactive === "inactive") data = data.filter((p) => !p.is_active);
-
-      setProducts(data);
+      setProducts(json.items ?? []);
       setTotal(json.total ?? null);
     } catch {
       setProducts([]);
@@ -172,28 +238,39 @@ export default function HistoricalProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly, showInactive, page]);
+  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, inactiveOnly, page]);
 
-  useEffect(() => { setPage(0); }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly, showInactive]);
+  useEffect(() => { setPage(0); }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, inactiveOnly]);
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
-  // Fetch facet counts so zero-reach toggles can be hidden.
+  // Fetch facet counts so zero-reach options/toggles can be hidden.
   useEffect(() => {
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (retailer) params.set("retailer", retailer);
+    if (category) params.set("category", category);
+    if (subcategory) params.set("subcategory", subcategory);
+    if (productSegment) params.set("product_segment", productSegment);
+    if (season) params.set("season", season);
+    if (room) params.set("room", room);
     if (minPrice) params.set("min_price", minPrice);
     if (maxPrice) params.set("max_price", maxPrice);
     if (bestSellerOnly) params.set("best_seller", "true");
     if (patentOnly) params.set("has_patent", "true");
+    if (newOnly) params.set("is_new", "true");
+    if (inactiveOnly) params.set("inactive_only", "true");
     fetch(`${API_BASE}/api/products/historical/facets?${params}`)
       .then((r) => r.json())
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, retailer, minPrice, maxPrice, bestSellerOnly, patentOnly]);
+  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, inactiveOnly]);
 
-  const hasFilters = debouncedSearch || retailer || minPrice || maxPrice || bestSellerOnly || patentOnly || showInactive !== "all";
-  const inactiveCount = products.filter((p) => !p.is_active).length;
+  const hasFilters = debouncedSearch || retailer || category || subcategory || productSegment || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly || inactiveOnly;
+  const clearAll = () => {
+    setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment("");
+    setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice("");
+    setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); setInactiveOnly(false);
+  };
 
   return (
     <div className="space-y-5">
@@ -201,7 +278,7 @@ export default function HistoricalProductsPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-stone-900">Historical Products</h1>
-          <p className="text-sm text-stone-500 mt-0.5">All products ever scraped, including those no longer listed on retailer sites</p>
+          <p className="text-sm text-stone-500 mt-0.5">All products ever scraped or uploaded, including those no longer listed</p>
         </div>
         <p className="text-sm text-stone-500">
           {loading ? "Loading…" : (
@@ -209,13 +286,13 @@ export default function HistoricalProductsPage() {
               ? `Showing ${page * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE + products.length, total)} of ${total.toLocaleString()} products`
               : `${products.length} shown`
           )}
-          {inactiveCount > 0 && !loading && ` · ${inactiveCount} no longer listed`}
         </p>
       </div>
 
-      {/* Filter bar */}
+      {/* Filter bar — mirrors Online Products */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 items-center">
+          {/* Search */}
           <div className="col-span-2 sm:col-span-3 lg:col-span-2">
             <input
               type="search"
@@ -226,6 +303,7 @@ export default function HistoricalProductsPage() {
             />
           </div>
 
+          {/* Retailer */}
           <select
             value={retailer}
             onChange={(e) => setRetailer(e.target.value)}
@@ -237,15 +315,104 @@ export default function HistoricalProductsPage() {
             ))}
           </select>
 
-          {/* Status filter */}
+          {/* Category + Subcategory + Product Segment — cascading. Uses the
+              retailer's taxonomy catalog when available, falls back to legacy
+              single dropdown. Same logic as Online Products. */}
+          {taxonomy?.has_catalog ? (
+            <>
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All categories</option>
+                {taxonomy.tree
+                  .filter((node) => !facets || node.category === category || (facets.categories[node.category] ?? 0) > 0)
+                  .map((node) => (
+                    <option key={node.category_slug} value={node.category}>{node.category}</option>
+                  ))}
+              </select>
+              {category && (() => {
+                const node = taxonomy.tree.find((n) => n.category === category);
+                const subs = (node?.subcategories ?? [])
+                  .filter((s) => !facets || s.label === subcategory || (facets.subcategories[s.label] ?? 0) > 0);
+                if (subs.length === 0) return null;
+                return (
+                  <select
+                    value={subcategory}
+                    onChange={(e) => setSubcategory(e.target.value)}
+                    className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  >
+                    <option value="">All subcategories</option>
+                    {subs.map((s) => (
+                      <option key={s.slug} value={s.label}>{s.label}</option>
+                    ))}
+                  </select>
+                );
+              })()}
+              {category && subcategory && (() => {
+                const catNode = taxonomy.tree.find((n) => n.category === category);
+                const subNode = catNode?.subcategories.find((s) => s.label === subcategory);
+                const segs = (subNode?.product_segments ?? [])
+                  .filter((s) => !facets || s.label === productSegment || (facets.product_segments[s.label] ?? 0) > 0);
+                if (segs.length === 0) return null;
+                return (
+                  <select
+                    value={productSegment}
+                    onChange={(e) => setProductSegment(e.target.value)}
+                    className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  >
+                    <option value="">All product segments</option>
+                    {segs.map((s) => (
+                      <option key={s.slug} value={s.label}>{s.label}</option>
+                    ))}
+                  </select>
+                );
+              })()}
+            </>
+          ) : (
+            availableCategories.length > 1 && (
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All categories</option>
+                {availableCategories
+                  .filter((c) => !facets || c === category || (facets.categories[c] ?? 0) > 0)
+                  .map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+              </select>
+            )
+          )}
+
+          {/* Season */}
           <select
-            value={showInactive}
-            onChange={(e) => setShowInactive(e.target.value as "all" | "active" | "inactive")}
+            value={season}
+            onChange={(e) => setSeason(e.target.value)}
             className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
           >
-            <option value="all">All statuses</option>
-            <option value="active">Currently listed</option>
-            <option value="inactive">No longer listed</option>
+            <option value="">All seasons</option>
+            {SEASONS
+              .filter((s) => !facets || s === season || (facets.seasons[s] ?? 0) > 0)
+              .map((s) => (
+                <option key={s} value={s} className="capitalize">{s.charAt(0).toUpperCase() + s.slice(1)}</option>
+              ))}
+          </select>
+
+          {/* Room */}
+          <select
+            value={room}
+            onChange={(e) => setRoom(e.target.value)}
+            className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+          >
+            <option value="">All rooms</option>
+            {ROOMS
+              .filter((r) => !facets || r === room || (facets.rooms[r] ?? 0) > 0)
+              .map((r) => (
+                <option key={r} value={r} className="capitalize">{r.charAt(0).toUpperCase() + r.slice(1)}</option>
+              ))}
           </select>
 
           {/* Price range */}
@@ -267,6 +434,7 @@ export default function HistoricalProductsPage() {
             />
           </div>
 
+          {/* Best Sellers toggle */}
           {(!facets || bestSellerOnly || facets.best_seller > 0) && (
             <button
               onClick={() => setBestSellerOnly((v) => !v)}
@@ -282,7 +450,7 @@ export default function HistoricalProductsPage() {
             </button>
           )}
 
-          {/* Patent toggle — hidden when no reachable patented products */}
+          {/* Patent toggle */}
           {(!facets || patentOnly || facets.has_patent > 0) && (
             <button
               onClick={() => setPatentOnly((v) => !v)}
@@ -297,11 +465,43 @@ export default function HistoricalProductsPage() {
               <span>Patent</span>
             </button>
           )}
+
+          {/* New toggle */}
+          {(!facets || newOnly || facets.is_new > 0) && (
+            <button
+              onClick={() => setNewOnly((v) => !v)}
+              className={clsx(
+                "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+                newOnly
+                  ? "bg-emerald-500 border-emerald-500 text-white"
+                  : "bg-white border-stone-200 text-stone-600 hover:border-emerald-300 hover:text-emerald-700"
+              )}
+            >
+              <span>✦</span>
+              <span>New</span>
+            </button>
+          )}
+
+          {/* No longer listed toggle — Historical-only quick filter for inactive */}
+          {(!facets || inactiveOnly || facets.inactive > 0) && (
+            <button
+              onClick={() => setInactiveOnly((v) => !v)}
+              className={clsx(
+                "flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+                inactiveOnly
+                  ? "bg-stone-700 border-stone-700 text-white"
+                  : "bg-white border-stone-200 text-stone-600 hover:border-stone-400 hover:text-stone-900"
+              )}
+            >
+              <span>⊘</span>
+              <span>No longer listed</span>
+            </button>
+          )}
         </div>
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setShowInactive("all"); }}
+            onClick={clearAll}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -343,6 +543,11 @@ export default function HistoricalProductsPage() {
         <div className="text-center py-24 text-stone-400">
           <p className="text-4xl mb-3">⌂</p>
           <p className="font-medium">No products found</p>
+          {hasFilters && (
+            <button onClick={clearAll} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">
+              Clear filters
+            </button>
+          )}
         </div>
       )}
     </div>
