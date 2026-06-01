@@ -1164,6 +1164,7 @@ export default function InStoreProductsPage() {
   const [category, setCategory] = useState<string>("");
   const [subcategory, setSubcategory] = useState<string>("");
   const [productSegment, setProductSegment] = useState<string>("");
+  const [uncategorisedOnly, setUncategorisedOnly] = useState(false);
   const [retailerFilter, setRetailerFilter] = useState("");   // "" = all, "__none__" = untagged
   const [showAll, setShowAll] = useState(false);   // include peripheral/background
   const [mode, setMode] = useState<"catalogue" | "failed">("catalogue");
@@ -1191,6 +1192,7 @@ export default function InStoreProductsPage() {
     categories: Record<string, number>;
     subcategories: Record<string, number>;
     product_segments: Record<string, number>;
+    uncategorised: number;
   } | null>(null);
 
   // Retailer currently selected in the upload zone (remembered across sessions)
@@ -1226,7 +1228,7 @@ export default function InStoreProductsPage() {
   // Reset to page 0 when filters or view mode change
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll, viewMode]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll, viewMode]);
 
   // Cascading clears: changing a level clears every deeper level
   useEffect(() => { setSubcategory(""); setProductSegment(""); }, [category]);
@@ -1241,6 +1243,7 @@ export default function InStoreProductsPage() {
         category: category || undefined,
         subcategory: subcategory || undefined,
         product_segment: productSegment || undefined,
+        uncategorised_only: uncategorisedOnly || undefined,
         retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
@@ -1254,7 +1257,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll, page]);
 
   // Load products (flat item list)
   const loadProducts = useCallback(async () => {
@@ -1265,6 +1268,7 @@ export default function InStoreProductsPage() {
         category: category || undefined,
         subcategory: subcategory || undefined,
         product_segment: productSegment || undefined,
+        uncategorised_only: uncategorisedOnly || undefined,
         retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
@@ -1278,7 +1282,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll, page]);
 
   // Refresh both the current view and stats
   const reloadCurrentView = useCallback(async () => {
@@ -1316,12 +1320,13 @@ export default function InStoreProductsPage() {
       category: category || undefined,
       subcategory: subcategory || undefined,
       product_segment: productSegment || undefined,
+      uncategorised_only: uncategorisedOnly || undefined,
       retailer: retailerFilter || undefined,
       show_all: showAll,
     })
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll]);
 
   // Fetch the shared 3-level taxonomy tree once at mount.
   useEffect(() => {
@@ -1537,7 +1542,7 @@ export default function InStoreProductsPage() {
   const processingCount = (stats?.images_by_status?.pending || 0) + (stats?.images_by_status?.analysing || 0);
   const failedCount = stats?.images_by_status?.failed || 0;
 
-  const hasFilters = debouncedSearch || category || subcategory || productSegment || retailerFilter || showAll;
+  const hasFilters = debouncedSearch || category || subcategory || productSegment || uncategorisedOnly || retailerFilter || showAll;
 
   return (
     <div className="space-y-5">
@@ -1726,6 +1731,24 @@ export default function InStoreProductsPage() {
                 <span>{showAll ? "✓" : "○"}</span>
                 <span>Show background items</span>
               </button>
+              {/* Uncategorised toggle — items whose category Claude couldn't
+                  confidently fit into the taxonomy (NULL category). Hidden
+                  when there are zero uncategorised items under current filters. */}
+              {(!facets || uncategorisedOnly || facets.uncategorised > 0) && (
+                <button
+                  onClick={() => setUncategorisedOnly((v) => !v)}
+                  className={clsx(
+                    "flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors",
+                    uncategorisedOnly
+                      ? "bg-amber-100 border-amber-300 text-amber-900"
+                      : "bg-white border-stone-200 text-stone-600 hover:border-amber-300 hover:text-amber-700"
+                  )}
+                  title="Show items the AI couldn't classify into the taxonomy"
+                >
+                  <span>⚠</span>
+                  <span>Uncategorised{facets ? ` (${facets.uncategorised})` : ""}</span>
+                </button>
+              )}
             </div>
             {stats?.items_by_prominence && !showAll && (
               <p className="text-xs text-stone-400 mt-2">
@@ -1734,7 +1757,7 @@ export default function InStoreProductsPage() {
             )}
             {hasFilters && (
               <button
-                onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setRetailerFilter(""); setShowAll(false); }}
+                onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setUncategorisedOnly(false); setRetailerFilter(""); setShowAll(false); }}
                 className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
               >
                 Clear filters
@@ -1805,7 +1828,7 @@ export default function InStoreProductsPage() {
               {hasFilters ? (
                 <>
                   <p className="font-medium">No {viewMode === "image" ? "images" : "products"} match your filters</p>
-                  <button onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
+                  <button onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setUncategorisedOnly(false); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
                 </>
               ) : (
                 <>

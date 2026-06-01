@@ -165,6 +165,7 @@ async def list_items(
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
+    uncategorised_only: bool = False,    # surface items where category IS NULL
     retailer: Optional[str] = None,     # exact match; use '__none__' to filter where retailer IS NULL
     prominence: Optional[str] = None,   # e.g. "hero" or "hero,main" — overrides default
     show_all: bool = False,             # convenience: include peripheral/background too
@@ -199,6 +200,9 @@ async def list_items(
     if product_segment:
         stmt = stmt.where(InStoreCatalogueItem.product_segment == product_segment)
         count_stmt = count_stmt.where(InStoreCatalogueItem.product_segment == product_segment)
+    if uncategorised_only:
+        stmt = stmt.where(InStoreCatalogueItem.category.is_(None))
+        count_stmt = count_stmt.where(InStoreCatalogueItem.category.is_(None))
     if retailer:
         if retailer == "__none__":
             stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
@@ -267,6 +271,7 @@ async def get_facets(
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
+    uncategorised_only: bool = False,
     retailer: Optional[str] = None,
     show_all: bool = False,
     db: AsyncSession = Depends(get_db),
@@ -303,6 +308,8 @@ async def get_facets(
             stmt = stmt.where(InStoreCatalogueItem.subcategory == subcategory)
         if product_segment and "product_segment" not in exclude:
             stmt = stmt.where(InStoreCatalogueItem.product_segment == product_segment)
+        if uncategorised_only and "uncategorised_only" not in exclude:
+            stmt = stmt.where(InStoreCatalogueItem.category.is_(None))
         return stmt
 
     def _group_count(col, exclude: set[str]):
@@ -324,10 +331,20 @@ async def get_facets(
     ))).all()
     product_segments = {s: n for s, n in seg_rows if s}
 
+    # Count of NULL-category items reachable under the other filters — used
+    # to hide the Uncategorised toggle when there's nothing to surface.
+    uncat_stmt = _base({"uncategorised_only"}).where(
+        InStoreCatalogueItem.category.is_(None)
+    )
+    uncategorised_ct = (await db.execute(
+        select(func.count()).select_from(uncat_stmt.subquery())
+    )).scalar_one()
+
     return {
         "categories": categories,
         "subcategories": subcategories,
         "product_segments": product_segments,
+        "uncategorised": uncategorised_ct,
     }
 
 
@@ -424,6 +441,7 @@ def _build_item_filter(
     category: Optional[str],
     subcategory: Optional[str],
     product_segment: Optional[str],
+    uncategorised_only: bool,
     prominence: Optional[str],
     show_all: bool,
 ):
@@ -446,6 +464,9 @@ def _build_item_filter(
         active = True
     if product_segment:
         conds.append(InStoreCatalogueItem.product_segment == product_segment)
+        active = True
+    if uncategorised_only:
+        conds.append(InStoreCatalogueItem.category.is_(None))
         active = True
 
     if prominence:
@@ -479,6 +500,7 @@ async def list_images(
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
+    uncategorised_only: bool = False,
     retailer: Optional[str] = None,
     prominence: Optional[str] = None,
     show_all: bool = False,
@@ -489,13 +511,13 @@ async def list_images(
 ):
     """Image-centric list — one row per uploaded photo, with a preview of detected products.
 
-    Filters `q`, `category`, `subcategory`, `product_segment`, `prominence` are
-    applied at the item level; when any is active the result is restricted to
-    images that contain at least one matching item.
+    Filters `q`, `category`, `subcategory`, `product_segment`, `uncategorised_only`,
+    `prominence` are applied at the item level; when any is active the result is
+    restricted to images that contain at least one matching item.
     Filters `retailer`, `status` are applied at the image level.
     """
     item_conds, product_filter_active = _build_item_filter(
-        q, category, subcategory, product_segment, prominence, show_all,
+        q, category, subcategory, product_segment, uncategorised_only, prominence, show_all,
     )
 
     # Stage 1: determine which image ids to return on this page
