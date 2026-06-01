@@ -125,6 +125,28 @@ async def init_db():
              _col("instore_catalogue_items", "bbox")),
             ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS cropped_file_path VARCHAR(500)",
              _col("instore_catalogue_items", "cropped_file_path")),
+            # In-store catalogue: switch to the shared 3-level taxonomy
+            # (mirrors Online Products). Widen category; add subcategory +
+            # product_segment; relax category NOT NULL so backfill can leave
+            # unclassified items NULL rather than crashing.
+            (
+                "ALTER TABLE instore_catalogue_items ALTER COLUMN category TYPE VARCHAR(500)",
+                "SELECT 1 FROM information_schema.columns WHERE table_name='instore_catalogue_items' "
+                "AND column_name='category' AND character_maximum_length=500",
+            ),
+            (
+                "ALTER TABLE instore_catalogue_items ALTER COLUMN category DROP NOT NULL",
+                "SELECT 1 FROM information_schema.columns WHERE table_name='instore_catalogue_items' "
+                "AND column_name='category' AND is_nullable='YES'",
+            ),
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS subcategory VARCHAR(500)",
+             _col("instore_catalogue_items", "subcategory")),
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS product_segment VARCHAR(500)",
+             _col("instore_catalogue_items", "product_segment")),
+            ("CREATE INDEX IF NOT EXISTS ix_catalogue_items_subcategory ON instore_catalogue_items (subcategory)",
+             _idx("ix_catalogue_items_subcategory")),
+            ("CREATE INDEX IF NOT EXISTS ix_catalogue_items_product_segment ON instore_catalogue_items (product_segment)",
+             _idx("ix_catalogue_items_product_segment")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

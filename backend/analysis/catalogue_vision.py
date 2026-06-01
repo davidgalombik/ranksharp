@@ -2,8 +2,9 @@
 CatalogueVision — Claude Vision analyser for the In-store Products catalogue.
 
 Takes ONE image (typically a wide shelf shot showing many products) and
-returns a list of detected products, each with a name, category, and
-style attributes. Category is constrained to one of four fixed values.
+returns a list of detected products, each with a name, taxonomy classification
+(category / subcategory / product_segment from the shared catalog), and
+style attributes.
 """
 import base64
 import io
@@ -13,13 +14,30 @@ from typing import Optional
 import structlog
 from anthropic import AsyncAnthropic
 from config import settings
+from scraper import category_catalog as cc
 
 log = structlog.get_logger()
 
-CATEGORIES = ["Kitchen & Dining", "Home & Decor", "Candles", "Other"]
 PROMINENCE_VALUES = ["hero", "main", "peripheral", "background"]
 
-CATALOGUE_PROMPT = """You are analysing a photograph taken inside a retail store (home, décor, kitchenware).
+
+def _build_taxonomy_section() -> str:
+    """Format the shared catalog tree as a nested list for the prompt. Built
+    once at module-load time from backend/scraper/catalogs/_shared.csv."""
+    lines: list[str] = []
+    for cat in cc.get_shared_categories():
+        lines.append(f"- {cat}")
+        for sub in cc.get_shared_subcategories(cat):
+            lines.append(f"  - {sub}")
+            for seg in cc.get_shared_product_segments(cat, sub):
+                lines.append(f"    - {seg}")
+    return "\n".join(lines)
+
+
+_TAXONOMY_TREE = _build_taxonomy_section()
+
+
+CATALOGUE_PROMPT = f"""You are analysing a photograph taken inside a retail store (home, décor, kitchenware).
 The photographer framed this shot around a SPECIFIC display, table, aisle end-cap, or product cluster —
 that framed area is the ONLY thing you should catalogue as the subject of the photo. The background
 typically contains shelving and products from other displays that the photographer was NOT documenting.
@@ -27,11 +45,9 @@ typically contains shelving and products from other displays that the photograph
 For each product visible, extract:
 - product_name: a short descriptive name (e.g. "Red lobster-handle ceramic mug", "Sea turtle ceramic plate")
 - bbox_norm: REQUIRED for hero and main products — normalized bounding box [x, y, w, h] where each value is between 0.0 and 1.0 (origin is top-left of the image, x/y are the top-left corner of the box, w/h are width/height). Fit the box TIGHTLY around the product — don't include neighbouring products or excessive background. Set to null for peripheral and background products.
-- category: exactly one of: "Kitchen & Dining", "Home & Decor", "Candles", "Other"
-  - Kitchen & Dining: mugs, plates, bowls, cutlery, cookware, bakeware, glassware, tea towels, placemats, serving ware, food storage, utensils, aprons, lunch boxes
-  - Home & Decor: vases, figurines, picture frames, decor objects, throws, cushions, wall art, ornaments, books (decorative/coffee-table)
-  - Candles: candles, candle holders, diffusers, wax melts, tea lights
-  - Other: anything that doesn't fit the above (tools, electronics, stationery, toys, outdoor, pet, garden)
+- category: the top-level taxonomy bucket the product belongs to (exact spelling from the list below)
+- subcategory: the subcategory within that category (exact spelling from the list below)
+- product_segment: the specific product type within the subcategory (exact spelling from the list below)
 - prominence: exactly one of "hero" | "main" | "peripheral" | "background" — this is CRITICAL
   - hero: centre-frame, in sharp focus, clearly the primary subject of the photo
   - main: on the same display/table/shelf as the hero items — clearly part of the subject display
@@ -42,6 +58,17 @@ For each product visible, extract:
 - patterns: visible patterns (e.g. ["striped", "solid", "speckled", "floral"]) — empty list if plain
 - style_tags: 1-4 style descriptors (e.g. ["coastal", "farmhouse", "modern", "rustic"])
 - confidence: "high" | "medium" | "low"
+
+TAXONOMY — use exact spelling, nested as Category > Subcategory > Product Segment:
+
+{_TAXONOMY_TREE}
+
+CLASSIFICATION RULES:
+- Pick the most specific match. If the item is clearly e.g. a saucepan, set all three:
+  category=Kitchenware, subcategory=Cookware, product_segment=Saucepans.
+- If you can identify the category and subcategory but the segment isn't obvious, set product_segment to null.
+- If only the category is confident, set subcategory and product_segment to null.
+- If the item doesn't fit any category in the list (e.g. clothing, food, electronics, signage), set all three to null.
 
 PROMINENCE RULES — BE STRICT:
 - The photo was framed around a SPECIFIC display. Everything on that display is hero or main.
@@ -56,9 +83,11 @@ PROMINENCE RULES — BE STRICT:
 Return ONLY valid JSON — an array of objects, one per distinct visible product. No prose, no markdown fences.
 
 [
-  {
+  {{
     "product_name": "...",
-    "category": "...",
+    "category": "Kitchenware",
+    "subcategory": "Cookware",
+    "product_segment": "Saucepans",
     "prominence": "hero",
     "bbox_norm": [0.12, 0.35, 0.18, 0.42],
     "colours": [...],
@@ -66,7 +95,7 @@ Return ONLY valid JSON — an array of objects, one per distinct visible product
     "patterns": [...],
     "style_tags": [...],
     "confidence": "high"
-  }
+  }}
 ]
 
 Be EXHAUSTIVE — include ALL visible products, but rate each one's prominence honestly so downstream
@@ -79,6 +108,12 @@ class CatalogueVision:
     def __init__(self):
         self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.model = settings.vision_model
+
+    async def aclose(self):
+        try:
+            await self.client.close()
+        except Exception:
+            pass
 
     async def analyse_image_bytes(self, data: bytes, file_type: str) -> Optional[list[dict]]:
         """Analyse an image/PDF's raw bytes and return a list of detected products."""
@@ -108,9 +143,23 @@ class CatalogueVision:
 
     @staticmethod
     def _sanitise(item: dict) -> dict:
-        cat = (item.get("category") or "").strip()
-        if cat not in CATEGORIES:
-            cat = "Other"
+        # Taxonomy — validate against the shared catalog. Each deeper level
+        # is only kept if all the levels above it remain valid.
+        raw_cat = (item.get("category") or "").strip() or None
+        raw_sub = (item.get("subcategory") or "").strip() or None
+        raw_seg = (item.get("product_segment") or "").strip() or None
+        cat = cc.resolve_shared_label(raw_cat, kind="category") if raw_cat else None
+        sub = cc.resolve_shared_label(raw_sub, kind="subcategory") if raw_sub else None
+        seg = cc.resolve_shared_label(raw_seg, kind="product_segment") if raw_seg else None
+        if cat is None:
+            sub = None
+            seg = None
+        elif sub and not cc.is_valid_shared(cat, sub):
+            sub = None
+            seg = None
+        elif sub and seg and not cc.is_valid_shared(cat, sub, seg):
+            seg = None
+
         prominence = (item.get("prominence") or "").strip().lower()
         if prominence not in PROMINENCE_VALUES:
             prominence = "main"  # sensible default if Claude omits it
@@ -118,6 +167,8 @@ class CatalogueVision:
         return {
             "product_name": (item.get("product_name") or "Unknown product").strip()[:300],
             "category": cat,
+            "subcategory": sub,
+            "product_segment": seg,
             "prominence": prominence,
             "bbox": bbox,
             "colours": _coerce_list(item.get("colours")),

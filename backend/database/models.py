@@ -520,7 +520,13 @@ class InStoreCatalogueItem(Base):
     id = mapped_column(Integer, primary_key=True)
     image_id = mapped_column(Integer, ForeignKey("instore_catalogue_images.id", ondelete="CASCADE"), nullable=False, index=True)
     product_name = mapped_column(String, nullable=False)
-    category = mapped_column(String(50), nullable=False, index=True)   # Kitchen & Dining | Home & Decor | Candles | Other
+    # Taxonomy (mirrors the shared taxonomy used by Online Products).
+    # category was previously a tiny set (Kitchen & Dining | Home & Decor |
+    # Candles | Other); now uses the shared catalog (9 cats / 26 subs / 105
+    # segments). Nullable because backfill may fail to classify some items.
+    category = mapped_column(String(500), nullable=True, index=True)
+    subcategory = mapped_column(String(500), nullable=True, index=True)
+    product_segment = mapped_column(String(500), nullable=True, index=True)
     prominence = mapped_column(String(20), nullable=True, index=True)  # hero | main | peripheral | background
     bbox = mapped_column(JSON, nullable=True)                          # [x, y, w, h] normalized 0..1
     cropped_file_path = mapped_column(String, nullable=True)           # disk path to cropped JPEG

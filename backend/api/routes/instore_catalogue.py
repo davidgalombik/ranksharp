@@ -28,7 +28,8 @@ ALLOWED_CONTENT_TYPES = {
 EXT_MAP = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "pdf": "pdf", "heic": "heic", "heif": "heic"}
 MAX_FILE_SIZE = 30 * 1024 * 1024   # 30 MB (room for pre-downscale slip-through)
 MAX_FILES_PER_BATCH = 200
-CATEGORIES = {"Kitchen & Dining", "Home & Decor", "Candles", "Other"}
+# In-store items now use the shared 3-level taxonomy. Imported lazily in the
+# endpoints below via `from scraper import category_catalog as cc`.
 
 
 async def get_db():
@@ -162,6 +163,8 @@ DEFAULT_PROMINENCE = {"hero", "main"}
 async def list_items(
     q: Optional[str] = None,
     category: Optional[str] = None,
+    subcategory: Optional[str] = None,
+    product_segment: Optional[str] = None,
     retailer: Optional[str] = None,     # exact match; use '__none__' to filter where retailer IS NULL
     prominence: Optional[str] = None,   # e.g. "hero" or "hero,main" — overrides default
     show_all: bool = False,             # convenience: include peripheral/background too
@@ -187,9 +190,15 @@ async def list_items(
         like = f"%{q}%"
         stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(like))
         count_stmt = count_stmt.where(InStoreCatalogueItem.product_name.ilike(like))
-    if category and category in CATEGORIES:
+    if category:
         stmt = stmt.where(InStoreCatalogueItem.category == category)
         count_stmt = count_stmt.where(InStoreCatalogueItem.category == category)
+    if subcategory:
+        stmt = stmt.where(InStoreCatalogueItem.subcategory == subcategory)
+        count_stmt = count_stmt.where(InStoreCatalogueItem.subcategory == subcategory)
+    if product_segment:
+        stmt = stmt.where(InStoreCatalogueItem.product_segment == product_segment)
+        count_stmt = count_stmt.where(InStoreCatalogueItem.product_segment == product_segment)
     if retailer:
         if retailer == "__none__":
             stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
@@ -232,6 +241,8 @@ async def list_items(
             "image_id": item.image_id,
             "product_name": item.product_name,
             "category": item.category,
+            "subcategory": item.subcategory,
+            "product_segment": item.product_segment,
             "prominence": item.prominence,
             "has_crop": bool(item.cropped_file_path),
             "colours": item.colours or [],
@@ -253,34 +264,82 @@ async def list_items(
 @router.get("/facets")
 async def get_facets(
     q: Optional[str] = None,
+    category: Optional[str] = None,
+    subcategory: Optional[str] = None,
+    product_segment: Optional[str] = None,
     retailer: Optional[str] = None,
     show_all: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    """Count of items per category given current search/retailer/show_all filters.
-    The `category` filter itself is deliberately *not* applied, so zero-reach
-    categories can be hidden in the UI dropdown."""
-    stmt = (
-        select(InStoreCatalogueItem.category, func.count())
-        .select_from(InStoreCatalogueItem)
-        .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
-        .group_by(InStoreCatalogueItem.category)
-    )
-    if q:
-        stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
-    if retailer:
-        if retailer == "__none__":
-            stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
-        else:
-            stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
-    if not show_all:
-        stmt = stmt.where(or_(
-            InStoreCatalogueItem.prominence.in_(DEFAULT_PROMINENCE),
-            InStoreCatalogueItem.prominence.is_(None),
-        ))
+    """Count of items per (category, subcategory, product_segment) given
+    current filters, for the cascading dropdowns.
 
-    categories = {c: n for c, n in (await db.execute(stmt)).all() if c}
-    return {"categories": categories}
+    Each facet's own filter is excluded from its own count (and the deeper
+    levels exclude their own and the levels below), so picking Category
+    narrows the Subcategory list, picking Subcategory narrows Product
+    Segment, etc. — same scoping as the Online Products facets endpoint."""
+
+    def _base(exclude: set[str]):
+        stmt = (
+            select(InStoreCatalogueItem)
+            .select_from(InStoreCatalogueItem)
+            .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
+        )
+        if q:
+            stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
+        if retailer:
+            if retailer == "__none__":
+                stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
+            else:
+                stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
+        if not show_all:
+            stmt = stmt.where(or_(
+                InStoreCatalogueItem.prominence.in_(DEFAULT_PROMINENCE),
+                InStoreCatalogueItem.prominence.is_(None),
+            ))
+        if category and "category" not in exclude:
+            stmt = stmt.where(InStoreCatalogueItem.category == category)
+        if subcategory and "subcategory" not in exclude:
+            stmt = stmt.where(InStoreCatalogueItem.subcategory == subcategory)
+        if product_segment and "product_segment" not in exclude:
+            stmt = stmt.where(InStoreCatalogueItem.product_segment == product_segment)
+        return stmt
+
+    def _group_count(col, exclude: set[str]):
+        sub = _base(exclude).subquery()
+        return select(getattr(sub.c, col.key), func.count()).group_by(getattr(sub.c, col.key))
+
+    cat_rows = (await db.execute(_group_count(
+        InStoreCatalogueItem.category, {"category", "subcategory", "product_segment"},
+    ))).all()
+    categories = {c: n for c, n in cat_rows if c}
+
+    sub_rows = (await db.execute(_group_count(
+        InStoreCatalogueItem.subcategory, {"subcategory", "product_segment"},
+    ))).all()
+    subcategories = {s: n for s, n in sub_rows if s}
+
+    seg_rows = (await db.execute(_group_count(
+        InStoreCatalogueItem.product_segment, {"product_segment"},
+    ))).all()
+    product_segments = {s: n for s, n in seg_rows if s}
+
+    return {
+        "categories": categories,
+        "subcategories": subcategories,
+        "product_segments": product_segments,
+    }
+
+
+# ── Taxonomy tree (for cascading dropdowns) ──────────────────────────────────
+
+@router.get("/taxonomy")
+async def get_taxonomy():
+    """Return the shared 3-level taxonomy tree (Category -> Subcategory ->
+    Product Segment). In-store items use the shared catalog regardless of
+    retailer, unlike Online Products where it's per-retailer."""
+    from scraper import category_catalog as cc
+    return {"tree": cc.get_shared_tree()}
 
 
 # ── Per-item cropped image ────────────────────────────────────────────────────
@@ -363,6 +422,8 @@ SAMPLE_ITEMS_PER_IMAGE = 6   # how many detected products to include per image i
 def _build_item_filter(
     q: Optional[str],
     category: Optional[str],
+    subcategory: Optional[str],
+    product_segment: Optional[str],
     prominence: Optional[str],
     show_all: bool,
 ):
@@ -377,8 +438,14 @@ def _build_item_filter(
     if q:
         conds.append(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
         active = True
-    if category and category in CATEGORIES:
+    if category:
         conds.append(InStoreCatalogueItem.category == category)
+        active = True
+    if subcategory:
+        conds.append(InStoreCatalogueItem.subcategory == subcategory)
+        active = True
+    if product_segment:
+        conds.append(InStoreCatalogueItem.product_segment == product_segment)
         active = True
 
     if prominence:
@@ -410,6 +477,8 @@ def _build_item_filter(
 async def list_images(
     q: Optional[str] = None,
     category: Optional[str] = None,
+    subcategory: Optional[str] = None,
+    product_segment: Optional[str] = None,
     retailer: Optional[str] = None,
     prominence: Optional[str] = None,
     show_all: bool = False,
@@ -420,11 +489,14 @@ async def list_images(
 ):
     """Image-centric list — one row per uploaded photo, with a preview of detected products.
 
-    Filters `q`, `category`, `prominence` are applied at the item level; when any is
-    active the result is restricted to images that contain at least one matching item.
+    Filters `q`, `category`, `subcategory`, `product_segment`, `prominence` are
+    applied at the item level; when any is active the result is restricted to
+    images that contain at least one matching item.
     Filters `retailer`, `status` are applied at the image level.
     """
-    item_conds, product_filter_active = _build_item_filter(q, category, prominence, show_all)
+    item_conds, product_filter_active = _build_item_filter(
+        q, category, subcategory, product_segment, prominence, show_all,
+    )
 
     # Stage 1: determine which image ids to return on this page
     img_stmt = select(InStoreCatalogueImage).order_by(desc(InStoreCatalogueImage.created_at))
@@ -497,6 +569,8 @@ async def list_images(
                     "id": it.id,
                     "product_name": it.product_name,
                     "category": it.category,
+                    "subcategory": it.subcategory,
+                    "product_segment": it.product_segment,
                     "prominence": it.prominence,
                 }
                 for it in preview
@@ -530,6 +604,8 @@ async def get_image_detail(image_id: int, db: AsyncSession = Depends(get_db)):
                 "id": it.id,
                 "product_name": it.product_name,
                 "category": it.category,
+                "subcategory": it.subcategory,
+                "product_segment": it.product_segment,
                 "prominence": it.prominence,
                 "has_crop": bool(it.cropped_file_path),
                 "colours": it.colours or [],
@@ -611,10 +687,13 @@ async def get_image_file(image_id: int, db: AsyncSession = Depends(get_db)):
 class ItemPatch(BaseModel):
     product_name: Optional[str] = None
     category: Optional[str] = None
+    subcategory: Optional[str] = None
+    product_segment: Optional[str] = None
 
 
 @router.patch("/items/{item_id}")
 async def patch_item(item_id: int, body: ItemPatch, db: AsyncSession = Depends(get_db)):
+    from scraper import category_catalog as cc
     item = await db.get(InStoreCatalogueItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Not found")
@@ -623,12 +702,45 @@ async def patch_item(item_id: int, body: ItemPatch, db: AsyncSession = Depends(g
         if not name:
             raise HTTPException(status_code=400, detail="product_name cannot be empty")
         item.product_name = name[:300]
+    # Taxonomy patches are validated against the shared catalog. Each level
+    # must be valid under the level above it (which can come from `body` or
+    # already be set on `item`).
     if body.category is not None:
-        if body.category not in CATEGORIES:
-            raise HTTPException(status_code=400, detail=f"category must be one of {sorted(CATEGORIES)}")
-        item.category = body.category
+        if body.category == "":
+            item.category = None
+        else:
+            label = cc.resolve_shared_label(body.category, kind="category")
+            if not label:
+                raise HTTPException(status_code=400, detail=f"unknown category '{body.category}'")
+            item.category = label
+    if body.subcategory is not None:
+        if body.subcategory == "":
+            item.subcategory = None
+        else:
+            label = cc.resolve_shared_label(body.subcategory, kind="subcategory")
+            if not label or not item.category or not cc.is_valid_shared(item.category, label):
+                raise HTTPException(status_code=400,
+                                    detail=f"subcategory '{body.subcategory}' not valid under category '{item.category}'")
+            item.subcategory = label
+    if body.product_segment is not None:
+        if body.product_segment == "":
+            item.product_segment = None
+        else:
+            label = cc.resolve_shared_label(body.product_segment, kind="product_segment")
+            if (not label or not item.category or not item.subcategory
+                    or not cc.is_valid_shared(item.category, item.subcategory, label)):
+                raise HTTPException(status_code=400,
+                                    detail=f"product_segment '{body.product_segment}' not valid under "
+                                           f"'{item.category}' > '{item.subcategory}'")
+            item.product_segment = label
     await db.commit()
-    return {"id": item.id, "product_name": item.product_name, "category": item.category}
+    return {
+        "id": item.id,
+        "product_name": item.product_name,
+        "category": item.category,
+        "subcategory": item.subcategory,
+        "product_segment": item.product_segment,
+    }
 
 
 @router.delete("/items/{item_id}")

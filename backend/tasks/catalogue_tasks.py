@@ -89,6 +89,82 @@ def _crop_item(source_img, bbox_norm: list[float], crops_dir: Path) -> str | Non
         return None
 
 
+@app.task(queue="aldi", rate_limit="60/m")
+def reclassify_catalogue_item(item_id: int):
+    """Text-only re-classification of one InStoreCatalogueItem into the new
+    3-level taxonomy. Cheap — no vision call. Used by the backfill endpoint.
+    Silently no-ops if the item is already classified into a leaf segment."""
+    db = Session()
+    try:
+        item = db.get(InStoreCatalogueItem, item_id)
+        if not item:
+            return {"status": "missing"}
+        # Skip items that already have all three taxonomy levels set —
+        # they were classified by the new vision prompt and need no work.
+        if item.category and item.subcategory and item.product_segment:
+            return {"status": "skipped"}
+
+        from analysis.catalogue_reclassify import CatalogueReclassifier
+        rc = CatalogueReclassifier()
+
+        async def _run():
+            try:
+                return await rc.classify({
+                    "product_name": item.product_name,
+                    "category": item.category,
+                    "subcategory": item.subcategory,
+                    "product_segment": item.product_segment,
+                    "colours": item.colours or [],
+                    "materials": item.materials or [],
+                    "patterns": item.patterns or [],
+                    "style_tags": item.style_tags or [],
+                })
+            finally:
+                await rc.aclose()
+        result = asyncio.run(_run())
+        if not result:
+            return {"status": "failed", "item_id": item_id}
+
+        item.category = result.get("category")
+        item.subcategory = result.get("subcategory")
+        item.product_segment = result.get("product_segment")
+        item.updated_at = datetime.utcnow()
+        db.commit()
+        return {"status": "done", "item_id": item_id,
+                "category": item.category, "subcategory": item.subcategory,
+                "product_segment": item.product_segment}
+    except Exception as exc:
+        db.rollback()
+        log.warning("reclassify_catalogue_item_failed", item_id=item_id, error=str(exc))
+        return {"status": "error", "item_id": item_id, "error": str(exc)}
+    finally:
+        db.close()
+
+
+@app.task(queue="aldi")
+def backfill_catalogue_taxonomy(force: bool = False):
+    """Walk every InStoreCatalogueItem, queue reclassify_catalogue_item for
+    each. By default only items missing all 3 taxonomy levels are queued;
+    pass force=True to re-run on every item."""
+    db = Session()
+    try:
+        from sqlalchemy import or_
+        q = select(InStoreCatalogueItem.id)
+        if not force:
+            q = q.where(or_(
+                InStoreCatalogueItem.category.is_(None),
+                InStoreCatalogueItem.subcategory.is_(None),
+                InStoreCatalogueItem.product_segment.is_(None),
+            ))
+        ids = [row[0] for row in db.execute(q).all()]
+        for iid in ids:
+            reclassify_catalogue_item.delay(iid)
+        log.info("backfill_catalogue_taxonomy_queued", count=len(ids), force=force)
+        return {"queued": len(ids), "force": force}
+    finally:
+        db.close()
+
+
 @app.task(bind=True, max_retries=2, queue="aldi")
 def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
     """Run Claude Vision on one catalogue image and write InStoreCatalogueItem rows
@@ -117,7 +193,12 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
                 return {"error": "file missing"}
             raw_bytes = p.read_bytes()
 
-        detected = asyncio.run(analyser.analyse_image_bytes(raw_bytes, image.file_type))
+        async def _run():
+            try:
+                return await analyser.analyse_image_bytes(raw_bytes, image.file_type)
+            finally:
+                await analyser.aclose()
+        detected = asyncio.run(_run())
 
         if detected is None:
             image.status = "failed"
@@ -161,7 +242,9 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
             item = InStoreCatalogueItem(
                 image_id=image_id,
                 product_name=entry["product_name"],
-                category=entry["category"],
+                category=entry.get("category"),
+                subcategory=entry.get("subcategory"),
+                product_segment=entry.get("product_segment"),
                 prominence=prominence,
                 bbox=bbox,
                 cropped_file_path=cropped_path,

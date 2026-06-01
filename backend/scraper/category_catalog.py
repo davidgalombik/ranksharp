@@ -204,6 +204,39 @@ def get_tree(retailer_slug: str) -> list[dict]:
     return tree
 
 
+_SHARED_SLUG = "_shared"
+
+
+def get_shared_tree() -> list[dict]:
+    """Return the shared (retailer-agnostic) taxonomy tree, used by the
+    In-store Products page where products aren't scoped to a single retailer."""
+    return get_tree(_SHARED_SLUG)
+
+
+def get_shared_categories() -> list[str]:
+    return get_categories(_SHARED_SLUG)
+
+
+def get_shared_subcategories(category: str) -> list[str]:
+    return get_subcategories(_SHARED_SLUG, category)
+
+
+def get_shared_product_segments(category: str, subcategory: str) -> list[str]:
+    return get_product_segments(_SHARED_SLUG, category, subcategory)
+
+
+def is_valid_shared(
+    category: str,
+    subcategory: Optional[str] = None,
+    product_segment: Optional[str] = None,
+) -> bool:
+    return is_valid(_SHARED_SLUG, category, subcategory, product_segment)
+
+
+def resolve_shared_label(value: str, *, kind: str) -> Optional[str]:
+    return resolve_label(_SHARED_SLUG, value, kind=kind)
+
+
 def resolve_label(retailer_slug: str, value: str, *, kind: str) -> Optional[str]:
     """Accept either a display label or a slug and return the canonical
     display label (or None if not found). `kind` is "category", "subcategory",

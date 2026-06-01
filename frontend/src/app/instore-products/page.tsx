@@ -6,7 +6,21 @@ import { api } from "@/lib/api";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const CATEGORIES = ["Kitchen & Dining", "Home & Decor", "Candles", "Other"] as const;
+// In-store items now use the shared 9-category taxonomy (matches Online
+// Products). Kept hardcoded here for the inline category editor; the
+// full 3-level tree is fetched at runtime from /api/instore-catalogue/taxonomy
+// for the cascading filter dropdowns.
+const CATEGORIES = [
+  "Candles & Aromatherapy",
+  "Cleaning & Laundry",
+  "Furniture",
+  "Household",
+  "Kitchenware",
+  "Outdoor",
+  "Pet",
+  "Storage & Organization",
+  "Tabletop",
+] as const;
 type Category = typeof CATEGORIES[number];
 
 const BATCH_SIZE = 200;
@@ -16,10 +30,15 @@ const DOWNSCALE_QUALITY = 0.82;
 const COST_PER_IMAGE = 0.003;
 
 const CATEGORY_COLOURS: Record<string, string> = {
-  "Kitchen & Dining": "bg-amber-100 text-amber-800 border-amber-200",
-  "Home & Decor": "bg-emerald-100 text-emerald-800 border-emerald-200",
-  "Candles": "bg-rose-100 text-rose-800 border-rose-200",
-  "Other": "bg-stone-100 text-stone-700 border-stone-200",
+  "Candles & Aromatherapy": "bg-rose-100 text-rose-800 border-rose-200",
+  "Cleaning & Laundry": "bg-cyan-100 text-cyan-800 border-cyan-200",
+  "Furniture": "bg-orange-100 text-orange-800 border-orange-200",
+  "Household": "bg-stone-100 text-stone-700 border-stone-200",
+  "Kitchenware": "bg-amber-100 text-amber-800 border-amber-200",
+  "Outdoor": "bg-lime-100 text-lime-800 border-lime-200",
+  "Pet": "bg-violet-100 text-violet-800 border-violet-200",
+  "Storage & Organization": "bg-emerald-100 text-emerald-800 border-emerald-200",
+  "Tabletop": "bg-sky-100 text-sky-800 border-sky-200",
 };
 
 const PROMINENCE_COLOURS: Record<string, string> = {
@@ -42,7 +61,9 @@ interface CatalogueItem {
   id: number;
   image_id: number;
   product_name: string;
-  category: string;
+  category: string | null;
+  subcategory: string | null;
+  product_segment: string | null;
   prominence: string | null;
   has_crop?: boolean;
   colours: string[];
@@ -58,7 +79,9 @@ interface CatalogueItem {
 interface ImagePreviewItem {
   id: number;
   product_name: string;
-  category: string;
+  category: string | null;
+  subcategory: string | null;
+  product_segment: string | null;
   prominence: string | null;
 }
 
@@ -79,7 +102,9 @@ interface ImageRow {
 interface ImageDetailItem {
   id: number;
   product_name: string;
-  category: string;
+  category: string | null;
+  subcategory: string | null;
+  product_segment: string | null;
   prominence: string | null;
   has_crop?: boolean;
   colours: string[];
@@ -529,15 +554,16 @@ function EditableName({ value, onSave }: { value: string; onSave: (v: string) =>
   );
 }
 
-function EditableCategory({ value, onSave }: { value: string; onSave: (v: string) => Promise<void> }) {
-  const colour = CATEGORY_COLOURS[value] || CATEGORY_COLOURS["Other"];
+function EditableCategory({ value, onSave }: { value: string | null; onSave: (v: string) => Promise<void> }) {
+  const colour = CATEGORY_COLOURS[value ?? ""] || "bg-stone-100 text-stone-500 border-stone-200";
   return (
     <select
-      value={value}
+      value={value ?? ""}
       onChange={(e) => onSave(e.target.value)}
       className={clsx("px-2 py-0.5 rounded-full text-xs font-semibold border cursor-pointer", colour)}
       title="Change category"
     >
+      <option value="" disabled>—</option>
       {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
     </select>
   );
@@ -1135,7 +1161,9 @@ export default function InStoreProductsPage() {
   // Filters
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [category, setCategory] = useState<"" | Category>("");
+  const [category, setCategory] = useState<string>("");
+  const [subcategory, setSubcategory] = useState<string>("");
+  const [productSegment, setProductSegment] = useState<string>("");
   const [retailerFilter, setRetailerFilter] = useState("");   // "" = all, "__none__" = untagged
   const [showAll, setShowAll] = useState(false);   // include peripheral/background
   const [mode, setMode] = useState<"catalogue" | "failed">("catalogue");
@@ -1144,8 +1172,26 @@ export default function InStoreProductsPage() {
   const [retailers, setRetailers] = useState<Retailer[]>([]);
   const [untaggedCount, setUntaggedCount] = useState(0);
 
-  // Facet counts per category (for zero-hiding the Category dropdown)
-  const [facets, setFacets] = useState<{ categories: Record<string, number> } | null>(null);
+  // Shared 3-level taxonomy tree (fetched once at mount) — drives the cascading
+  // Category -> Subcategory -> Product Segment dropdowns.
+  const [taxonomy, setTaxonomy] = useState<{
+    tree: {
+      category: string;
+      category_slug: string;
+      subcategories: {
+        label: string;
+        slug: string;
+        product_segments: { label: string; slug: string }[];
+      }[];
+    }[];
+  } | null>(null);
+
+  // Facet counts for cascading dropdowns
+  const [facets, setFacets] = useState<{
+    categories: Record<string, number>;
+    subcategories: Record<string, number>;
+    product_segments: Record<string, number>;
+  } | null>(null);
 
   // Retailer currently selected in the upload zone (remembered across sessions)
   const [uploadRetailer, setUploadRetailer] = useState<string>("");
@@ -1180,7 +1226,11 @@ export default function InStoreProductsPage() {
   // Reset to page 0 when filters or view mode change
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, category, retailerFilter, showAll, viewMode]);
+  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll, viewMode]);
+
+  // Cascading clears: changing a level clears every deeper level
+  useEffect(() => { setSubcategory(""); setProductSegment(""); }, [category]);
+  useEffect(() => { setProductSegment(""); }, [subcategory]);
 
   // Load images (image-centric grid)
   const loadImages = useCallback(async () => {
@@ -1189,6 +1239,8 @@ export default function InStoreProductsPage() {
       const data = await api.instoreCatalogue.listImages({
         q: debouncedSearch || undefined,
         category: category || undefined,
+        subcategory: subcategory || undefined,
+        product_segment: productSegment || undefined,
         retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
@@ -1202,7 +1254,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll, page]);
 
   // Load products (flat item list)
   const loadProducts = useCallback(async () => {
@@ -1211,6 +1263,8 @@ export default function InStoreProductsPage() {
       const data = await api.instoreCatalogue.listItems({
         q: debouncedSearch || undefined,
         category: category || undefined,
+        subcategory: subcategory || undefined,
+        product_segment: productSegment || undefined,
         retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
@@ -1224,7 +1278,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll, page]);
 
   // Refresh both the current view and stats
   const reloadCurrentView = useCallback(async () => {
@@ -1255,16 +1309,26 @@ export default function InStoreProductsPage() {
   }, []);
   useEffect(() => { loadRetailers(); }, [loadRetailers]);
 
-  // Load category facet counts so zero-reach options can be hidden
+  // Load facet counts for all 3 levels so zero-reach options can be hidden.
   useEffect(() => {
     api.instoreCatalogue.facets({
       q: debouncedSearch || undefined,
+      category: category || undefined,
+      subcategory: subcategory || undefined,
+      product_segment: productSegment || undefined,
       retailer: retailerFilter || undefined,
       show_all: showAll,
     })
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, retailerFilter, showAll]);
+  }, [debouncedSearch, category, subcategory, productSegment, retailerFilter, showAll]);
+
+  // Fetch the shared 3-level taxonomy tree once at mount.
+  useEffect(() => {
+    api.instoreCatalogue.taxonomy()
+      .then((t) => setTaxonomy(t))
+      .catch(() => setTaxonomy(null));
+  }, []);
 
   // Hydrate uploadRetailer from localStorage on mount
   useEffect(() => {
@@ -1473,7 +1537,7 @@ export default function InStoreProductsPage() {
   const processingCount = (stats?.images_by_status?.pending || 0) + (stats?.images_by_status?.analysing || 0);
   const failedCount = stats?.images_by_status?.failed || 0;
 
-  const hasFilters = debouncedSearch || category || retailerFilter || showAll;
+  const hasFilters = debouncedSearch || category || subcategory || productSegment || retailerFilter || showAll;
 
   return (
     <div className="space-y-5">
@@ -1598,16 +1662,57 @@ export default function InStoreProductsPage() {
                   <option value={RETAILER_NONE}>(no retailer) ({untaggedCount})</option>
                 )}
               </select>
+              {/* Category + Subcategory + Product Segment — cascading. Uses
+                  the shared taxonomy tree (not retailer-gated, unlike Online). */}
               <select
                 value={category}
-                onChange={(e) => setCategory(e.target.value as "" | Category)}
+                onChange={(e) => setCategory(e.target.value)}
                 className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
               >
                 <option value="">All categories</option>
-                {CATEGORIES
-                  .filter((c) => !facets || c === category || (facets.categories[c] ?? 0) > 0)
-                  .map((c) => <option key={c} value={c}>{c}</option>)}
+                {(taxonomy?.tree ?? [])
+                  .filter((node) => !facets || node.category === category || (facets.categories[node.category] ?? 0) > 0)
+                  .map((node) => (
+                    <option key={node.category_slug} value={node.category}>{node.category}</option>
+                  ))}
               </select>
+              {category && taxonomy && (() => {
+                const node = taxonomy.tree.find((n) => n.category === category);
+                const subs = (node?.subcategories ?? [])
+                  .filter((s) => !facets || s.label === subcategory || (facets.subcategories[s.label] ?? 0) > 0);
+                if (subs.length === 0) return null;
+                return (
+                  <select
+                    value={subcategory}
+                    onChange={(e) => setSubcategory(e.target.value)}
+                    className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  >
+                    <option value="">All subcategories</option>
+                    {subs.map((s) => (
+                      <option key={s.slug} value={s.label}>{s.label}</option>
+                    ))}
+                  </select>
+                );
+              })()}
+              {category && subcategory && taxonomy && (() => {
+                const catNode = taxonomy.tree.find((n) => n.category === category);
+                const subNode = catNode?.subcategories.find((s) => s.label === subcategory);
+                const segs = (subNode?.product_segments ?? [])
+                  .filter((s) => !facets || s.label === productSegment || (facets.product_segments[s.label] ?? 0) > 0);
+                if (segs.length === 0) return null;
+                return (
+                  <select
+                    value={productSegment}
+                    onChange={(e) => setProductSegment(e.target.value)}
+                    className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  >
+                    <option value="">All product segments</option>
+                    {segs.map((s) => (
+                      <option key={s.slug} value={s.label}>{s.label}</option>
+                    ))}
+                  </select>
+                );
+              })()}
               <button
                 onClick={() => setShowAll((v) => !v)}
                 className={clsx(
@@ -1629,7 +1734,7 @@ export default function InStoreProductsPage() {
             )}
             {hasFilters && (
               <button
-                onClick={() => { setSearch(""); setCategory(""); setRetailerFilter(""); setShowAll(false); }}
+                onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setRetailerFilter(""); setShowAll(false); }}
                 className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
               >
                 Clear filters
@@ -1700,7 +1805,7 @@ export default function InStoreProductsPage() {
               {hasFilters ? (
                 <>
                   <p className="font-medium">No {viewMode === "image" ? "images" : "products"} match your filters</p>
-                  <button onClick={() => { setSearch(""); setCategory(""); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
+                  <button onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
                 </>
               ) : (
                 <>

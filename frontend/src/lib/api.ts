@@ -279,10 +279,12 @@ export const api = {
         image_ids: number[];
       }>;
     },
-    listItems: async (params: { q?: string; category?: string; retailer?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
+    listItems: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; retailer?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
+      if (params.subcategory) qs.set("subcategory", params.subcategory);
+      if (params.product_segment) qs.set("product_segment", params.product_segment);
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
       if (params.prominence) qs.set("prominence", params.prominence);
@@ -300,6 +302,8 @@ export const api = {
     listImages: async (params: {
       q?: string;
       category?: string;
+      subcategory?: string;
+      product_segment?: string;
       retailer?: string;
       prominence?: string;
       show_all?: boolean;
@@ -310,6 +314,8 @@ export const api = {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
+      if (params.subcategory) qs.set("subcategory", params.subcategory);
+      if (params.product_segment) qs.set("product_segment", params.product_segment);
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.prominence) qs.set("prominence", params.prominence);
       if (params.show_all) qs.set("show_all", "true");
@@ -339,16 +345,38 @@ export const api = {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
-    facets: async (params: { q?: string; retailer?: string; show_all?: boolean } = {}) => {
+    facets: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; retailer?: string; show_all?: boolean } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
+      if (params.category) qs.set("category", params.category);
+      if (params.subcategory) qs.set("subcategory", params.subcategory);
+      if (params.product_segment) qs.set("product_segment", params.product_segment);
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
       const res = await fetch(`${API_BASE}/api/instore-catalogue/facets?${qs}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
-      return res.json() as Promise<{ categories: Record<string, number> }>;
+      return res.json() as Promise<{
+        categories: Record<string, number>;
+        subcategories: Record<string, number>;
+        product_segments: Record<string, number>;
+      }>;
     },
-    patchItem: async (id: number, body: { product_name?: string; category?: string }) => {
+    taxonomy: async () => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/taxonomy`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{
+        tree: {
+          category: string;
+          category_slug: string;
+          subcategories: {
+            label: string;
+            slug: string;
+            product_segments: { label: string; slug: string }[];
+          }[];
+        }[];
+      }>;
+    },
+    patchItem: async (id: number, body: { product_name?: string; category?: string; subcategory?: string; product_segment?: string }) => {
       const res = await fetch(`${API_BASE}/api/instore-catalogue/items/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },

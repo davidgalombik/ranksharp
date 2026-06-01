@@ -118,6 +118,26 @@ async def purge_analysis_queue(
     }
 
 
+@router.post("/backfill-instore-taxonomy")
+async def trigger_instore_taxonomy_backfill(
+    force: bool = Query(False, description="If true, re-classify every item even if already fully classified"),
+    _: bool = Depends(_require_admin),
+):
+    """Kick off the one-shot Celery task that walks every InStoreCatalogueItem
+    and re-classifies it into the new 3-level taxonomy (text-only Claude call,
+    no vision). Returns immediately; progress visible in the dynamic-reprieve
+    worker logs."""
+    from tasks.catalogue_tasks import backfill_catalogue_taxonomy
+    task = backfill_catalogue_taxonomy.delay(force=force)
+    return {
+        "task_id": task.id,
+        "force": force,
+        "note": ("Backfill dispatched. Watch dynamic-reprieve logs for "
+                 "reclassify_catalogue_item completions. Items already fully "
+                 "classified are skipped unless force=true."),
+    }
+
+
 @router.delete("/products/{retailer_slug}")
 async def delete_all_products(
     retailer_slug: str,
