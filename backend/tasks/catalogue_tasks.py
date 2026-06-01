@@ -89,7 +89,7 @@ def _crop_item(source_img, bbox_norm: list[float], crops_dir: Path) -> str | Non
         return None
 
 
-@app.task(queue="aldi", rate_limit="60/m")
+@app.task(queue="aldi", rate_limit="180/m")
 def reclassify_catalogue_item(item_id: int):
     """Text-only re-classification of one InStoreCatalogueItem into the new
     3-level taxonomy. Cheap — no vision call. Used by the backfill endpoint.
