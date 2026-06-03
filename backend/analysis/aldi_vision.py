@@ -113,10 +113,37 @@ TREND ANALYSIS FROM UPLOADED MOOD BOARD:
 SIMILAR PRODUCTS CURRENTLY IN THE MARKET (for inspiration and reference):
 {products_summary}
 
+ALLOWED PRODUCT CATEGORIES — every generated idea's `category` field MUST be one of these
+EXACT strings (Category > Subcategory). Ideas in any other category will be rejected:
+
+- Furniture > Indoor Furniture
+- Household > Homewares
+- Kitchenware > Bakeware
+- Kitchenware > Cookware
+- Kitchenware > Food Preparation
+- Kitchenware > Food Storage
+- Kitchenware > Glassware & Drinkware
+- Kitchenware > Kitchen Organization
+- Kitchenware > Utensils & Gadgets
+- Storage & Organization > Baskets & Bins
+- Storage & Organization > Bathroom Storage
+- Storage & Organization > General Storage
+- Storage & Organization > Kids Storage
+- Storage & Organization > Kitchen Storage
+- Tabletop > Bar & Wine Access
+- Tabletop > Drinkware
+- Tabletop > Serveware
+- Tabletop > Tableware
+
+The market products above are for INSPIRATION only — they may belong to other categories
+(e.g. candles, cleaning, pet, outdoor). Use them to inform style/colour/material/pattern
+choices, but every idea you generate MUST fit into one of the allowed (Category > Subcategory)
+combos above. Do not invent or paraphrase category names.
+
 {exclusion_block}Using the trend insights above and drawing inspiration from the real market products,
 generate exactly {n} specific product ideas that Aldi could develop as private-label seasonal items.
 Honour the analytical focus above by weighting your ideas toward that dimension, while still ensuring
-variety across product categories.
+variety ACROSS the allowed category list (don't concentrate all ideas into one subcategory).
 
 Return ONLY valid JSON — an array of exactly {n} objects:
 [
@@ -124,17 +151,42 @@ Return ONLY valid JSON — an array of exactly {n} objects:
     "position": 1,
     "name": "<specific product name, e.g. 'Country Floral Linen Tea Towel Set of 3'>",
     "description": "<2-3 sentences describing the product including key visual attributes, materials, and dimensions if relevant>",
-    "category": "<home category, e.g. 'Kitchen Textiles'>",
+    "category": "<exact string from the allowed list, e.g. 'Kitchenware > Food Storage'>",
     "price_point": "<realistic Aldi price range, e.g. '$6.99–9.99'>",
     "rationale": "<2 sentences explaining why this fits the trend and will appeal to Aldi's customer>",
     "inspired_by_product_ids": [<integer product IDs from the market data above that inspired this idea — include at least 3 IDs, ideally 3–5>]
   }}
 ]
 
-Ensure variety across product categories. Make names specific and commercial, not generic.
+Ensure variety across the allowed categories. Make names specific and commercial, not generic.
 Each idea must have a minimum of 3 inspired_by_product_ids — never fewer.
 Each idea must reference DIFFERENT inspired_by_product_ids — never use the same product ID across multiple ideas.
+Each idea's `category` MUST exactly match one of the allowed strings — no abbreviations, no new categories.
 Return ONLY the JSON array, no prose, no markdown fences."""
+
+
+# Hard category gate — every generated idea's category MUST be in this set.
+# Kept in sync with the ALLOWED PRODUCT CATEGORIES block above.
+ALLOWED_IDEA_CATEGORIES = frozenset({
+    "Furniture > Indoor Furniture",
+    "Household > Homewares",
+    "Kitchenware > Bakeware",
+    "Kitchenware > Cookware",
+    "Kitchenware > Food Preparation",
+    "Kitchenware > Food Storage",
+    "Kitchenware > Glassware & Drinkware",
+    "Kitchenware > Kitchen Organization",
+    "Kitchenware > Utensils & Gadgets",
+    "Storage & Organization > Baskets & Bins",
+    "Storage & Organization > Bathroom Storage",
+    "Storage & Organization > General Storage",
+    "Storage & Organization > Kids Storage",
+    "Storage & Organization > Kitchen Storage",
+    "Tabletop > Bar & Wine Access",
+    "Tabletop > Drinkware",
+    "Tabletop > Serveware",
+    "Tabletop > Tableware",
+})
 
 
 class MoodBoardAnalyser:
@@ -252,10 +304,35 @@ class MoodBoardAnalyser:
             )
             raw = response.content[0].text.strip()
             raw = _strip_fences(raw)
-            return json.loads(raw)
+            ideas = json.loads(raw)
         except Exception as exc:
             log.error("idea_generation_failed", error=str(exc))
             return None
+
+        # Hard category gate — drop any idea whose category isn't in the
+        # allowed (Category > Subcategory) set defined alongside the prompt.
+        if isinstance(ideas, list):
+            filtered = []
+            dropped = []
+            for idea in ideas:
+                if not isinstance(idea, dict):
+                    continue
+                cat = (idea.get("category") or "").strip()
+                if cat in ALLOWED_IDEA_CATEGORIES:
+                    filtered.append(idea)
+                else:
+                    dropped.append({"name": idea.get("name", "?"), "category": cat})
+            if dropped:
+                log.warning(
+                    "idea_category_gate_dropped",
+                    dropped_count=len(dropped),
+                    sample=dropped[:5],
+                )
+            # Re-number positions after the drop so the UI stays clean.
+            for i, idea in enumerate(filtered, start=1):
+                idea["position"] = i
+            return filtered
+        return ideas
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
