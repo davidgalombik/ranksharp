@@ -54,17 +54,6 @@ export default function Navigation() {
         </Link>
 
         <nav className="flex gap-1 items-center">
-          {/* Dashboard */}
-          <Link
-            href="/"
-            className={clsx(
-              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
-              path === "/" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"
-            )}
-          >
-            Dashboard
-          </Link>
-
           {/* Online Products */}
           <Link
             href="/products"
