@@ -143,16 +143,23 @@ async def trigger_instore_recommendations_backfill(
     _: bool = Depends(_require_admin),
 ):
     """For every trend in the latest in-store trend report, compute the top
-    matching online products (cosine similarity over embeddings, >= 0.7).
+    matching online products by cosine similarity over their embeddings.
+    Threshold is set by RECOMMENDATION_THRESHOLD in instore_trend_engine.py.
     Replaces any existing recommendations. Use this once after deploying the
     feature, or after adding new online products to refresh the matches."""
     from tasks.analysis_tasks import backfill_instore_recommendations_task
+    from analysis.instore_trend_engine import (
+        RECOMMENDATION_THRESHOLD, RECOMMENDATIONS_PER_TREND,
+    )
     task = backfill_instore_recommendations_task.apply_async(queue="reports")
     return {
         "task_id": task.id,
-        "note": ("Recommendation backfill dispatched. Walks every trend in the "
-                 "latest report and finds the top 10 online products with "
-                 "cosine similarity >= 0.7. Watch the 'reports' worker logs."),
+        "threshold": RECOMMENDATION_THRESHOLD,
+        "limit_per_trend": RECOMMENDATIONS_PER_TREND,
+        "note": (f"Recommendation backfill dispatched. Walks every trend in "
+                 f"the latest report and finds the top {RECOMMENDATIONS_PER_TREND} "
+                 f"online products with cosine similarity >= {RECOMMENDATION_THRESHOLD}. "
+                 f"Watch the 'reports' worker logs."),
     }
 
 
