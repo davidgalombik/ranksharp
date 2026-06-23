@@ -41,8 +41,11 @@ from database.models import (
 )
 
 # Minimum cosine similarity required to recommend an online product for a trend.
-# Below this the match feels weak / unrelated.
-RECOMMENDATION_THRESHOLD = 0.7
+# The keyword-embedding scheme is mostly Gaussian noise with small boosts on
+# matched keyword dims — so typical "meaningfully similar" items land around
+# 0.2–0.4, and only near-duplicates reach 0.7+. 0.3 is the realistic floor
+# for surfacing relevant matches without flooding the card with noise.
+RECOMMENDATION_THRESHOLD = 0.3
 # Max number of online product recommendations stored per trend.
 RECOMMENDATIONS_PER_TREND = 10
 
