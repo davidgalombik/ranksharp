@@ -41,11 +41,12 @@ from database.models import (
 )
 
 # Minimum cosine similarity required to recommend an online product for a trend.
-# The keyword-embedding scheme is mostly Gaussian noise with small boosts on
-# matched keyword dims — so typical "meaningfully similar" items land around
-# 0.2–0.4, and only near-duplicates reach 0.7+. 0.3 is the realistic floor
-# for surfacing relevant matches without flooding the card with noise.
-RECOMMENDATION_THRESHOLD = 0.3
+# The hash-based keyword embedding scheme in analysis/embeddings.py produces
+# tiny cosine values even for clearly related items: two 1536-dim vectors with
+# 10 shared keyword boosts (+2.0 each) score ~0.025; 50 shared keywords scores
+# ~0.13. So this threshold is a noise floor, not a quality gate. Once the
+# embedding scheme is upgraded to a real semantic encoder, raise this to 0.5+.
+RECOMMENDATION_THRESHOLD = 0.02
 # Max number of online product recommendations stored per trend.
 RECOMMENDATIONS_PER_TREND = 10
 
@@ -452,27 +453,16 @@ class InStoreTrendEngine:
         td: dict,
         clusters: list[dict],
     ):
-        """For each trend, find the top online Products (across all retailers)
-        whose embedding is most similar to the trend's centroid. The centroid
-        is the mean of the supporting clusters' centroids."""
-        supporting = td.get("supporting_cluster_indices") or []
-        centroids = []
-        for idx in supporting:
-            if 0 <= idx < len(clusters) and clusters[idx].get("centroid"):
-                centroids.append(np.array(clusters[idx]["centroid"], dtype=np.float32))
-        if not centroids:
+        """For each trend, find the top online Products whose embedding is most
+        similar to a synthetic 'trend prototype' embedding built from the trend's
+        dominant attributes. Using the dominant attributes (vs the noisy cluster
+        centroid) gives a much cleaner signal in this hash-based embedding scheme."""
+        search_vec = self._build_trend_search_embedding(td)
+        if search_vec is None:
             return
 
-        trend_centroid = np.mean(centroids, axis=0)
-        norm = np.linalg.norm(trend_centroid)
-        if norm == 0:
-            return
-        trend_centroid = trend_centroid / norm
-
-        # pgvector cosine distance (`<=>`) ranges [0, 2]; similarity = 1 - distance.
-        # Filter to ACTIVE, analysed products with a non-null embedding.
         max_distance = 1.0 - RECOMMENDATION_THRESHOLD
-        vec_literal = "[" + ",".join(f"{x:.6f}" for x in trend_centroid.tolist()) + "]"
+        vec_literal = "[" + ",".join(f"{x:.6f}" for x in search_vec.tolist()) + "]"
         from sqlalchemy import text as sa_text
         result = await self.db.execute(
             sa_text(
@@ -489,6 +479,13 @@ class InStoreTrendEngine:
              "limit": RECOMMENDATIONS_PER_TREND},
         )
         rows = result.all()
+        log.info(
+            "instore_recommendations_query",
+            trend_id=trend.id,
+            trend_name=trend.name,
+            matches=len(rows),
+            top_sim=(1.0 - float(rows[0][1])) if rows else None,
+        )
         for rank, (product_id, distance) in enumerate(rows):
             similarity = max(0.0, 1.0 - float(distance))
             self.db.add(InStoreTrendRecommendation(
@@ -497,6 +494,29 @@ class InStoreTrendEngine:
                 similarity=similarity,
                 rank=rank,
             ))
+
+    def _build_trend_search_embedding(self, td: dict) -> Optional[np.ndarray]:
+        """Build an L2-normalised search vector from the trend's dominant
+        attributes (name + dominant colours/materials/patterns/styles/taxonomy).
+        Using the hash-based EmbeddingGenerator means the boosted keyword
+        dimensions line up with how online products were embedded."""
+        from analysis.embeddings import EmbeddingGenerator
+        parts: list[str] = []
+        if td.get("name"):
+            parts.append(td["name"])
+        for key in ("dominant_colours", "dominant_materials",
+                    "dominant_patterns", "dominant_styles", "dominant_taxonomy"):
+            vals = td.get(key) or []
+            if vals:
+                parts.append(" ".join(vals))
+        text = " | ".join(p for p in parts if p)
+        if not text.strip():
+            return None
+        emb = np.array(EmbeddingGenerator()._keyword_embedding(text), dtype=np.float32)
+        norm = np.linalg.norm(emb)
+        if norm == 0:
+            return None
+        return emb / norm
 
     # ── Report metadata via Claude ────────────────────────────────────────
 

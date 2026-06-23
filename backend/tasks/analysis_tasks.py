@@ -264,12 +264,12 @@ def backfill_instore_recommendations_task():
 async def _backfill_instore_recommendations():
     from database.db import AsyncSessionLocal, async_engine
     from database.models import (
-        InStoreTrendReport, InStoreTrend, InStoreTrendExample,
-        InStoreTrendRecommendation, InStoreCatalogueItem,
+        InStoreTrendReport, InStoreTrend, InStoreTrendRecommendation,
     )
     from analysis.instore_trend_engine import (
         RECOMMENDATION_THRESHOLD, RECOMMENDATIONS_PER_TREND,
     )
+    from analysis.embeddings import EmbeddingGenerator
     from sqlalchemy import select, desc, delete, text as sa_text
     import numpy as np
 
@@ -286,6 +286,7 @@ async def _backfill_instore_recommendations():
             select(InStoreTrend).where(InStoreTrend.id.in_(report.trend_ids))
         )).scalars().all()
 
+        emb_gen = EmbeddingGenerator()
         total_recs = 0
         for trend in trends:
             await session.execute(
@@ -293,24 +294,27 @@ async def _backfill_instore_recommendations():
                     InStoreTrendRecommendation.trend_id == trend.id
                 )
             )
-            ex_rows = (await session.execute(
-                select(InStoreCatalogueItem.embedding)
-                .join(InStoreTrendExample,
-                      InStoreTrendExample.item_id == InStoreCatalogueItem.id)
-                .where(InStoreTrendExample.trend_id == trend.id)
-                .where(InStoreCatalogueItem.embedding.isnot(None))
-            )).all()
-            if not ex_rows:
+            # Build search vector from trend's dominant attributes (clean
+            # signal, mirrors what the engine does at generation time).
+            parts: list[str] = []
+            if trend.name:
+                parts.append(trend.name)
+            for attr in ("dominant_colours", "dominant_materials",
+                         "dominant_patterns", "dominant_styles", "dominant_taxonomy"):
+                vals = getattr(trend, attr, None) or []
+                if vals:
+                    parts.append(" ".join(vals))
+            text = " | ".join(p for p in parts if p)
+            if not text.strip():
                 continue
-            embs = np.array([list(r[0]) for r in ex_rows], dtype=np.float32)
-            centroid = embs.mean(axis=0)
-            norm = np.linalg.norm(centroid)
+            emb = np.array(emb_gen._keyword_embedding(text), dtype=np.float32)
+            norm = np.linalg.norm(emb)
             if norm == 0:
                 continue
-            centroid = centroid / norm
+            emb = emb / norm
 
             max_distance = 1.0 - RECOMMENDATION_THRESHOLD
-            vec_literal = "[" + ",".join(f"{x:.6f}" for x in centroid.tolist()) + "]"
+            vec_literal = "[" + ",".join(f"{x:.6f}" for x in emb.tolist()) + "]"
             result = await session.execute(
                 sa_text(
                     "SELECT p.id, (pa.embedding <=> CAST(:vec AS vector)) AS distance "
@@ -325,7 +329,13 @@ async def _backfill_instore_recommendations():
                 {"vec": vec_literal, "max_dist": max_distance,
                  "limit": RECOMMENDATIONS_PER_TREND},
             )
-            for rank, (product_id, distance) in enumerate(result.all()):
+            rows = result.all()
+            log.info(
+                "backfill_recs_trend",
+                trend_id=trend.id, name=trend.name, matches=len(rows),
+                top_sim=(1.0 - float(rows[0][1])) if rows else None,
+            )
+            for rank, (product_id, distance) in enumerate(rows):
                 similarity = max(0.0, 1.0 - float(distance))
                 session.add(InStoreTrendRecommendation(
                     trend_id=trend.id,
