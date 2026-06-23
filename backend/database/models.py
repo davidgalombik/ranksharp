@@ -528,6 +528,9 @@ class InStoreCatalogueItem(Base):
     subcategory = mapped_column(String(500), nullable=True, index=True)
     product_segment = mapped_column(String(500), nullable=True, index=True)
     prominence = mapped_column(String(20), nullable=True, index=True)  # hero | main | peripheral | background
+    # 1536-dim keyword embedding (same shape as ProductAttributes.embedding)
+    # — drives clustering in InStoreTrendEngine.
+    embedding = mapped_column(Vector(1536), nullable=True)
     bbox = mapped_column(JSON, nullable=True)                          # [x, y, w, h] normalized 0..1
     cropped_file_path = mapped_column(String, nullable=True)           # disk path to cropped JPEG
     colours = mapped_column(JSON, nullable=True)
@@ -538,3 +541,66 @@ class InStoreCatalogueItem(Base):
     created_at = mapped_column(DateTime, default=datetime.utcnow)
     updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     image = relationship("InStoreCatalogueImage", back_populates="items")
+
+
+# ── In-store Trends (catalogue-driven trend analysis) ─────────────────────────
+# Parallel to TrendReport / Trend but reads from InStoreCatalogueItem instead
+# of Product. Run via the InStoreTrendEngine.
+
+class InStoreTrendReport(Base):
+    """Trend report run over the In-store Products catalogue."""
+    __tablename__ = "instore_trend_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    trend_ids: Mapped[list] = mapped_column(JSON, default=list)
+    total_items_analysed: Mapped[int] = mapped_column(Integer, default=0)
+    generation_count: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InStoreTrend(Base):
+    """An identified trend cluster from an in-store trend run."""
+    __tablename__ = "instore_trends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+
+    category: Mapped[str] = mapped_column(String(100), nullable=False)   # colour / material / pattern / style / shape
+    status: Mapped[TrendStatus] = mapped_column(SAEnum(TrendStatus), default=TrendStatus.NEW)
+
+    # Metrics — no retailer count for in-store (retailer field is free-text/blank)
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    momentum_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    prev_trend_id: Mapped[Optional[int]] = mapped_column(ForeignKey("instore_trends.id"), nullable=True)
+
+    # Dominant attributes
+    dominant_colours: Mapped[list] = mapped_column(JSON, default=list)
+    dominant_materials: Mapped[list] = mapped_column(JSON, default=list)
+    dominant_patterns: Mapped[list] = mapped_column(JSON, default=list)
+    dominant_styles: Mapped[list] = mapped_column(JSON, default=list)
+    dominant_taxonomy: Mapped[list] = mapped_column(JSON, default=list)  # ["Kitchenware > Cookware", ...]
+
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InStoreTrendExample(Base):
+    """Pivot — which catalogue items exemplify which trend."""
+    __tablename__ = "instore_trend_examples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trend_id: Mapped[int] = mapped_column(ForeignKey("instore_trends.id"), nullable=False)
+    item_id: Mapped[int] = mapped_column(ForeignKey("instore_catalogue_items.id"), nullable=False)
+    relevance_score: Mapped[float] = mapped_column(Float, default=1.0)
+    is_hero: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    __table_args__ = (
+        UniqueConstraint("trend_id", "item_id"),
+    )

@@ -128,6 +128,9 @@ def reclassify_catalogue_item(item_id: int):
         item.category = result.get("category")
         item.subcategory = result.get("subcategory")
         item.product_segment = result.get("product_segment")
+        # Taxonomy is part of the embedding text — refresh it so trend
+        # clustering reflects the new classification.
+        item.embedding = _build_item_embedding(item)
         item.updated_at = datetime.utcnow()
         db.commit()
         return {"status": "done", "item_id": item_id,
@@ -137,6 +140,72 @@ def reclassify_catalogue_item(item_id: int):
         db.rollback()
         log.warning("reclassify_catalogue_item_failed", item_id=item_id, error=str(exc))
         return {"status": "error", "item_id": item_id, "error": str(exc)}
+    finally:
+        db.close()
+
+
+def _build_item_embedding(item: InStoreCatalogueItem) -> list[float] | None:
+    """Compute the 1536-dim keyword embedding for an in-store item from its
+    text attributes. Same shape as the Online Products embedding so both can
+    feed the trend engine."""
+    from analysis.embeddings import EmbeddingGenerator
+    parts: list[str] = []
+    if item.product_name:
+        parts.append(item.product_name)
+    if item.category:
+        parts.append(item.category)
+    if item.subcategory:
+        parts.append(item.subcategory)
+    if item.product_segment:
+        parts.append(item.product_segment)
+    for attr in ("colours", "materials", "patterns", "style_tags"):
+        vals = getattr(item, attr, None) or []
+        if vals:
+            parts.append(" ".join(vals))
+    text = " | ".join(p for p in parts if p)
+    if not text.strip():
+        return None
+    return EmbeddingGenerator()._keyword_embedding(text)
+
+
+@app.task(queue="aldi", rate_limit="600/m")
+def embed_catalogue_item(item_id: int):
+    """Compute and store the keyword embedding for one InStoreCatalogueItem."""
+    db = Session()
+    try:
+        item = db.get(InStoreCatalogueItem, item_id)
+        if not item:
+            return {"status": "missing"}
+        if item.embedding is not None:
+            return {"status": "skipped"}
+        emb = _build_item_embedding(item)
+        if emb is None:
+            return {"status": "empty"}
+        item.embedding = emb
+        item.updated_at = datetime.utcnow()
+        db.commit()
+        return {"status": "done", "item_id": item_id}
+    except Exception as exc:
+        db.rollback()
+        log.warning("embed_catalogue_item_failed", item_id=item_id, error=str(exc))
+        return {"status": "error", "error": str(exc)}
+    finally:
+        db.close()
+
+
+@app.task(queue="aldi")
+def backfill_catalogue_embeddings(force: bool = False):
+    """Fan out embed_catalogue_item for every item that needs an embedding."""
+    db = Session()
+    try:
+        q = select(InStoreCatalogueItem.id)
+        if not force:
+            q = q.where(InStoreCatalogueItem.embedding.is_(None))
+        ids = [row[0] for row in db.execute(q).all()]
+        for iid in ids:
+            embed_catalogue_item.delay(iid)
+        log.info("backfill_catalogue_embeddings_queued", count=len(ids), force=force)
+        return {"queued": len(ids), "force": force}
     finally:
         db.close()
 
@@ -254,6 +323,9 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
                 style_tags=entry.get("style_tags") or [],
                 confidence=entry.get("confidence"),
             )
+            # Compute embedding inline for new uploads — saves a separate
+            # backfill pass for everything going forward.
+            item.embedding = _build_item_embedding(item)
             db.add(item)
 
         image.item_count = len(detected)

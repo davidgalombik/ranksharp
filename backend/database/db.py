@@ -147,6 +147,10 @@ async def init_db():
              _idx("ix_catalogue_items_subcategory")),
             ("CREATE INDEX IF NOT EXISTS ix_catalogue_items_product_segment ON instore_catalogue_items (product_segment)",
              _idx("ix_catalogue_items_product_segment")),
+            # In-store trend analysis: embeddings on catalogue items + the
+            # report/trend/example tables that mirror Online Products' shape.
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS embedding vector(1536)",
+             _col("instore_catalogue_items", "embedding")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

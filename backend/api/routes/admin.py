@@ -118,6 +118,26 @@ async def purge_analysis_queue(
     }
 
 
+@router.post("/backfill-instore-embeddings")
+async def trigger_instore_embedding_backfill(
+    force: bool = Query(False, description="If true, recompute embedding even when one is already set"),
+    _: bool = Depends(_require_admin),
+):
+    """One-shot Celery task: compute the 1536-dim keyword embedding for every
+    InStoreCatalogueItem (or only those with NULL embedding by default).
+    Required before InStoreTrendEngine can cluster — items with NULL embedding
+    are excluded from the trend run."""
+    from tasks.catalogue_tasks import backfill_catalogue_embeddings
+    task = backfill_catalogue_embeddings.delay(force=force)
+    return {
+        "task_id": task.id,
+        "force": force,
+        "note": ("Embedding backfill dispatched. Watch dynamic-reprieve logs for "
+                 "embed_catalogue_item completions. Items already embedded are "
+                 "skipped unless force=true."),
+    }
+
+
 @router.post("/backfill-instore-taxonomy")
 async def trigger_instore_taxonomy_backfill(
     force: bool = Query(False, description="If true, re-classify every item even if already fully classified"),

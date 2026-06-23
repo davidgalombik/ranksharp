@@ -223,6 +223,36 @@ def regenerate_fragrance_trend_analysis_task(self):
     asyncio.run(_run_fragrance_trend_analysis(self))
 
 
+@app.task(bind=True, queue="reports")
+def run_instore_trend_analysis_task(self):
+    """Run the in-store catalogue trend clustering + report generation."""
+    asyncio.run(_run_instore_trend_analysis(self))
+
+
+@app.task(bind=True, queue="reports")
+def regenerate_instore_trend_analysis_task(self):
+    """Append a new generation to the current in-store trend report (Try Again)."""
+    asyncio.run(_run_instore_trend_analysis(self))
+
+
+async def _run_instore_trend_analysis(task):
+    from database.db import AsyncSessionLocal, async_engine
+    from analysis.instore_trend_engine import InStoreTrendEngine
+
+    await async_engine.dispose()
+
+    async with AsyncSessionLocal() as session:
+        engine_instance = InStoreTrendEngine(session, task=task)
+        report = await engine_instance.regenerate_analysis()
+        if report:
+            log.info(
+                "instore_trend_analysis_complete",
+                report_id=report.id,
+                generation_count=report.generation_count,
+                trends=len(report.trend_ids),
+            )
+
+
 async def _run_fragrance_trend_analysis(task):
     from database.db import AsyncSessionLocal, async_engine
     from analysis.fragrance_trend_engine import FragranceTrendEngine
