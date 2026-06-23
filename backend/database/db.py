@@ -187,6 +187,17 @@ async def init_db():
              "      AND attname='embedding') - 4) = 1024"),
             ("ALTER TABLE instore_catalogue_items ADD COLUMN embedding vector(1024)",
              _col("instore_catalogue_items", "embedding")),
+            # product_attributes.fragrance was originally VARCHAR(200), but
+            # multi-scent products (especially Aldi-style "Pink Jasmine (...);
+            # Fern Grove (...); Rattan and Linen (...)" descriptions) blow
+            # past 200 chars and raise StringDataRightTruncation, rolling
+            # back the entire analyse_product transaction. Model declares
+            # String(500); widen the live column to match. Guard fires when
+            # already at 500, so this is idempotent.
+            ("ALTER TABLE product_attributes ALTER COLUMN fragrance TYPE VARCHAR(500)",
+             "SELECT 1 FROM information_schema.columns "
+             "WHERE table_name='product_attributes' AND column_name='fragrance' "
+             "AND character_maximum_length >= 500"),
         ]
         for item in migrations:
             if isinstance(item, tuple):
