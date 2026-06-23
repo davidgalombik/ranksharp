@@ -106,7 +106,7 @@ def _find_products_for_trend(db, trend: dict, sample_size: int = 15) -> list[dic
     Fetches the top sample_size*5 by cosine similarity, then randomly samples
     sample_size from that pool so each run returns a different set.
     """
-    from analysis.embeddings import EmbeddingGenerator
+    from analysis.embeddings import embed_text_sync
 
     name = trend.get("name", "")
     colours = trend.get("colours") or []
@@ -127,8 +127,9 @@ def _find_products_for_trend(db, trend: dict, sample_size: int = 15) -> list[dic
     fetch_limit = sample_size * 5  # wide neighbourhood to sample from
 
     try:
-        gen = EmbeddingGenerator()
-        query_vec = gen._keyword_embedding(query_text)
+        query_vec = embed_text_sync(query_text)
+        if query_vec is None:
+            return []
         vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
 
         result = db.execute(text(f"""

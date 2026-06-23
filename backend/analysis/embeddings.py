@@ -1,20 +1,27 @@
 """
 Embedding module.
-Generates a 1536-dim vector for each product to enable semantic similarity
-and cross-retailer clustering.
 
-Uses a deterministic keyword-based pseudo-embedding.
-Replace _keyword_embedding with voyage-3 (Anthropic recommended) when
-real semantic embeddings are needed in production.
+Calls Voyage AI's voyage-3 model to produce 1024-dim semantic embeddings for
+products and in-store catalogue items. Pairs naturally with Claude (Anthropic
+recommends Voyage). Falls back to None if no key is configured — callers must
+handle the None case (downstream similarity queries already filter out NULL
+embeddings).
+
+Cost: voyage-3 is $0.06 per 1M input tokens. At ~100 tokens per product, a
+full backfill of 200k items costs ~$1.20.
 """
-import hashlib
 import numpy as np
 import structlog
 from typing import Optional
 
+from config import settings
+
 log = structlog.get_logger()
 
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = settings.voyage_embedding_dim  # 1024 for voyage-3
+
+# Voyage batch limit — empirically the API accepts up to 128 docs per call.
+VOYAGE_BATCH_SIZE = 128
 
 
 def _coerce_str(v) -> str:
@@ -72,7 +79,70 @@ def _build_embedding_text(
     return " | ".join(p for p in parts if p.strip())
 
 
+def _voyage_client_sync():
+    """Module-level sync Voyage client. Lazy-initialised so that import-time
+    failures (e.g. no API key configured locally) don't break test runs."""
+    import voyageai
+    return voyageai.Client(api_key=settings.voyage_api_key)
+
+
+def _voyage_client_async():
+    """Module-level async Voyage client (for use inside the analyse pipeline)."""
+    import voyageai
+    return voyageai.AsyncClient(api_key=settings.voyage_api_key)
+
+
+def embed_text_sync(text: str) -> Optional[list[float]]:
+    """Sync single-text embedding. Used by Celery tasks (catalogue + backfill).
+    Returns None when no API key is configured or the call fails."""
+    if not settings.voyage_api_key:
+        log.warning("voyage_key_missing")
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        client = _voyage_client_sync()
+        result = client.embed([text], model=settings.voyage_model, input_type="document")
+        return result.embeddings[0]
+    except Exception as exc:
+        log.warning("voyage_embed_sync_failed", error=str(exc), text_preview=text[:80])
+        return None
+
+
+def embed_batch_sync(texts: list[str]) -> list[Optional[list[float]]]:
+    """Sync batched embedding. Returns a list parallel to `texts`, with None
+    in any slot where the input was empty. All non-empty texts are sent in a
+    single Voyage call (up to VOYAGE_BATCH_SIZE)."""
+    if not settings.voyage_api_key:
+        log.warning("voyage_key_missing")
+        return [None] * len(texts)
+
+    # Track which indices have content; only send non-empty ones to Voyage.
+    indices = [i for i, t in enumerate(texts) if (t or "").strip()]
+    if not indices:
+        return [None] * len(texts)
+
+    out: list[Optional[list[float]]] = [None] * len(texts)
+    try:
+        client = _voyage_client_sync()
+        for start in range(0, len(indices), VOYAGE_BATCH_SIZE):
+            chunk_idx = indices[start:start + VOYAGE_BATCH_SIZE]
+            chunk_texts = [texts[i] for i in chunk_idx]
+            result = client.embed(chunk_texts, model=settings.voyage_model,
+                                  input_type="document")
+            for src_idx, emb in zip(chunk_idx, result.embeddings):
+                out[src_idx] = emb
+    except Exception as exc:
+        log.warning("voyage_embed_batch_failed",
+                    error=str(exc), batch_size=len(indices))
+    return out
+
+
 class EmbeddingGenerator:
+    """Async generator used by the analyse_product pipeline. Returns a
+    1024-dim semantic embedding from Voyage."""
+
     async def generate(
         self,
         name: str,
@@ -80,48 +150,22 @@ class EmbeddingGenerator:
         vision_attrs: Optional[dict] = None,
         nlp_attrs: Optional[dict] = None,
     ) -> Optional[list[float]]:
-        """
-        Generate a 1536-dim embedding vector for a product.
-        Uses deterministic keyword hashing — no API calls.
-        """
         text = _build_embedding_text(name, description, vision_attrs, nlp_attrs)
         if not text.strip():
             return None
-        return self._keyword_embedding(text)
-
-    def _keyword_embedding(self, text: str) -> list[float]:
-        """
-        Deterministic pseudo-embedding from text hashing.
-        Suitable for initial development; replace with voyage-3 in production.
-        Produces a 1536-dim float vector that captures coarse semantic similarity.
-        """
-        rng = np.random.RandomState(
-            seed=int(hashlib.md5(text.lower().encode()).hexdigest(), 16) % (2**31)
-        )
-        base = rng.randn(EMBEDDING_DIM).astype(np.float32)
-
-        # Boost dimensions corresponding to key terms found in text
-        text_lower = text.lower()
-        keywords = {
-            "green": 0, "blue": 10, "pink": 20, "white": 30, "black": 40,
-            "beige": 50, "terracotta": 60, "sage": 70, "cream": 80,
-            "ceramic": 100, "linen": 110, "rattan": 120, "wood": 130,
-            "glass": 140, "metal": 150, "bamboo": 160, "cotton": 170,
-            "striped": 200, "floral": 210, "geometric": 220,
-            "minimalist": 300, "coastal": 310, "rustic": 320, "boho": 330,
-            "organiser": 400, "container": 410, "basket": 420, "vase": 430,
-            "candle": 440, "tray": 450, "jar": 460,
-            "kitchen": 500, "living": 510, "bedroom": 520, "bathroom": 530,
-        }
-        for term, dim in keywords.items():
-            if term in text_lower:
-                base[dim] += 2.0
-
-        # Normalise to unit length
-        norm = np.linalg.norm(base)
-        if norm > 0:
-            base = base / norm
-        return base.tolist()
+        if not settings.voyage_api_key:
+            log.warning("voyage_key_missing")
+            return None
+        try:
+            client = _voyage_client_async()
+            result = await client.embed(
+                [text], model=settings.voyage_model, input_type="document",
+            )
+            return result.embeddings[0]
+        except Exception as exc:
+            log.warning("voyage_embed_async_failed",
+                        error=str(exc), text_preview=text[:80])
+            return None
 
 
 async def cosine_similarity(a: list[float], b: list[float]) -> float:

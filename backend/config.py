@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = ""
 
+    # Voyage AI (for semantic embeddings — recommended by Anthropic).
+    # Get your key at https://www.voyageai.com/
+    voyage_api_key: str = ""
+    # voyage-3: 1024-dim, $0.06/M tokens, recommended general-purpose.
+    voyage_model: str = "voyage-3"
+    voyage_embedding_dim: int = 1024
+
     # Etsy
     etsy_api_key: str = ""
     etsy_keystring: str = ""

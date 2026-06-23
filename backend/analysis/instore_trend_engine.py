@@ -498,9 +498,9 @@ class InStoreTrendEngine:
     def _build_trend_search_embedding(self, td: dict) -> Optional[np.ndarray]:
         """Build an L2-normalised search vector from the trend's dominant
         attributes (name + dominant colours/materials/patterns/styles/taxonomy).
-        Using the hash-based EmbeddingGenerator means the boosted keyword
-        dimensions line up with how online products were embedded."""
-        from analysis.embeddings import EmbeddingGenerator
+        Calls Voyage's sync embed — same model used to embed online products,
+        so cosine distance is meaningful across the two."""
+        from analysis.embeddings import embed_text_sync
         parts: list[str] = []
         if td.get("name"):
             parts.append(td["name"])
@@ -512,7 +512,10 @@ class InStoreTrendEngine:
         text = " | ".join(p for p in parts if p)
         if not text.strip():
             return None
-        emb = np.array(EmbeddingGenerator()._keyword_embedding(text), dtype=np.float32)
+        raw = embed_text_sync(text)
+        if raw is None:
+            return None
+        emb = np.array(raw, dtype=np.float32)
         norm = np.linalg.norm(emb)
         if norm == 0:
             return None

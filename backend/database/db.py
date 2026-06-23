@@ -164,6 +164,29 @@ async def init_db():
             ("CREATE INDEX IF NOT EXISTS ix_instore_trend_rec_trend "
              "ON instore_trend_recommendations (trend_id)",
              _idx("ix_instore_trend_rec_trend")),
+            # Upgrade from 1536-dim placeholder embeddings to 1024-dim
+            # voyage-3 semantic embeddings. Drop + re-add the columns
+            # (existing values were random and useless). Guard fires when
+            # the column type is already vector(1024), so the migration is
+            # idempotent across deploys.
+            ("ALTER TABLE product_attributes DROP COLUMN IF EXISTS embedding",
+             "SELECT 1 FROM information_schema.columns "
+             "WHERE table_name='product_attributes' AND column_name='embedding' "
+             "AND udt_name='vector' "
+             "AND ((SELECT atttypmod FROM pg_attribute "
+             "      WHERE attrelid='product_attributes'::regclass "
+             "      AND attname='embedding') - 4) = 1024"),
+            ("ALTER TABLE product_attributes ADD COLUMN embedding vector(1024)",
+             _col("product_attributes", "embedding")),
+            ("ALTER TABLE instore_catalogue_items DROP COLUMN IF EXISTS embedding",
+             "SELECT 1 FROM information_schema.columns "
+             "WHERE table_name='instore_catalogue_items' AND column_name='embedding' "
+             "AND udt_name='vector' "
+             "AND ((SELECT atttypmod FROM pg_attribute "
+             "      WHERE attrelid='instore_catalogue_items'::regclass "
+             "      AND attname='embedding') - 4) = 1024"),
+            ("ALTER TABLE instore_catalogue_items ADD COLUMN embedding vector(1024)",
+             _col("instore_catalogue_items", "embedding")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

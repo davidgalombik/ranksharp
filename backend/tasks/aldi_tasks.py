@@ -235,7 +235,7 @@ def _find_similar_products(session, upload: AldiUpload, limit: int = 125) -> lis
     within the relevant similarity zone.  generate_ideas then samples 20 from
     the returned pool for further variety.
     """
-    from analysis.embeddings import EmbeddingGenerator
+    from analysis.embeddings import embed_text_sync
 
     query_text = " | ".join(filter(None, [
         " ".join(upload.themes or []),
@@ -250,8 +250,9 @@ def _find_similar_products(session, upload: AldiUpload, limit: int = 125) -> lis
     if not query_text.strip():
         return []
 
-    gen = EmbeddingGenerator()
-    query_vec = gen._keyword_embedding(query_text)
+    query_vec = embed_text_sync(query_text)
+    if query_vec is None:
+        return []
     vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
     fetch_limit = limit * 3  # fetch a wide neighbourhood, then sample
 
@@ -370,7 +371,7 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
     so every call (including each Try Again regeneration) returns a different set
     of products from within the relevant similarity neighbourhood.
     """
-    from analysis.embeddings import EmbeddingGenerator
+    from analysis.embeddings import embed_text_sync
 
     query_text = " | ".join(filter(None, [
         " ".join(sess_obj.themes or []),
@@ -385,8 +386,9 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
     if not query_text.strip():
         return []
 
-    gen = EmbeddingGenerator()
-    query_vec = gen._keyword_embedding(query_text)
+    query_vec = embed_text_sync(query_text)
+    if query_vec is None:
+        return []
     vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
     fetch_limit = limit * 3  # fetch a wide neighbourhood, then sample
 

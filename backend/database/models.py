@@ -152,8 +152,9 @@ class ProductAttributes(Base):
     room: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     function_tags: Mapped[list] = mapped_column(JSON, default=list)
 
-    # Embedding (1536-dim for cross-retailer similarity matching)
-    embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
+    # Embedding (1024-dim semantic embedding from Voyage AI's voyage-3).
+    # Powers cross-retailer similarity matching + in-store trend matching.
+    embedding: Mapped[Optional[list]] = mapped_column(Vector(1024), nullable=True)
 
     # Confidence scores
     vision_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -528,9 +529,9 @@ class InStoreCatalogueItem(Base):
     subcategory = mapped_column(String(500), nullable=True, index=True)
     product_segment = mapped_column(String(500), nullable=True, index=True)
     prominence = mapped_column(String(20), nullable=True, index=True)  # hero | main | peripheral | background
-    # 1536-dim keyword embedding (same shape as ProductAttributes.embedding)
-    # — drives clustering in InStoreTrendEngine.
-    embedding = mapped_column(Vector(1536), nullable=True)
+    # 1024-dim voyage-3 semantic embedding (same shape as
+    # ProductAttributes.embedding) — drives clustering in InStoreTrendEngine.
+    embedding = mapped_column(Vector(1024), nullable=True)
     bbox = mapped_column(JSON, nullable=True)                          # [x, y, w, h] normalized 0..1
     cropped_file_path = mapped_column(String, nullable=True)           # disk path to cropped JPEG
     colours = mapped_column(JSON, nullable=True)

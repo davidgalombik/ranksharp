@@ -29,6 +29,7 @@ playwright-stealth==1.0.6
 
 # AI / Claude
 anthropic==0.40.0
+voyageai==0.3.2
 numpy==2.2.0
 scikit-learn==1.5.2
 

@@ -138,6 +138,32 @@ async def trigger_instore_embedding_backfill(
     }
 
 
+@router.post("/backfill-voyage-embeddings")
+async def trigger_voyage_backfill(
+    force: bool = Query(False, description="If true, recompute even when embedding already set"),
+    _: bool = Depends(_require_admin),
+):
+    """One-shot backfill of voyage-3 embeddings across both online products
+    and in-store catalogue items. Dispatches two Celery tasks (one per table)
+    that batch text into 128-doc Voyage calls. Required after the migration
+    from the placeholder hash-based embedding scheme to voyage-3."""
+    from tasks.analysis_tasks import backfill_product_embeddings
+    from tasks.catalogue_tasks import backfill_catalogue_embeddings
+    products_task = backfill_product_embeddings.apply_async(
+        args=[force], queue="analysis")
+    catalogue_task = backfill_catalogue_embeddings.apply_async(
+        args=[force], queue="aldi")
+    return {
+        "products_task_id": products_task.id,
+        "catalogue_task_id": catalogue_task.id,
+        "force": force,
+        "note": ("Voyage embedding backfill dispatched. Watch the worker logs "
+                 "for 'backfill_product_embeddings_progress' (analysis queue) "
+                 "and 'backfill_catalogue_embeddings_progress' (aldi queue). "
+                 "Cost estimate: ~$1-2 total for a fresh repo via voyage-3."),
+    }
+
+
 @router.post("/backfill-instore-recommendations")
 async def trigger_instore_recommendations_backfill(
     _: bool = Depends(_require_admin),

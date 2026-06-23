@@ -145,10 +145,10 @@ def reclassify_catalogue_item(item_id: int):
 
 
 def _build_item_embedding(item: InStoreCatalogueItem) -> list[float] | None:
-    """Compute the 1536-dim keyword embedding for an in-store item from its
+    """Compute the 1024-dim voyage-3 embedding for an in-store item from its
     text attributes. Same shape as the Online Products embedding so both can
     feed the trend engine."""
-    from analysis.embeddings import EmbeddingGenerator
+    from analysis.embeddings import embed_text_sync
     parts: list[str] = []
     if item.product_name:
         parts.append(item.product_name)
@@ -165,7 +165,7 @@ def _build_item_embedding(item: InStoreCatalogueItem) -> list[float] | None:
     text = " | ".join(p for p in parts if p)
     if not text.strip():
         return None
-    return EmbeddingGenerator()._keyword_embedding(text)
+    return embed_text_sync(text)
 
 
 @app.task(queue="aldi", rate_limit="600/m")
@@ -195,19 +195,56 @@ def embed_catalogue_item(item_id: int):
 
 @app.task(queue="aldi")
 def backfill_catalogue_embeddings(force: bool = False):
-    """Fan out embed_catalogue_item for every item that needs an embedding."""
+    """Walk every in-store catalogue item that needs an embedding, batch
+    them to Voyage 128 at a time, and write back. Far cheaper + faster than
+    fanning out one Celery task per item (one Voyage API call per 128 items
+    vs one per item)."""
+    from analysis.embeddings import embed_batch_sync, VOYAGE_BATCH_SIZE
     db = Session()
     try:
-        q = select(InStoreCatalogueItem.id)
+        q = select(InStoreCatalogueItem)
         if not force:
             q = q.where(InStoreCatalogueItem.embedding.is_(None))
-        ids = [row[0] for row in db.execute(q).all()]
-        for iid in ids:
-            embed_catalogue_item.delay(iid)
-        log.info("backfill_catalogue_embeddings_queued", count=len(ids), force=force)
-        return {"queued": len(ids), "force": force}
+        items = list(db.execute(q).scalars().all())
+        log.info("backfill_catalogue_embeddings_start",
+                 count=len(items), force=force)
+        done = 0
+        for start in range(0, len(items), VOYAGE_BATCH_SIZE):
+            batch = items[start:start + VOYAGE_BATCH_SIZE]
+            texts = [_build_item_text(it) for it in batch]
+            embeddings = embed_batch_sync(texts)
+            for it, emb in zip(batch, embeddings):
+                if emb is not None:
+                    it.embedding = emb
+                    it.updated_at = datetime.utcnow()
+                    done += 1
+            db.commit()
+            log.info("backfill_catalogue_embeddings_progress",
+                     done=done, total=len(items))
+        log.info("backfill_catalogue_embeddings_done",
+                 done=done, total=len(items))
+        return {"embedded": done, "total": len(items), "force": force}
     finally:
         db.close()
+
+
+def _build_item_text(item: InStoreCatalogueItem) -> str:
+    """Helper — same text shape used by _build_item_embedding, exposed so
+    the batched backfill can build it without importing the sync wrapper."""
+    parts: list[str] = []
+    if item.product_name:
+        parts.append(item.product_name)
+    if item.category:
+        parts.append(item.category)
+    if item.subcategory:
+        parts.append(item.subcategory)
+    if item.product_segment:
+        parts.append(item.product_segment)
+    for attr in ("colours", "materials", "patterns", "style_tags"):
+        vals = getattr(item, attr, None) or []
+        if vals:
+            parts.append(" ".join(vals))
+    return " | ".join(p for p in parts if p)
 
 
 @app.task(queue="aldi")

@@ -253,6 +253,56 @@ async def _run_instore_trend_analysis(task):
             )
 
 
+@app.task(queue="analysis")
+def backfill_product_embeddings(force: bool = False):
+    """Walk every analysed online Product and refresh its embedding via Voyage,
+    in batches of 128. One Voyage API call per batch. Use this after switching
+    from the placeholder keyword-embedding scheme to voyage-3."""
+    from analysis.embeddings import embed_batch_sync, _build_embedding_text, VOYAGE_BATCH_SIZE
+    session = _get_session()
+    try:
+        q = (session.query(Product, ProductAttributes)
+             .join(ProductAttributes, ProductAttributes.product_id == Product.id)
+             .filter(Product.is_active == True))
+        if not force:
+            q = q.filter(ProductAttributes.embedding.is_(None))
+        rows = q.all()
+        log.info("backfill_product_embeddings_start",
+                 count=len(rows), force=force)
+        done = 0
+        for start in range(0, len(rows), VOYAGE_BATCH_SIZE):
+            batch = rows[start:start + VOYAGE_BATCH_SIZE]
+            texts = [
+                _build_embedding_text(
+                    p.name, p.description or "",
+                    vision_attrs={
+                        "colours": pa.colours, "style_tags": pa.style_tags,
+                        "shape": pa.shape, "finish": pa.finish,
+                    },
+                    nlp_attrs={
+                        "materials": pa.materials, "patterns": pa.patterns,
+                        "function_tags": pa.function_tags,
+                        "fragrance": pa.fragrance, "room": pa.room,
+                    },
+                )
+                for p, pa in batch
+            ]
+            embeddings = embed_batch_sync(texts)
+            for (p, pa), emb in zip(batch, embeddings):
+                if emb is not None:
+                    pa.embedding = emb
+                    pa.updated_at = datetime.utcnow()
+                    done += 1
+            session.commit()
+            log.info("backfill_product_embeddings_progress",
+                     done=done, total=len(rows))
+        log.info("backfill_product_embeddings_done",
+                 done=done, total=len(rows))
+        return {"embedded": done, "total": len(rows), "force": force}
+    finally:
+        session.close()
+
+
 @app.task(queue="reports")
 def backfill_instore_recommendations_task():
     """For every trend in the latest InStoreTrendReport, compute online product
@@ -269,7 +319,7 @@ async def _backfill_instore_recommendations():
     from analysis.instore_trend_engine import (
         RECOMMENDATION_THRESHOLD, RECOMMENDATIONS_PER_TREND,
     )
-    from analysis.embeddings import EmbeddingGenerator
+    from analysis.embeddings import embed_text_sync
     from sqlalchemy import select, desc, delete, text as sa_text
     import numpy as np
 
@@ -286,7 +336,6 @@ async def _backfill_instore_recommendations():
             select(InStoreTrend).where(InStoreTrend.id.in_(report.trend_ids))
         )).scalars().all()
 
-        emb_gen = EmbeddingGenerator()
         total_recs = 0
         for trend in trends:
             await session.execute(
@@ -307,7 +356,10 @@ async def _backfill_instore_recommendations():
             text = " | ".join(p for p in parts if p)
             if not text.strip():
                 continue
-            emb = np.array(emb_gen._keyword_embedding(text), dtype=np.float32)
+            raw = embed_text_sync(text)
+            if raw is None:
+                continue
+            emb = np.array(raw, dtype=np.float32)
             norm = np.linalg.norm(emb)
             if norm == 0:
                 continue
