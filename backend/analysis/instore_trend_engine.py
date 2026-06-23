@@ -35,9 +35,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database.models import (
     InStoreCatalogueItem, InStoreCatalogueImage,
-    InStoreTrend, InStoreTrendExample, InStoreTrendReport,
+    InStoreTrend, InStoreTrendExample, InStoreTrendRecommendation, InStoreTrendReport,
+    Product, ProductAttributes, ScrapeStatus,
     TrendStatus,
 )
+
+# Minimum cosine similarity required to recommend an online product for a trend.
+# Below this the match feels weak / unrelated.
+RECOMMENDATION_THRESHOLD = 0.7
+# Max number of online product recommendations stored per trend.
+RECOMMENDATIONS_PER_TREND = 10
 
 log = structlog.get_logger()
 
@@ -167,6 +174,10 @@ class InStoreTrendEngine:
         for trend, td in new_trends:
             await self._create_examples(trend, td, clusters, items_by_id, used_ids)
 
+        self._progress(90, "Finding matching online products…")
+        for trend, td in new_trends:
+            await self._create_recommendations(trend, td, clusters)
+
         self._progress(95, "Writing report…")
 
         # Upsert the report
@@ -238,16 +249,28 @@ class InStoreTrendEngine:
         labels = kmeans.fit_predict(embeddings)
 
         by_id = {it["item"].id: it for it in items}
-        clusters_by_label: dict[int, list[dict]] = defaultdict(list)
+        # Group items + their embeddings by cluster label so we can compute centroids.
+        items_by_label: dict[int, list[dict]] = defaultdict(list)
+        embs_by_label: dict[int, list[np.ndarray]] = defaultdict(list)
         for idx, label in enumerate(labels):
             iid = item_ids[idx]
-            clusters_by_label[label].append(by_id[iid])
+            items_by_label[label].append(by_id[iid])
+            embs_by_label[label].append(embeddings[idx])
 
         valid = []
-        for cluster_items in clusters_by_label.values():
+        for label, cluster_items in items_by_label.items():
             if len(cluster_items) < self.min_cluster_size:
                 continue
-            valid.append(self._summarise_cluster(cluster_items))
+            summary = self._summarise_cluster(cluster_items)
+            # Cluster centroid as an L2-normalised mean — used downstream to
+            # find similar online products via cosine distance.
+            cluster_embs = np.array(embs_by_label[label], dtype=np.float32)
+            centroid = cluster_embs.mean(axis=0)
+            norm = np.linalg.norm(centroid)
+            if norm > 0:
+                centroid = centroid / norm
+            summary["centroid"] = centroid.tolist()
+            valid.append(summary)
         valid.sort(key=lambda c: c["item_count"], reverse=True)
         return valid[:20]
 
@@ -417,6 +440,60 @@ class InStoreTrendEngine:
             ))
             item_count += 1
         trend.item_count = max(item_count, td.get("item_count", item_count))
+
+    # ── Online product recommendations via embedding similarity ───────────
+
+    async def _create_recommendations(
+        self,
+        trend: InStoreTrend,
+        td: dict,
+        clusters: list[dict],
+    ):
+        """For each trend, find the top online Products (across all retailers)
+        whose embedding is most similar to the trend's centroid. The centroid
+        is the mean of the supporting clusters' centroids."""
+        supporting = td.get("supporting_cluster_indices") or []
+        centroids = []
+        for idx in supporting:
+            if 0 <= idx < len(clusters) and clusters[idx].get("centroid"):
+                centroids.append(np.array(clusters[idx]["centroid"], dtype=np.float32))
+        if not centroids:
+            return
+
+        trend_centroid = np.mean(centroids, axis=0)
+        norm = np.linalg.norm(trend_centroid)
+        if norm == 0:
+            return
+        trend_centroid = trend_centroid / norm
+
+        # pgvector cosine distance (`<=>`) ranges [0, 2]; similarity = 1 - distance.
+        # Filter to ACTIVE, analysed products with a non-null embedding.
+        max_distance = 1.0 - RECOMMENDATION_THRESHOLD
+        vec_literal = "[" + ",".join(f"{x:.6f}" for x in trend_centroid.tolist()) + "]"
+        from sqlalchemy import text as sa_text
+        result = await self.db.execute(
+            sa_text(
+                "SELECT p.id, (pa.embedding <=> CAST(:vec AS vector)) AS distance "
+                "FROM products p "
+                "JOIN product_attributes pa ON pa.product_id = p.id "
+                "WHERE p.is_active = TRUE "
+                "  AND pa.embedding IS NOT NULL "
+                "  AND (pa.embedding <=> CAST(:vec AS vector)) <= :max_dist "
+                "ORDER BY distance ASC "
+                "LIMIT :limit"
+            ),
+            {"vec": vec_literal, "max_dist": max_distance,
+             "limit": RECOMMENDATIONS_PER_TREND},
+        )
+        rows = result.all()
+        for rank, (product_id, distance) in enumerate(rows):
+            similarity = max(0.0, 1.0 - float(distance))
+            self.db.add(InStoreTrendRecommendation(
+                trend_id=trend.id,
+                product_id=product_id,
+                similarity=similarity,
+                rank=rank,
+            ))
 
     # ── Report metadata via Claude ────────────────────────────────────────
 

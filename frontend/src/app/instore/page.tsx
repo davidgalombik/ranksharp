@@ -18,6 +18,17 @@ interface InStoreTrendExample {
   retailer: string | null;
 }
 
+interface InStoreTrendRecommendation {
+  product_id: number;
+  name: string;
+  retailer_name: string | null;
+  url: string;
+  price: number | null;
+  currency: string;
+  primary_image_url: string | null;
+  similarity: number;
+}
+
 interface InStoreTrend {
   id: number;
   name: string;
@@ -33,7 +44,10 @@ interface InStoreTrend {
   dominant_styles: string[];
   dominant_taxonomy: string[];
   examples: InStoreTrendExample[];
+  recommendations: InStoreTrendRecommendation[];
 }
+
+const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
 
 interface InStoreReport {
   id: number;
@@ -150,12 +164,61 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
         )}
 
         {trend.dominant_taxonomy.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-auto pt-1">
+          <div className="flex flex-wrap gap-1">
             {trend.dominant_taxonomy.slice(0, 3).map((t) => (
               <span key={t} className="text-[10px] text-stone-500 bg-stone-50 px-1.5 py-0.5 rounded">
                 {t}
               </span>
             ))}
+          </div>
+        )}
+
+        {/* Matching online products */}
+        {trend.recommendations && trend.recommendations.length > 0 && (
+          <div className="mt-auto pt-3 border-t border-stone-100">
+            <p className="text-[11px] font-medium text-stone-500 uppercase tracking-wider mb-2">
+              Matching online products · {trend.recommendations.length}
+            </p>
+            <div className="grid grid-cols-3 gap-1.5">
+              {trend.recommendations.slice(0, 6).map((r) => {
+                const symbol = CURRENCIES[r.currency] || r.currency;
+                return (
+                  <a
+                    key={r.product_id}
+                    href={r.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group block rounded-md overflow-hidden border border-stone-100 hover:border-stone-300 hover:shadow-sm transition-all bg-white"
+                    title={`${r.name}${r.retailer_name ? " · " + r.retailer_name : ""} · ${(r.similarity * 100).toFixed(0)}% match`}
+                  >
+                    <div className="aspect-square bg-stone-50 overflow-hidden relative">
+                      {r.primary_image_url ? (
+                        <img
+                          src={r.primary_image_url}
+                          alt={r.name}
+                          loading="lazy"
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-stone-300 text-xl">⌂</div>
+                      )}
+                      <span className="absolute bottom-0.5 right-0.5 text-[9px] font-semibold bg-white/85 text-stone-700 px-1 rounded">
+                        {(r.similarity * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <div className="px-1.5 py-1">
+                      <p className="text-[10px] text-stone-400 truncate">{r.retailer_name || "—"}</p>
+                      <p className="text-[10px] text-stone-700 truncate leading-tight">{r.name}</p>
+                      {r.price != null && (
+                        <p className="text-[10px] font-semibold text-stone-800">
+                          {symbol}{r.price.toFixed(2)}
+                        </p>
+                      )}
+                    </div>
+                  </a>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>

@@ -604,3 +604,21 @@ class InStoreTrendExample(Base):
     __table_args__ = (
         UniqueConstraint("trend_id", "item_id"),
     )
+
+
+class InStoreTrendRecommendation(Base):
+    """Online Products matched to an in-store trend via embedding similarity.
+    Lets the in-store trend card surface concrete buy-able products from the
+    Online Products database that share the trend's visual/material DNA."""
+    __tablename__ = "instore_trend_recommendations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trend_id: Mapped[int] = mapped_column(ForeignKey("instore_trends.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    similarity: Mapped[float] = mapped_column(Float, nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("trend_id", "product_id"),
+        Index("ix_instore_trend_rec_trend", "trend_id"),
+    )

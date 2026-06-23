@@ -138,6 +138,24 @@ async def trigger_instore_embedding_backfill(
     }
 
 
+@router.post("/backfill-instore-recommendations")
+async def trigger_instore_recommendations_backfill(
+    _: bool = Depends(_require_admin),
+):
+    """For every trend in the latest in-store trend report, compute the top
+    matching online products (cosine similarity over embeddings, >= 0.7).
+    Replaces any existing recommendations. Use this once after deploying the
+    feature, or after adding new online products to refresh the matches."""
+    from tasks.analysis_tasks import backfill_instore_recommendations_task
+    task = backfill_instore_recommendations_task.apply_async(queue="reports")
+    return {
+        "task_id": task.id,
+        "note": ("Recommendation backfill dispatched. Walks every trend in the "
+                 "latest report and finds the top 10 online products with "
+                 "cosine similarity >= 0.7. Watch the 'reports' worker logs."),
+    }
+
+
 @router.post("/backfill-instore-taxonomy")
 async def trigger_instore_taxonomy_backfill(
     force: bool = Query(False, description="If true, re-classify every item even if already fully classified"),

@@ -10,8 +10,10 @@ from sqlalchemy import select, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import (
-    InStoreTrendReport, InStoreTrend, InStoreTrendExample, TrendStatus,
+    InStoreTrendReport, InStoreTrend, InStoreTrendExample,
+    InStoreTrendRecommendation, TrendStatus,
     InStoreCatalogueItem, InStoreCatalogueImage,
+    Product, Retailer,
 )
 from pydantic import BaseModel
 from datetime import datetime
@@ -31,6 +33,17 @@ class InStoreTrendExampleItemOut(BaseModel):
     retailer: Optional[str] = None
 
 
+class InStoreTrendRecommendationOut(BaseModel):
+    product_id: int
+    name: str
+    retailer_name: Optional[str] = None
+    url: str
+    price: Optional[float] = None
+    currency: str = "USD"
+    primary_image_url: Optional[str] = None
+    similarity: float
+
+
 class InStoreTrendOut(BaseModel):
     id: int
     name: str
@@ -46,6 +59,7 @@ class InStoreTrendOut(BaseModel):
     dominant_styles: list[str]
     dominant_taxonomy: list[str]
     examples: list[InStoreTrendExampleItemOut] = []
+    recommendations: list[InStoreTrendRecommendationOut] = []
 
 
 class InStoreReportOut(BaseModel):
@@ -111,7 +125,8 @@ async def regenerate_report():
 
 @router.delete("/clear")
 async def clear_all(db: AsyncSession = Depends(get_db)):
-    """Delete every in-store trend report, trend, and example row."""
+    """Delete every in-store trend report, trend, example, and recommendation."""
+    await db.execute(delete(InStoreTrendRecommendation))
     await db.execute(delete(InStoreTrendExample))
     await db.execute(delete(InStoreTrend))
     await db.execute(delete(InStoreTrendReport))
@@ -180,6 +195,29 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
             )
         )
 
+    # Bulk-fetch recommendations + their products + retailer name, sorted by rank.
+    rec_result = await db.execute(
+        select(InStoreTrendRecommendation, Product, Retailer)
+        .join(Product, InStoreTrendRecommendation.product_id == Product.id)
+        .join(Retailer, Product.retailer_id == Retailer.id)
+        .where(InStoreTrendRecommendation.trend_id.in_(trend_ids))
+        .order_by(InStoreTrendRecommendation.trend_id, InStoreTrendRecommendation.rank)
+    )
+    recs_by_trend: dict[int, list[InStoreTrendRecommendationOut]] = {}
+    for rec, prod, ret in rec_result.all():
+        recs_by_trend.setdefault(rec.trend_id, []).append(
+            InStoreTrendRecommendationOut(
+                product_id=prod.id,
+                name=prod.name,
+                retailer_name=ret.name,
+                url=prod.url,
+                price=prod.price,
+                currency=prod.currency or "USD",
+                primary_image_url=prod.primary_image_url,
+                similarity=rec.similarity,
+            )
+        )
+
     def to_out(t: InStoreTrend) -> InStoreTrendOut:
         return InStoreTrendOut(
             id=t.id, name=t.name, description=t.description, rationale=t.rationale,
@@ -191,6 +229,7 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
             dominant_styles=t.dominant_styles or [],
             dominant_taxonomy=t.dominant_taxonomy or [],
             examples=examples_by_trend.get(t.id, []),
+            recommendations=recs_by_trend.get(t.id, []),
         )
 
     rising = [to_out(t) for t in trends if t.status == TrendStatus.RISING]

@@ -151,6 +151,19 @@ async def init_db():
             # report/trend/example tables that mirror Online Products' shape.
             ("ALTER TABLE instore_catalogue_items ADD COLUMN IF NOT EXISTS embedding vector(1536)",
              _col("instore_catalogue_items", "embedding")),
+            # Online-product recommendations per in-store trend (top-N similar
+            # products from the Products table by cosine similarity).
+            ("CREATE TABLE IF NOT EXISTS instore_trend_recommendations ("
+             "id SERIAL PRIMARY KEY, "
+             "trend_id INTEGER NOT NULL REFERENCES instore_trends(id) ON DELETE CASCADE, "
+             "product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE, "
+             "similarity FLOAT NOT NULL, "
+             "rank INTEGER NOT NULL, "
+             "UNIQUE(trend_id, product_id))",
+             "SELECT 1 FROM information_schema.tables WHERE table_name='instore_trend_recommendations'"),
+            ("CREATE INDEX IF NOT EXISTS ix_instore_trend_rec_trend "
+             "ON instore_trend_recommendations (trend_id)",
+             _idx("ix_instore_trend_rec_trend")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

@@ -253,6 +253,93 @@ async def _run_instore_trend_analysis(task):
             )
 
 
+@app.task(queue="reports")
+def backfill_instore_recommendations_task():
+    """For every trend in the latest InStoreTrendReport, compute online product
+    recommendations using the trend's example items' embeddings as a proxy
+    for the cluster centroid. Idempotent — replaces existing recommendations."""
+    asyncio.run(_backfill_instore_recommendations())
+
+
+async def _backfill_instore_recommendations():
+    from database.db import AsyncSessionLocal, async_engine
+    from database.models import (
+        InStoreTrendReport, InStoreTrend, InStoreTrendExample,
+        InStoreTrendRecommendation, InStoreCatalogueItem,
+    )
+    from analysis.instore_trend_engine import (
+        RECOMMENDATION_THRESHOLD, RECOMMENDATIONS_PER_TREND,
+    )
+    from sqlalchemy import select, desc, delete, text as sa_text
+    import numpy as np
+
+    await async_engine.dispose()
+    async with AsyncSessionLocal() as session:
+        report = (await session.execute(
+            select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
+        )).scalar_one_or_none()
+        if not report or not report.trend_ids:
+            log.warning("backfill_recs_no_report")
+            return {"trends": 0, "recommendations": 0}
+
+        trends = (await session.execute(
+            select(InStoreTrend).where(InStoreTrend.id.in_(report.trend_ids))
+        )).scalars().all()
+
+        total_recs = 0
+        for trend in trends:
+            await session.execute(
+                delete(InStoreTrendRecommendation).where(
+                    InStoreTrendRecommendation.trend_id == trend.id
+                )
+            )
+            ex_rows = (await session.execute(
+                select(InStoreCatalogueItem.embedding)
+                .join(InStoreTrendExample,
+                      InStoreTrendExample.item_id == InStoreCatalogueItem.id)
+                .where(InStoreTrendExample.trend_id == trend.id)
+                .where(InStoreCatalogueItem.embedding.isnot(None))
+            )).all()
+            if not ex_rows:
+                continue
+            embs = np.array([list(r[0]) for r in ex_rows], dtype=np.float32)
+            centroid = embs.mean(axis=0)
+            norm = np.linalg.norm(centroid)
+            if norm == 0:
+                continue
+            centroid = centroid / norm
+
+            max_distance = 1.0 - RECOMMENDATION_THRESHOLD
+            vec_literal = "[" + ",".join(f"{x:.6f}" for x in centroid.tolist()) + "]"
+            result = await session.execute(
+                sa_text(
+                    "SELECT p.id, (pa.embedding <=> CAST(:vec AS vector)) AS distance "
+                    "FROM products p "
+                    "JOIN product_attributes pa ON pa.product_id = p.id "
+                    "WHERE p.is_active = TRUE "
+                    "  AND pa.embedding IS NOT NULL "
+                    "  AND (pa.embedding <=> CAST(:vec AS vector)) <= :max_dist "
+                    "ORDER BY distance ASC "
+                    "LIMIT :limit"
+                ),
+                {"vec": vec_literal, "max_dist": max_distance,
+                 "limit": RECOMMENDATIONS_PER_TREND},
+            )
+            for rank, (product_id, distance) in enumerate(result.all()):
+                similarity = max(0.0, 1.0 - float(distance))
+                session.add(InStoreTrendRecommendation(
+                    trend_id=trend.id,
+                    product_id=product_id,
+                    similarity=similarity,
+                    rank=rank,
+                ))
+                total_recs += 1
+
+        await session.commit()
+        log.info("backfill_recs_done", trends=len(trends), recommendations=total_recs)
+        return {"trends": len(trends), "recommendations": total_recs}
+
+
 async def _run_fragrance_trend_analysis(task):
     from database.db import AsyncSessionLocal, async_engine
     from analysis.fragrance_trend_engine import FragranceTrendEngine
