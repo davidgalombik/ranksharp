@@ -1,7 +1,7 @@
 """Product API routes."""
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, desc, or_, func
+from sqlalchemy import select, desc, or_, func, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Product, ProductAttributes, Retailer
@@ -9,6 +9,36 @@ from pydantic import BaseModel
 from datetime import datetime
 
 router = APIRouter()
+
+# Country bucket -> ISO country codes that fall under it. "EU" is everything
+# not in AU/US/GB so any future European retailer (DE/FR/IT/ES/…) is
+# auto-bucketed under Europe without code changes.
+COUNTRY_BUCKETS: dict[str, list[str]] = {
+    "AU": ["AU"],
+    "US": ["US"],
+    "UK": ["GB"],
+}
+COUNTRY_LABELS: dict[str, str] = {
+    "AU": "Australia",
+    "US": "USA",
+    "UK": "United Kingdom",
+    "EU": "Europe",
+}
+
+
+def country_filter_clause(bucket: Optional[str]):
+    """Build a SQLAlchemy WHERE clause for filtering Retailer rows by country
+    bucket. Returns None when bucket is empty/unknown (caller skips filter)."""
+    if not bucket:
+        return None
+    bucket = bucket.upper()
+    if bucket == "EU":
+        explicit = [c for codes in COUNTRY_BUCKETS.values() for c in codes]
+        return not_(Retailer.country.in_(explicit))
+    codes = COUNTRY_BUCKETS.get(bucket)
+    if not codes:
+        return None
+    return Retailer.country.in_(codes)
 
 
 class ProductOut(BaseModel):
@@ -50,6 +80,7 @@ class ProductPage(BaseModel):
 @router.get("/", response_model=ProductPage)
 async def search_products(
     q: Optional[str] = None,
+    country: Optional[str] = None,
     retailer: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
@@ -83,6 +114,9 @@ async def search_products(
                 Product.description.ilike(f"%{q}%"),
             )
         )
+    country_clause = country_filter_clause(country)
+    if country_clause is not None:
+        stmt = stmt.where(country_clause)
     if retailer:
         stmt = stmt.where(Retailer.slug == retailer)
     if category:
@@ -116,6 +150,8 @@ async def search_products(
     )
     if q:
         count_stmt = count_stmt.where(or_(Product.name.ilike(f"%{q}%"), Product.description.ilike(f"%{q}%")))
+    if country_clause is not None:
+        count_stmt = count_stmt.where(country_clause)
     if retailer:
         count_stmt = count_stmt.where(Retailer.slug == retailer)
     if category:
@@ -161,6 +197,7 @@ def _apply_current_filters(
     stmt,
     *,
     q: Optional[str],
+    country: Optional[str],
     retailer: Optional[str],
     category: Optional[str],
     subcategory: Optional[str],
@@ -182,6 +219,10 @@ def _apply_current_filters(
     exclude = exclude or set()
     if q:
         stmt = stmt.where(or_(Product.name.ilike(f"%{q}%"), Product.description.ilike(f"%{q}%")))
+    if country and "country" not in exclude:
+        country_clause = country_filter_clause(country)
+        if country_clause is not None:
+            stmt = stmt.where(country_clause)
     if retailer and "retailer" not in exclude:
         stmt = stmt.where(Retailer.slug == retailer)
     if category and "category" not in exclude:
@@ -210,6 +251,7 @@ def _apply_current_filters(
 @router.get("/facets", response_model=FacetsOut)
 async def current_product_facets(
     q: Optional[str] = None,
+    country: Optional[str] = None,
     retailer: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
@@ -226,7 +268,7 @@ async def current_product_facets(
     """Count per filter value for the Current Products page, so zero-reach
     options can be hidden in the UI."""
     kwargs = dict(
-        q=q, retailer=retailer, category=category, subcategory=subcategory,
+        q=q, country=country, retailer=retailer, category=category, subcategory=subcategory,
         product_segment=product_segment,
         season=season, room=room,
         min_price=min_price, max_price=max_price,

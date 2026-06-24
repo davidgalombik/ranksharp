@@ -36,6 +36,24 @@ const SEASONS = ["spring", "summer", "autumn", "winter", "all-season"];
 const ROOMS = ["kitchen", "living room", "bedroom", "bathroom", "dining room", "office", "outdoor", "multiple"];
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
 
+// Country bucket -> display label. Mirrors COUNTRY_BUCKETS in
+// backend/api/routes/products.py — "EU" covers any retailer country code
+// not in AU/US/GB.
+const COUNTRY_OPTIONS: Array<{ key: string; label: string }> = [
+  { key: "AU", label: "Australia" },
+  { key: "US", label: "USA" },
+  { key: "UK", label: "United Kingdom" },
+  { key: "EU", label: "Europe" },
+];
+
+function retailerInBucket(retailerCountry: string, bucket: string): boolean {
+  if (bucket === "AU") return retailerCountry === "AU";
+  if (bucket === "US") return retailerCountry === "US";
+  if (bucket === "UK") return retailerCountry === "GB";
+  if (bucket === "EU") return !["AU", "US", "GB"].includes(retailerCountry);
+  return true;
+}
+
 
 function ProductCard({ product }: { product: Product }) {
   const symbol = CURRENCIES[product.currency] || product.currency;
@@ -144,6 +162,7 @@ export default function ProductsPage() {
   // Filters
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [country, setCountry] = useState("");
   const [retailer, setRetailer] = useState("");
   const [category, setCategory] = useState("");
   const [season, setSeason] = useState("");
@@ -153,7 +172,7 @@ export default function ProductsPage() {
   const [bestSellerOnly, setBestSellerOnly] = useState(false);
   const [patentOnly, setPatentOnly] = useState(false);
   const [newOnly, setNewOnly] = useState(false);
-  const [retailers, setRetailers] = useState<{ slug: string; name: string }[]>([]);
+  const [retailers, setRetailers] = useState<{ slug: string; name: string; country: string }[]>([]);
   const [availableCategories, setAvailableCategories] = useState<string[]>([]);
   const [subcategory, setSubcategory] = useState("");
   const [productSegment, setProductSegment] = useState("");
@@ -224,10 +243,17 @@ export default function ProductsPage() {
     setProductSegment("");
   }, [subcategory]);
 
+  // Changing country clears the retailer selection (since the dropdown
+  // narrows to only the country's retailers).
+  useEffect(() => {
+    setRetailer("");
+  }, [country]);
+
   const fetchProducts = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
+    if (country) params.set("country", country);
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
     if (subcategory) params.set("subcategory", subcategory);
@@ -252,11 +278,11 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
+  }, [debouncedSearch, country, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
 
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
+  }, [debouncedSearch, country, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
 
   useEffect(() => {
     fetchProducts();
@@ -267,6 +293,7 @@ export default function ProductsPage() {
   useEffect(() => {
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
+    if (country) params.set("country", country);
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
     if (subcategory) params.set("subcategory", subcategory);
@@ -282,9 +309,9 @@ export default function ProductsPage() {
       .then((r) => r.json())
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
+  }, [debouncedSearch, country, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
 
-  const hasFilters = debouncedSearch || retailer || category || subcategory || productSegment || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
+  const hasFilters = debouncedSearch || country || retailer || category || subcategory || productSegment || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
 
   return (
     <div className="space-y-5">
@@ -310,16 +337,30 @@ export default function ProductsPage() {
             />
           </div>
 
-          {/* Retailer */}
+          {/* Country */}
+          <select
+            value={country}
+            onChange={(e) => setCountry(e.target.value)}
+            className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+          >
+            <option value="">All countries</option>
+            {COUNTRY_OPTIONS.map((c) => (
+              <option key={c.key} value={c.key}>{c.label}</option>
+            ))}
+          </select>
+
+          {/* Retailer — narrows to selected country when set */}
           <select
             value={retailer}
             onChange={(e) => setRetailer(e.target.value)}
             className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
           >
             <option value="">All retailers</option>
-            {retailers.map((r) => (
-              <option key={r.slug} value={r.slug}>{r.name}</option>
-            ))}
+            {retailers
+              .filter((r) => !country || retailerInBucket(r.country, country))
+              .map((r) => (
+                <option key={r.slug} value={r.slug}>{r.name}</option>
+              ))}
           </select>
 
           {/* Category + Subcategory — cascading. When the retailer has a
@@ -492,7 +533,7 @@ export default function ProductsPage() {
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+            onClick={() => { setSearch(""); setCountry(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -537,7 +578,7 @@ export default function ProductsPage() {
             <>
               <p className="font-medium">No products match your filters</p>
               <button
-                onClick={() => { setSearch(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+                onClick={() => { setSearch(""); setCountry(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
                 className="mt-2 text-sm text-stone-600 underline hover:text-stone-900"
               >
                 Clear filters
