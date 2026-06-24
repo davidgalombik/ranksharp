@@ -369,6 +369,7 @@ def _apply_historical_filters(
     stmt,
     *,
     q: Optional[str],
+    country: Optional[str],
     retailer: Optional[str],
     category: Optional[str],
     subcategory: Optional[str],
@@ -389,6 +390,10 @@ def _apply_historical_filters(
     exclude = exclude or set()
     if q:
         stmt = stmt.where(or_(Product.name.ilike(f"%{q}%"), Product.description.ilike(f"%{q}%")))
+    if country and "country" not in exclude:
+        country_clause = country_filter_clause(country)
+        if country_clause is not None:
+            stmt = stmt.where(country_clause)
     if retailer and "retailer" not in exclude:
         stmt = stmt.where(Retailer.slug == retailer)
     if category and "category" not in exclude:
@@ -419,6 +424,7 @@ def _apply_historical_filters(
 @router.get("/historical/facets", response_model=HistoricalFacetsOut)
 async def historical_product_facets(
     q: Optional[str] = None,
+    country: Optional[str] = None,
     retailer: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
@@ -436,7 +442,7 @@ async def historical_product_facets(
     """Count per filter value for the Historical Products page so zero-reach
     options can be hidden in the UI (mirrors the Online Products facets)."""
     kwargs = dict(
-        q=q, retailer=retailer, category=category, subcategory=subcategory,
+        q=q, country=country, retailer=retailer, category=category, subcategory=subcategory,
         product_segment=product_segment, season=season, room=room,
         min_price=min_price, max_price=max_price,
         best_seller=best_seller, has_patent=has_patent, is_new=is_new,
@@ -525,6 +531,7 @@ async def historical_product_facets(
 @router.get("/historical", response_model=ProductPage)
 async def search_historical_products(
     q: Optional[str] = None,
+    country: Optional[str] = None,
     retailer: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
@@ -549,7 +556,7 @@ async def search_historical_products(
     )
     base = _apply_historical_filters(
         base,
-        q=q, retailer=retailer, category=category, subcategory=subcategory,
+        q=q, country=country, retailer=retailer, category=category, subcategory=subcategory,
         product_segment=product_segment, season=season, room=room,
         min_price=min_price, max_price=max_price,
         best_seller=best_seller, has_patent=has_patent, is_new=is_new,
