@@ -164,6 +164,70 @@ async def trigger_voyage_backfill(
     }
 
 
+@router.get("/embeddings-health")
+async def embeddings_health(
+    _: bool = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Quick diagnostic — count products + in-store items by embedding state,
+    plus run a tiny pgvector similarity probe to verify the operator works."""
+    from sqlalchemy import text as sa_text
+
+    counts = {}
+    counts["products_total"] = (await db.execute(sa_text(
+        "SELECT COUNT(*) FROM products WHERE is_active = TRUE"
+    ))).scalar()
+    counts["products_with_attrs"] = (await db.execute(sa_text(
+        "SELECT COUNT(*) FROM products p "
+        "JOIN product_attributes pa ON pa.product_id = p.id "
+        "WHERE p.is_active = TRUE"
+    ))).scalar()
+    counts["products_with_embedding"] = (await db.execute(sa_text(
+        "SELECT COUNT(*) FROM products p "
+        "JOIN product_attributes pa ON pa.product_id = p.id "
+        "WHERE p.is_active = TRUE AND pa.embedding IS NOT NULL"
+    ))).scalar()
+    counts["instore_items_total"] = (await db.execute(sa_text(
+        "SELECT COUNT(*) FROM instore_catalogue_items"
+    ))).scalar()
+    counts["instore_items_with_embedding"] = (await db.execute(sa_text(
+        "SELECT COUNT(*) FROM instore_catalogue_items WHERE embedding IS NOT NULL"
+    ))).scalar()
+
+    # Column dim probe (atttypmod - 4 gives the vector dimension)
+    dim_probe = (await db.execute(sa_text(
+        "SELECT a.attname, (a.atttypmod - 4) AS dim "
+        "FROM pg_attribute a "
+        "JOIN pg_class c ON a.attrelid = c.oid "
+        "WHERE c.relname IN ('product_attributes', 'instore_catalogue_items') "
+        "AND a.attname = 'embedding' AND a.attnum > 0"
+    ))).all()
+
+    # Live pgvector probe: take any product's embedding, do a similarity query
+    probe = None
+    try:
+        sample_emb = (await db.execute(sa_text(
+            "SELECT pa.embedding FROM product_attributes pa "
+            "WHERE pa.embedding IS NOT NULL LIMIT 1"
+        ))).scalar()
+        if sample_emb is not None:
+            probe_result = (await db.execute(sa_text(
+                "SELECT COUNT(*) FROM products p "
+                "JOIN product_attributes pa ON pa.product_id = p.id "
+                "WHERE p.is_active = TRUE AND pa.embedding IS NOT NULL "
+                "AND (pa.embedding <=> CAST(:vec AS vector)) <= 1.5"
+            ), {"vec": str(sample_emb)})).scalar()
+            probe = {"reachable_via_pgvector": probe_result}
+    except Exception as exc:
+        probe = {"error": str(exc)[:200]}
+
+    return {
+        "counts": counts,
+        "column_dims": {row[0]: row[1] for row in dim_probe},
+        "pgvector_probe": probe,
+    }
+
+
 @router.post("/backfill-instore-recommendations")
 async def trigger_instore_recommendations_backfill(
     _: bool = Depends(_require_admin),
