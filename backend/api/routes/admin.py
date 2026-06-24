@@ -194,9 +194,12 @@ async def embeddings_health(
         "SELECT COUNT(*) FROM instore_catalogue_items WHERE embedding IS NOT NULL"
     ))).scalar()
 
-    # Column dim probe (atttypmod - 4 gives the vector dimension)
+    # Column type probe — use format_type so the result includes the
+    # parameterised vector dim (pgvector's atttypmod IS the dim itself,
+    # not dim+4 like Postgres VARHDRSZ types).
     dim_probe = (await db.execute(sa_text(
-        "SELECT a.attname, (a.atttypmod - 4) AS dim "
+        "SELECT c.relname || '.' || a.attname AS col, "
+        "       format_type(a.atttypid, a.atttypmod) AS type "
         "FROM pg_attribute a "
         "JOIN pg_class c ON a.attrelid = c.oid "
         "WHERE c.relname IN ('product_attributes', 'instore_catalogue_items') "
@@ -223,7 +226,7 @@ async def embeddings_health(
 
     return {
         "counts": counts,
-        "column_dims": {row[0]: row[1] for row in dim_probe},
+        "column_types": {row[0]: row[1] for row in dim_probe},
         "pgvector_probe": probe,
     }
 

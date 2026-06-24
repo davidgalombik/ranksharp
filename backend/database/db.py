@@ -166,25 +166,23 @@ async def init_db():
              _idx("ix_instore_trend_rec_trend")),
             # Upgrade from 1536-dim placeholder embeddings to 1024-dim
             # voyage-3 semantic embeddings. Drop + re-add the columns
-            # (existing values were random and useless). Guard fires when
-            # the column type is already vector(1024), so the migration is
-            # idempotent across deploys.
+            # (existing values were random and useless). Guard uses
+            # format_type so it correctly detects whether the column is
+            # already at vector(1024) — earlier attempts used `atttypmod - 4`
+            # which is wrong for pgvector (atttypmod IS the dim, not dim+4),
+            # causing the DROP to fire on every deploy and wipe embeddings.
             ("ALTER TABLE product_attributes DROP COLUMN IF EXISTS embedding",
-             "SELECT 1 FROM information_schema.columns "
-             "WHERE table_name='product_attributes' AND column_name='embedding' "
-             "AND udt_name='vector' "
-             "AND ((SELECT atttypmod FROM pg_attribute "
-             "      WHERE attrelid='product_attributes'::regclass "
-             "      AND attname='embedding') - 4) = 1024"),
+             "SELECT 1 FROM pg_attribute a "
+             "JOIN pg_class c ON a.attrelid = c.oid "
+             "WHERE c.relname='product_attributes' AND a.attname='embedding' "
+             "AND format_type(a.atttypid, a.atttypmod) = 'vector(1024)'"),
             ("ALTER TABLE product_attributes ADD COLUMN embedding vector(1024)",
              _col("product_attributes", "embedding")),
             ("ALTER TABLE instore_catalogue_items DROP COLUMN IF EXISTS embedding",
-             "SELECT 1 FROM information_schema.columns "
-             "WHERE table_name='instore_catalogue_items' AND column_name='embedding' "
-             "AND udt_name='vector' "
-             "AND ((SELECT atttypmod FROM pg_attribute "
-             "      WHERE attrelid='instore_catalogue_items'::regclass "
-             "      AND attname='embedding') - 4) = 1024"),
+             "SELECT 1 FROM pg_attribute a "
+             "JOIN pg_class c ON a.attrelid = c.oid "
+             "WHERE c.relname='instore_catalogue_items' AND a.attname='embedding' "
+             "AND format_type(a.atttypid, a.atttypmod) = 'vector(1024)'"),
             ("ALTER TABLE instore_catalogue_items ADD COLUMN embedding vector(1024)",
              _col("instore_catalogue_items", "embedding")),
             # product_attributes.fragrance was originally VARCHAR(200), but
