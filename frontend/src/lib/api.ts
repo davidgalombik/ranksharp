@@ -265,11 +265,12 @@ export const api = {
       `${API_BASE}/api/instore/sessions/${sessionId}/products/${productId}/image`,
   },
   instoreCatalogue: {
-    upload: async (files: File[], hashes: string[], retailer?: string) => {
+    upload: async (files: File[], hashes: string[], retailer?: string, country?: string) => {
       const formData = new FormData();
       files.forEach((f) => formData.append("files", f));
       hashes.forEach((h) => formData.append("hashes", h));
       if (retailer) formData.append("retailer", retailer);
+      if (country) formData.append("country", country);
       const res = await fetch(`${API_BASE}/api/instore-catalogue/upload`, { method: "POST", body: formData });
       if (!res.ok) throw new Error(await res.text());
       return res.json() as Promise<{
@@ -279,13 +280,14 @@ export const api = {
         image_ids: number[];
       }>;
     },
-    listItems: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; retailer?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
+    listItems: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; country?: string; retailer?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
       if (params.subcategory) qs.set("subcategory", params.subcategory);
       if (params.product_segment) qs.set("product_segment", params.product_segment);
       if (params.uncategorised_only) qs.set("uncategorised_only", "true");
+      if (params.country) qs.set("country", params.country);
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
       if (params.prominence) qs.set("prominence", params.prominence);
@@ -306,6 +308,7 @@ export const api = {
       subcategory?: string;
       product_segment?: string;
       uncategorised_only?: boolean;
+      country?: string;
       retailer?: string;
       prominence?: string;
       show_all?: boolean;
@@ -319,6 +322,7 @@ export const api = {
       if (params.subcategory) qs.set("subcategory", params.subcategory);
       if (params.product_segment) qs.set("product_segment", params.product_segment);
       if (params.uncategorised_only) qs.set("uncategorised_only", "true");
+      if (params.country) qs.set("country", params.country);
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.prominence) qs.set("prominence", params.prominence);
       if (params.show_all) qs.set("show_all", "true");

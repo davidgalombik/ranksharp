@@ -39,16 +39,21 @@ async def get_db():
 
 # ── Upload ────────────────────────────────────────────────────────────────────
 
+VALID_COUNTRIES = {"AU", "US"}
+
+
 @router.post("/upload")
 async def upload_batch(
     files: list[UploadFile] = File(...),
     hashes: list[str] = Form(...),
     retailer: str = Form(""),
+    country: str = Form("US"),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload a batch of images. `hashes` must be a parallel list of SHA-256 hashes
     (hex) computed client-side. Duplicates (matching hash already in DB) are skipped.
-    `retailer` is an optional free-text tag saved on every image in the batch."""
+    `retailer` is an optional free-text tag saved on every image in the batch.
+    `country` is AU or US (defaults to US to match the historical backfill)."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     if len(files) != len(hashes):
@@ -58,6 +63,9 @@ async def upload_batch(
 
     # Normalise retailer — trim, collapse internal whitespace, cap length
     retailer_clean = " ".join((retailer or "").split())[:100] or None
+    country_clean = (country or "US").upper()
+    if country_clean not in VALID_COUNTRIES:
+        raise HTTPException(status_code=400, detail=f"country must be one of {sorted(VALID_COUNTRIES)}")
 
     upload_dir = Path(settings.instore_catalogue_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +121,7 @@ async def upload_batch(
             sha256_hash=h,
             status="pending",
             retailer=retailer_clean,
+            country=country_clean,
         )
         db.add(image)
         added_images.append(image)
@@ -166,6 +175,7 @@ async def list_items(
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
     uncategorised_only: bool = False,    # surface items where category IS NULL
+    country: Optional[str] = None,      # 'AU' or 'US'
     retailer: Optional[str] = None,     # exact match; use '__none__' to filter where retailer IS NULL
     prominence: Optional[str] = None,   # e.g. "hero" or "hero,main" — overrides default
     show_all: bool = False,             # convenience: include peripheral/background too
@@ -203,6 +213,10 @@ async def list_items(
     if uncategorised_only:
         stmt = stmt.where(InStoreCatalogueItem.category.is_(None))
         count_stmt = count_stmt.where(InStoreCatalogueItem.category.is_(None))
+    if country:
+        country_up = country.upper()
+        stmt = stmt.where(InStoreCatalogueImage.country == country_up)
+        count_stmt = count_stmt.where(InStoreCatalogueImage.country == country_up)
     if retailer:
         if retailer == "__none__":
             stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
@@ -256,6 +270,7 @@ async def list_items(
             "confidence": item.confidence,
             "source_filename": image.filename,
             "retailer": image.retailer,
+            "country": image.country,
             "created_at": item.created_at,
         }
         for item, image in rows
@@ -272,6 +287,7 @@ async def get_facets(
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
     uncategorised_only: bool = False,
+    country: Optional[str] = None,
     retailer: Optional[str] = None,
     show_all: bool = False,
     db: AsyncSession = Depends(get_db),
@@ -292,6 +308,8 @@ async def get_facets(
         )
         if q:
             stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
+        if country:
+            stmt = stmt.where(InStoreCatalogueImage.country == country.upper())
         if retailer:
             if retailer == "__none__":
                 stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
@@ -501,6 +519,7 @@ async def list_images(
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
     uncategorised_only: bool = False,
+    country: Optional[str] = None,
     retailer: Optional[str] = None,
     prominence: Optional[str] = None,
     show_all: bool = False,
@@ -523,6 +542,11 @@ async def list_images(
     # Stage 1: determine which image ids to return on this page
     img_stmt = select(InStoreCatalogueImage).order_by(desc(InStoreCatalogueImage.created_at))
     count_stmt = select(func.count()).select_from(InStoreCatalogueImage)
+
+    if country:
+        country_up = country.upper()
+        img_stmt = img_stmt.where(InStoreCatalogueImage.country == country_up)
+        count_stmt = count_stmt.where(InStoreCatalogueImage.country == country_up)
 
     if retailer:
         if retailer == "__none__":
@@ -581,6 +605,7 @@ async def list_images(
             "file_type": img.file_type,
             "status": img.status,
             "retailer": img.retailer,
+            "country": img.country,
             "item_count": total_items_by_image.get(img.id, 0),
             "total_item_count": img.item_count,  # raw column from DB (unfiltered total)
             "by_category": cats_by_image.get(img.id, {}),

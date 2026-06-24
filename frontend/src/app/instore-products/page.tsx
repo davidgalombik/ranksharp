@@ -242,12 +242,16 @@ async function maybeDownscale(file: File): Promise<File> {
 function InStoreUploadModal({
   retailer,
   onRetailerChange,
+  country,
+  onCountryChange,
   retailers,
   onStart,
   onClose,
 }: {
   retailer: string;
   onRetailerChange: (v: string) => void;
+  country: string;
+  onCountryChange: (v: string) => void;
   retailers: Retailer[];
   onStart: (files: File[]) => void;
   onClose: () => void;
@@ -302,27 +306,43 @@ function InStoreUploadModal({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {phase === "pick" && (
             <>
-              <div>
-                <label className="block text-xs font-semibold text-stone-600 mb-1">
-                  Retailer <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  list="instore-retailer-options"
-                  value={retailer}
-                  onChange={(e) => onRetailerChange(e.target.value)}
-                  placeholder="e.g. World Market, Target, HomeGoods…"
-                  className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-300"
-                  autoFocus
-                />
-                <datalist id="instore-retailer-options">
-                  {retailers.map((r) => <option key={r.name} value={r.name}>{`${r.count} images`}</option>)}
-                </datalist>
-                <p className="text-xs text-stone-400 mt-1">
-                  {retailerValid
-                    ? "Autocompletes from retailers you've used before."
-                    : "Enter a store name first — you can filter by retailer later."}
-                </p>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs font-semibold text-stone-600 mb-1">
+                    Retailer <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    list="instore-retailer-options"
+                    value={retailer}
+                    onChange={(e) => onRetailerChange(e.target.value)}
+                    placeholder="e.g. World Market, Target, HomeGoods…"
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-300"
+                    autoFocus
+                  />
+                  <datalist id="instore-retailer-options">
+                    {retailers.map((r) => <option key={r.name} value={r.name}>{`${r.count} images`}</option>)}
+                  </datalist>
+                  <p className="text-xs text-stone-400 mt-1">
+                    {retailerValid
+                      ? "Autocompletes from retailers you've used before."
+                      : "Enter a store name first — you can filter by retailer later."}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-stone-600 mb-1">
+                    Country <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={country}
+                    onChange={(e) => onCountryChange(e.target.value)}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-300"
+                  >
+                    <option value="US">USA</option>
+                    <option value="AU">Australia</option>
+                  </select>
+                  <p className="text-xs text-stone-400 mt-1">Where the photo was taken.</p>
+                </div>
               </div>
 
               <div
@@ -1166,6 +1186,7 @@ export default function InStoreProductsPage() {
   const [productSegment, setProductSegment] = useState<string>("");
   const [uncategorisedOnly, setUncategorisedOnly] = useState(false);
   const [retailerFilter, setRetailerFilter] = useState("");   // "" = all, "__none__" = untagged
+  const [countryFilter, setCountryFilter] = useState("");     // "" = all, "AU" | "US"
   const [showAll, setShowAll] = useState(false);   // include peripheral/background
   const [mode, setMode] = useState<"catalogue" | "failed">("catalogue");
 
@@ -1195,8 +1216,10 @@ export default function InStoreProductsPage() {
     uncategorised: number;
   } | null>(null);
 
-  // Retailer currently selected in the upload zone (remembered across sessions)
+  // Retailer + country currently selected in the upload zone
+  // (retailer is remembered across sessions; country defaults to US)
   const [uploadRetailer, setUploadRetailer] = useState<string>("");
+  const [uploadCountry, setUploadCountry] = useState<string>("US");
 
   // Upload state
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -1228,7 +1251,7 @@ export default function InStoreProductsPage() {
   // Reset to page 0 when filters or view mode change
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll, viewMode]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll, viewMode]);
 
   // Cascading clears: changing a level clears every deeper level
   useEffect(() => { setSubcategory(""); setProductSegment(""); }, [category]);
@@ -1244,6 +1267,7 @@ export default function InStoreProductsPage() {
         subcategory: subcategory || undefined,
         product_segment: productSegment || undefined,
         uncategorised_only: uncategorisedOnly || undefined,
+        country: countryFilter || undefined,
         retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
@@ -1257,7 +1281,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll, page]);
 
   // Load products (flat item list)
   const loadProducts = useCallback(async () => {
@@ -1269,6 +1293,7 @@ export default function InStoreProductsPage() {
         subcategory: subcategory || undefined,
         product_segment: productSegment || undefined,
         uncategorised_only: uncategorisedOnly || undefined,
+        country: countryFilter || undefined,
         retailer: retailerFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
@@ -1282,7 +1307,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll, page]);
 
   // Refresh both the current view and stats
   const reloadCurrentView = useCallback(async () => {
@@ -1326,7 +1351,7 @@ export default function InStoreProductsPage() {
     })
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, retailerFilter, showAll]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll]);
 
   // Fetch the shared 3-level taxonomy tree once at mount.
   useEffect(() => {
@@ -1396,6 +1421,7 @@ export default function InStoreProductsPage() {
           prepared.map((p) => p.file),
           prepared.map((p) => p.hash),
           uploadRetailer.trim() || undefined,
+          uploadCountry,
         );
         setProgress((p) => ({
           ...p,
@@ -1425,7 +1451,7 @@ export default function InStoreProductsPage() {
     await loadStats();
     await reloadCurrentView();
     await loadRetailers();
-  }, [uploadRetailer, loadStats, reloadCurrentView, loadRetailers]);
+  }, [uploadRetailer, uploadCountry, loadStats, reloadCurrentView, loadRetailers]);
 
   const cancelUpload = useCallback(() => {
     cancelRef.current = true;
@@ -1463,7 +1489,7 @@ export default function InStoreProductsPage() {
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
   // Clear selection on filter change so old IDs don't linger after they scroll off
-  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, retailerFilter, showAll, page, viewMode]);
+  useEffect(() => { clearSelection(); lastClickedIdRef.current = null; }, [clearSelection, debouncedSearch, category, countryFilter, retailerFilter, showAll, page, viewMode]);
 
   const toggleSelect = useCallback((id: number, e: React.MouseEvent) => {
     setSelectedIds((prev) => {
@@ -1542,7 +1568,7 @@ export default function InStoreProductsPage() {
   const processingCount = (stats?.images_by_status?.pending || 0) + (stats?.images_by_status?.analysing || 0);
   const failedCount = stats?.images_by_status?.failed || 0;
 
-  const hasFilters = debouncedSearch || category || subcategory || productSegment || uncategorisedOnly || retailerFilter || showAll;
+  const hasFilters = debouncedSearch || category || subcategory || productSegment || uncategorisedOnly || countryFilter || retailerFilter || showAll;
 
   return (
     <div className="space-y-5">
@@ -1655,6 +1681,15 @@ export default function InStoreProductsPage() {
                 />
               </div>
               <select
+                value={countryFilter}
+                onChange={(e) => setCountryFilter(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All countries</option>
+                <option value="US">USA</option>
+                <option value="AU">Australia</option>
+              </select>
+              <select
                 value={retailerFilter}
                 onChange={(e) => setRetailerFilter(e.target.value)}
                 className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
@@ -1757,7 +1792,7 @@ export default function InStoreProductsPage() {
             )}
             {hasFilters && (
               <button
-                onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setUncategorisedOnly(false); setRetailerFilter(""); setShowAll(false); }}
+                onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setUncategorisedOnly(false); setCountryFilter(""); setRetailerFilter(""); setShowAll(false); }}
                 className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
               >
                 Clear filters
@@ -1828,7 +1863,7 @@ export default function InStoreProductsPage() {
               {hasFilters ? (
                 <>
                   <p className="font-medium">No {viewMode === "image" ? "images" : "products"} match your filters</p>
-                  <button onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setUncategorisedOnly(false); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
+                  <button onClick={() => { setSearch(""); setCategory(""); setSubcategory(""); setProductSegment(""); setUncategorisedOnly(false); setCountryFilter(""); setRetailerFilter(""); setShowAll(false); }} className="mt-2 text-sm text-stone-600 underline hover:text-stone-900">Clear filters</button>
                 </>
               ) : (
                 <>
@@ -1858,6 +1893,8 @@ export default function InStoreProductsPage() {
         <InStoreUploadModal
           retailer={uploadRetailer}
           onRetailerChange={setUploadRetailer}
+          country={uploadCountry}
+          onCountryChange={setUploadCountry}
           retailers={retailers}
           onStart={startUpload}
           onClose={() => setUploadModalOpen(false)}

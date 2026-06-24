@@ -196,6 +196,14 @@ async def init_db():
              "SELECT 1 FROM information_schema.columns "
              "WHERE table_name='product_attributes' AND column_name='fragrance' "
              "AND character_maximum_length >= 500"),
+            # In-store catalogue images: country tag (AU/US). Default 'US'
+            # so existing rows backfill automatically.
+            ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
+             "country VARCHAR(2) NOT NULL DEFAULT 'US'",
+             _col("instore_catalogue_images", "country")),
+            ("CREATE INDEX IF NOT EXISTS ix_instore_catalogue_images_country "
+             "ON instore_catalogue_images (country)",
+             _idx("ix_instore_catalogue_images_country")),
         ]
         for item in migrations:
             if isinstance(item, tuple):
