@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
-from sqlalchemy import select, desc, func, or_, and_
+from sqlalchemy import select, desc, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.db import AsyncSessionLocal
@@ -35,6 +35,59 @@ MAX_FILES_PER_BATCH = 200
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+
+
+# ── Search helpers ────────────────────────────────────────────────────────────
+# Mirrors the tokenised OR search on Online Products (backend/api/routes/
+# products.py). InStoreCatalogueItem only has product_name (no description)
+# so the search is narrower, but the ranking shape is the same.
+
+def _instore_query_tokens(q: str) -> list[str]:
+    """Split a search query into individual word tokens. Ignores 1-char
+    tokens as too noisy."""
+    import re
+    parts = re.split(r"[^\w]+", q or "")
+    return [p for p in parts if len(p) >= 2]
+
+
+def apply_instore_search(stmt, q: str):
+    """Widen a query's WHERE to include exact-phrase substring match
+    on product_name OR any single-token substring match. Returns the
+    modified statement. No-op if q is empty."""
+    if not q or not q.strip():
+        return stmt
+    like_q = f"%{q}%"
+    conds = [InStoreCatalogueItem.product_name.ilike(like_q)]
+    for tok in _instore_query_tokens(q):
+        conds.append(InStoreCatalogueItem.product_name.ilike(f"%{tok}%"))
+    return stmt.where(or_(*conds))
+
+
+def instore_search_order(q: str) -> list:
+    """ORDER BY clauses when a search is active.
+
+    Tier 1 = full query is a substring of the product name.
+    Tier 2 = at least one token matches, ranked by number of tokens hit.
+    Newest-first tiebreak inside each tier.
+    """
+    if not q or not q.strip():
+        return [desc(InStoreCatalogueItem.created_at)]
+    like_q = f"%{q}%"
+    tier = case(
+        (InStoreCatalogueItem.product_name.ilike(like_q), 1),
+        else_=2,
+    )
+    tokens = _instore_query_tokens(q)
+    token_score_cols = [
+        case((InStoreCatalogueItem.product_name.ilike(f"%{t}%"), 1), else_=0)
+        for t in tokens
+    ]
+    order = [tier.asc()]
+    if token_score_cols:
+        token_score = sum(token_score_cols[1:], token_score_cols[0])
+        order.append(token_score.desc())
+    order.append(desc(InStoreCatalogueItem.created_at))
+    return order
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -190,7 +243,6 @@ async def list_items(
     stmt = (
         select(InStoreCatalogueItem, InStoreCatalogueImage)
         .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
-        .order_by(desc(InStoreCatalogueItem.created_at))
     )
     count_stmt = (
         select(func.count())
@@ -198,9 +250,11 @@ async def list_items(
         .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
     )
     if q:
-        like = f"%{q}%"
-        stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(like))
-        count_stmt = count_stmt.where(InStoreCatalogueItem.product_name.ilike(like))
+        stmt = apply_instore_search(stmt, q)
+        count_stmt = apply_instore_search(count_stmt, q)
+    # ORDER BY happens after the paginated LIMIT/OFFSET is applied below —
+    # when q is set, ranking is by search tier; otherwise newest-first.
+    stmt = stmt.order_by(*instore_search_order(q))
     if category:
         stmt = stmt.where(InStoreCatalogueItem.category == category)
         count_stmt = count_stmt.where(InStoreCatalogueItem.category == category)
@@ -307,7 +361,7 @@ async def get_facets(
             .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
         )
         if q:
-            stmt = stmt.where(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
+            stmt = apply_instore_search(stmt, q)
         if country:
             stmt = stmt.where(InStoreCatalogueImage.country == country.upper())
         if retailer:
@@ -472,7 +526,14 @@ def _build_item_filter(
     active = False
 
     if q:
-        conds.append(InStoreCatalogueItem.product_name.ilike(f"%{q}%"))
+        # Tokenised OR — mirrors apply_instore_search but returns a single
+        # OR-condition instead of applying it to a statement, since the
+        # caller ANDs multiple conds together.
+        like_q = f"%{q}%"
+        or_conds = [InStoreCatalogueItem.product_name.ilike(like_q)]
+        for tok in _instore_query_tokens(q):
+            or_conds.append(InStoreCatalogueItem.product_name.ilike(f"%{tok}%"))
+        conds.append(or_(*or_conds))
         active = True
     if category:
         conds.append(InStoreCatalogueItem.category == category)
