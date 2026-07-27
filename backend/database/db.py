@@ -204,13 +204,16 @@ async def init_db():
             ("CREATE INDEX IF NOT EXISTS ix_instore_catalogue_images_country "
              "ON instore_catalogue_images (country)",
              _idx("ix_instore_catalogue_images_country")),
-            # HNSW index on product_attributes.embedding so hybrid search
-            # (Online + Historical Products) can do voyage-3 cosine queries
-            # in ~10ms instead of sequential-scanning 156k vectors.
-            # vector_cosine_ops is required for the `<=>` cosine operator.
-            ("CREATE INDEX IF NOT EXISTS ix_product_attributes_embedding_hnsw "
-             "ON product_attributes USING hnsw (embedding vector_cosine_ops)",
-             _idx("ix_product_attributes_embedding_hnsw")),
+            # NOTE: attempted an HNSW index on product_attributes.embedding
+            # to speed up voyage-3 cosine queries, but the build on 156k *
+            # 1024-dim vectors overran Railway Postgres shared memory and
+            # started returning DiskFullError on unrelated queries. Sequential
+            # scan on 156k vectors is ~500ms-1s per hybrid search, which is
+            # acceptable for on-demand search. If the index is present from a
+            # prior deploy, drop it defensively so shared memory isn't held.
+            ("DROP INDEX IF EXISTS ix_product_attributes_embedding_hnsw",
+             "SELECT 1 WHERE NOT EXISTS ("
+             "SELECT 1 FROM pg_class WHERE relname='ix_product_attributes_embedding_hnsw')"),
         ]
         for item in migrations:
             if isinstance(item, tuple):
