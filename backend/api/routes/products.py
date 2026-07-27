@@ -33,54 +33,68 @@ COUNTRY_LABELS: dict[str, str] = {
 }
 
 
+def _query_tokens(q: str) -> list[str]:
+    """Split a search query into individual word tokens. Handles multiple
+    spaces, punctuation, ignores 1-char tokens as too noisy."""
+    import re
+    parts = re.split(r"[^\w]+", q or "")
+    return [p for p in parts if len(p) >= 2]
+
+
 def apply_hybrid_search(stmt, q: str, vec_literal: Optional[str]):
-    """Apply hybrid text-search to a Product query.
+    """Apply search to a Product query.
 
-    Widens the WHERE to accept exact substring matches (name or description)
-    OR semantic matches (voyage cosine distance <= SEMANTIC_MAX_DISTANCE).
-    Also appends ORDER BY clauses that put name-substring matches first,
-    then description-substring matches, then semantic-only matches ranked
-    by cosine distance.
+    Historical note: an earlier version widened the WHERE with a pgvector
+    cosine distance clause to catch semantic (synonym / theme) matches.
+    On Railway's Postgres that clause pushed shared memory past its limit
+    for the 156k * 1024-dim table and returned DiskFullError. Disabled
+    until we can add an IVFFlat/HNSW index safely — vec_literal parameter
+    kept for signature compatibility with facets callers.
 
-    Returns the modified statement. Caller controls where in the pipeline
-    the search widens the filter (before count so totals stay honest, and
-    before the LIMIT/OFFSET on the paginated select).
+    Now:
+      * Exact-phrase match: rows containing the full query as a substring
+        of name or description.
+      * Tokenised OR match: rows containing ANY individual word from the
+        query in name or description. So "acacia wood bowl" also returns
+        rows matching "acacia" only or "bowl" only — hybrid_search_order
+        ranks by how many tokens matched so full-phrase hits float top.
     """
     like_q = f"%{q}%"
-    if vec_literal is None:
-        # Voyage unavailable — fall back to exact-substring only
-        stmt = stmt.where(or_(
-            Product.name.ilike(like_q),
-            Product.description.ilike(like_q),
-        ))
-        return stmt
-    sem_cond = sa_text(
-        f"product_attributes.embedding <=> CAST('{vec_literal}' AS vector) <= {SEMANTIC_MAX_DISTANCE}"
-    )
-    stmt = stmt.where(or_(
-        Product.name.ilike(like_q),
-        Product.description.ilike(like_q),
-        sem_cond,
-    ))
+    conds = [Product.name.ilike(like_q), Product.description.ilike(like_q)]
+    for tok in _query_tokens(q):
+        like_tok = f"%{tok}%"
+        conds.append(Product.name.ilike(like_tok))
+        conds.append(Product.description.ilike(like_tok))
+    stmt = stmt.where(or_(*conds))
     return stmt
 
 
 def hybrid_search_order(q: str, vec_literal: Optional[str]) -> list:
-    """ORDER BY clauses for the paginated select. Match tier first
-    (1=name substring, 2=description substring, 3=semantic-only),
-    then ascending cosine distance to break ties within the semantic tier."""
+    """ORDER BY clauses for the paginated select.
+
+    Tier 1 = full query is a substring of the product name.
+    Tier 2 = full query is a substring of the description.
+    Tier 3 = at least one token matches (ranked by how many tokens hit).
+    Within tier 3, rows matching more tokens rank first.
+    """
     like_q = f"%{q}%"
     tier = case(
         (Product.name.ilike(like_q), 1),
         (Product.description.ilike(like_q), 2),
         else_=3,
     )
-    order = [tier.asc()]
-    if vec_literal is not None:
-        order.append(sa_text(
-            f"product_attributes.embedding <=> CAST('{vec_literal}' AS vector) ASC NULLS LAST"
-        ))
-    return order
+    # Token-match count — sum of CASE WHEN name ILIKE '%tok%' THEN 1 ELSE 0
+    # across every token, plus the same for description. Higher = better.
+    tokens = _query_tokens(q)
+    token_score_cols = []
+    for tok in tokens:
+        like_tok = f"%{tok}%"
+        token_score_cols.append(case((Product.name.ilike(like_tok), 1), else_=0))
+        token_score_cols.append(case((Product.description.ilike(like_tok), 1), else_=0))
+    if token_score_cols:
+        token_score = sum(token_score_cols[1:], token_score_cols[0])
+        return [tier.asc(), token_score.desc()]
+    return [tier.asc()]
 
 
 def country_filter_clause(bucket: Optional[str]):
@@ -156,14 +170,11 @@ async def search_products(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    # Build the query one clause at a time. When q is set, hybrid search
-    # (exact-first, semantic fallback) replaces the default recency ordering.
+    # When q is set, hybrid search (exact-first, tokenised OR fallback)
+    # replaces the default recency ordering. Semantic tier is currently
+    # disabled — see apply_hybrid_search() for context — so vec_literal
+    # stays None here.
     vec_literal: Optional[str] = None
-    if q:
-        from analysis.embeddings import embed_text_sync
-        vec = embed_text_sync(q, input_type="query")
-        if vec:
-            vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
 
     stmt = (
         select(Product, ProductAttributes, Retailer)
@@ -282,14 +293,9 @@ def _apply_current_filters(
     exclude = exclude or set()
     if q:
         # Facets don't paginate, so we don't need the ORDER BY — just the
-        # widened WHERE. Semantic tier requires a query embedding; if voyage
-        # is unavailable, apply_hybrid_search falls back to substring-only.
-        from analysis.embeddings import embed_text_sync
-        vec = embed_text_sync(q, input_type="query")
-        vec_literal = (
-            "[" + ",".join(f"{x:.6f}" for x in vec) + "]" if vec else None
-        )
-        stmt = apply_hybrid_search(stmt, q, vec_literal)
+        # widened WHERE. Semantic tier is currently disabled (see
+        # apply_hybrid_search) so pass vec_literal=None.
+        stmt = apply_hybrid_search(stmt, q, None)
     if country and "country" not in exclude:
         country_clause = country_filter_clause(country)
         if country_clause is not None:
@@ -642,15 +648,10 @@ async def search_historical_products(
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_stmt)).scalar_one()
 
-    # When q is set, sort by hybrid-search tier (exact-first, then semantic).
-    # Otherwise fall back to the historical recency ordering.
+    # When q is set, sort by hybrid-search tier (exact-first, then
+    # tokenised OR). Otherwise fall back to the historical recency ordering.
     if q:
-        from analysis.embeddings import embed_text_sync
-        vec = embed_text_sync(q, input_type="query")
-        vec_literal = (
-            "[" + ",".join(f"{x:.6f}" for x in vec) + "]" if vec else None
-        )
-        items_stmt = base.order_by(*hybrid_search_order(q, vec_literal))
+        items_stmt = base.order_by(*hybrid_search_order(q, None))
     else:
         items_stmt = base.order_by(desc(Product.last_seen_at))
     items_stmt = items_stmt.limit(limit).offset(offset)
