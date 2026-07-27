@@ -92,9 +92,13 @@ def _voyage_client_async():
     return voyageai.AsyncClient(api_key=settings.voyage_api_key)
 
 
-def embed_text_sync(text: str) -> Optional[list[float]]:
+def embed_text_sync(text: str, input_type: str = "document") -> Optional[list[float]]:
     """Sync single-text embedding. Used by Celery tasks (catalogue + backfill).
-    Returns None when no API key is configured or the call fails."""
+    Returns None when no API key is configured or the call fails.
+
+    input_type: 'document' for content being indexed (default), or 'query' for
+    search queries — voyage-3 has separate encoders for each side and query mode
+    yields noticeably better recall on short retrieval strings."""
     if not settings.voyage_api_key:
         log.warning("voyage_key_missing")
         return None
@@ -103,7 +107,7 @@ def embed_text_sync(text: str) -> Optional[list[float]]:
         return None
     try:
         client = _voyage_client_sync()
-        result = client.embed([text], model=settings.voyage_model, input_type="document")
+        result = client.embed([text], model=settings.voyage_model, input_type=input_type)
         return result.embeddings[0]
     except Exception as exc:
         log.warning("voyage_embed_sync_failed", error=str(exc), text_preview=text[:80])

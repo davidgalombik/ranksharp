@@ -1,7 +1,7 @@
 """Product API routes."""
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, desc, or_, func, not_
+from sqlalchemy import select, desc, or_, func, not_, case, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Product, ProductAttributes, Retailer
@@ -9,6 +9,13 @@ from pydantic import BaseModel
 from datetime import datetime
 
 router = APIRouter()
+
+# Hybrid-search tuning. Semantic tier includes any product whose voyage-3
+# embedding is within this cosine distance of the query embedding. Products
+# scoring worse are excluded from the semantic tier — exact-substring matches
+# (name/description ILIKE) still surface separately regardless.
+# Empirically voyage-3 puts genuinely related retail items at similarity >= 0.5.
+SEMANTIC_MAX_DISTANCE = 0.60  # similarity = 1 - distance, so >= 0.40 kept
 
 # Country bucket -> ISO country codes that fall under it. "EU" is everything
 # not in AU/US/GB so any future European retailer (DE/FR/IT/ES/…) is
@@ -24,6 +31,56 @@ COUNTRY_LABELS: dict[str, str] = {
     "UK": "United Kingdom",
     "EU": "Europe",
 }
+
+
+def apply_hybrid_search(stmt, q: str, vec_literal: Optional[str]):
+    """Apply hybrid text-search to a Product query.
+
+    Widens the WHERE to accept exact substring matches (name or description)
+    OR semantic matches (voyage cosine distance <= SEMANTIC_MAX_DISTANCE).
+    Also appends ORDER BY clauses that put name-substring matches first,
+    then description-substring matches, then semantic-only matches ranked
+    by cosine distance.
+
+    Returns the modified statement. Caller controls where in the pipeline
+    the search widens the filter (before count so totals stay honest, and
+    before the LIMIT/OFFSET on the paginated select).
+    """
+    like_q = f"%{q}%"
+    if vec_literal is None:
+        # Voyage unavailable — fall back to exact-substring only
+        stmt = stmt.where(or_(
+            Product.name.ilike(like_q),
+            Product.description.ilike(like_q),
+        ))
+        return stmt
+    sem_cond = sa_text(
+        f"product_attributes.embedding <=> CAST('{vec_literal}' AS vector) <= {SEMANTIC_MAX_DISTANCE}"
+    )
+    stmt = stmt.where(or_(
+        Product.name.ilike(like_q),
+        Product.description.ilike(like_q),
+        sem_cond,
+    ))
+    return stmt
+
+
+def hybrid_search_order(q: str, vec_literal: Optional[str]) -> list:
+    """ORDER BY clauses for the paginated select. Match tier first
+    (1=name substring, 2=description substring, 3=semantic-only),
+    then ascending cosine distance to break ties within the semantic tier."""
+    like_q = f"%{q}%"
+    tier = case(
+        (Product.name.ilike(like_q), 1),
+        (Product.description.ilike(like_q), 2),
+        else_=3,
+    )
+    order = [tier.asc()]
+    if vec_literal is not None:
+        order.append(sa_text(
+            f"product_attributes.embedding <=> CAST('{vec_literal}' AS vector) ASC NULLS LAST"
+        ))
+    return order
 
 
 def country_filter_clause(bucket: Optional[str]):
@@ -99,21 +156,27 @@ async def search_products(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
+    # Build the query one clause at a time. When q is set, hybrid search
+    # (exact-first, semantic fallback) replaces the default recency ordering.
+    vec_literal: Optional[str] = None
+    if q:
+        from analysis.embeddings import embed_text_sync
+        vec = embed_text_sync(q, input_type="query")
+        if vec:
+            vec_literal = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+
     stmt = (
         select(Product, ProductAttributes, Retailer)
         .outerjoin(ProductAttributes, Product.id == ProductAttributes.product_id)
         .join(Retailer, Product.retailer_id == Retailer.id)
         .where(Product.is_active == True)
-        .order_by(desc(Product.last_seen_at))
     )
-
     if q:
-        stmt = stmt.where(
-            or_(
-                Product.name.ilike(f"%{q}%"),
-                Product.description.ilike(f"%{q}%"),
-            )
-        )
+        stmt = apply_hybrid_search(stmt, q, vec_literal)
+        stmt = stmt.order_by(*hybrid_search_order(q, vec_literal))
+    else:
+        stmt = stmt.order_by(desc(Product.last_seen_at))
+
     country_clause = country_filter_clause(country)
     if country_clause is not None:
         stmt = stmt.where(country_clause)
@@ -149,7 +212,7 @@ async def search_products(
         .where(Product.is_active == True)
     )
     if q:
-        count_stmt = count_stmt.where(or_(Product.name.ilike(f"%{q}%"), Product.description.ilike(f"%{q}%")))
+        count_stmt = apply_hybrid_search(count_stmt, q, vec_literal)
     if country_clause is not None:
         count_stmt = count_stmt.where(country_clause)
     if retailer:
@@ -218,7 +281,15 @@ def _apply_current_filters(
     """
     exclude = exclude or set()
     if q:
-        stmt = stmt.where(or_(Product.name.ilike(f"%{q}%"), Product.description.ilike(f"%{q}%")))
+        # Facets don't paginate, so we don't need the ORDER BY — just the
+        # widened WHERE. Semantic tier requires a query embedding; if voyage
+        # is unavailable, apply_hybrid_search falls back to substring-only.
+        from analysis.embeddings import embed_text_sync
+        vec = embed_text_sync(q, input_type="query")
+        vec_literal = (
+            "[" + ",".join(f"{x:.6f}" for x in vec) + "]" if vec else None
+        )
+        stmt = apply_hybrid_search(stmt, q, vec_literal)
     if country and "country" not in exclude:
         country_clause = country_filter_clause(country)
         if country_clause is not None:
@@ -389,7 +460,12 @@ def _apply_historical_filters(
     (Historical includes inactive rows)."""
     exclude = exclude or set()
     if q:
-        stmt = stmt.where(or_(Product.name.ilike(f"%{q}%"), Product.description.ilike(f"%{q}%")))
+        from analysis.embeddings import embed_text_sync
+        vec = embed_text_sync(q, input_type="query")
+        vec_literal = (
+            "[" + ",".join(f"{x:.6f}" for x in vec) + "]" if vec else None
+        )
+        stmt = apply_hybrid_search(stmt, q, vec_literal)
     if country and "country" not in exclude:
         country_clause = country_filter_clause(country)
         if country_clause is not None:
@@ -566,7 +642,18 @@ async def search_historical_products(
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_stmt)).scalar_one()
 
-    items_stmt = base.order_by(desc(Product.last_seen_at)).limit(limit).offset(offset)
+    # When q is set, sort by hybrid-search tier (exact-first, then semantic).
+    # Otherwise fall back to the historical recency ordering.
+    if q:
+        from analysis.embeddings import embed_text_sync
+        vec = embed_text_sync(q, input_type="query")
+        vec_literal = (
+            "[" + ",".join(f"{x:.6f}" for x in vec) + "]" if vec else None
+        )
+        items_stmt = base.order_by(*hybrid_search_order(q, vec_literal))
+    else:
+        items_stmt = base.order_by(desc(Product.last_seen_at))
+    items_stmt = items_stmt.limit(limit).offset(offset)
     result = await db.execute(items_stmt)
     return ProductPage(total=total, items=[_to_out(p, a, r) for p, a, r in result.all()])
 

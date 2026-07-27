@@ -204,6 +204,13 @@ async def init_db():
             ("CREATE INDEX IF NOT EXISTS ix_instore_catalogue_images_country "
              "ON instore_catalogue_images (country)",
              _idx("ix_instore_catalogue_images_country")),
+            # HNSW index on product_attributes.embedding so hybrid search
+            # (Online + Historical Products) can do voyage-3 cosine queries
+            # in ~10ms instead of sequential-scanning 156k vectors.
+            # vector_cosine_ops is required for the `<=>` cosine operator.
+            ("CREATE INDEX IF NOT EXISTS ix_product_attributes_embedding_hnsw "
+             "ON product_attributes USING hnsw (embedding vector_cosine_ops)",
+             _idx("ix_product_attributes_embedding_hnsw")),
         ]
         for item in migrations:
             if isinstance(item, tuple):
