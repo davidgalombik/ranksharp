@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { api, type Trend } from "@/lib/api";
 import TrendCard from "@/components/TrendCard";
 import TrendsActionButton from "@/components/TrendsActionButton";
@@ -5,49 +9,81 @@ import ClearSetsButton from "@/components/ClearSetsButton";
 import Link from "next/link";
 import clsx from "clsx";
 
-interface Props {
-  searchParams: { week_start?: string; category?: string; status?: string; generation?: string };
-}
-
 // Matches the categories the DesignTrendEngine actually produces so no
-// dropdown option filters down to an empty page (the "no trends match"
-// issue the buyers hit on 2026-07-23). Legacy trends with other
-// categories (shape / functional / hardware / finish) still show under
-// "All categories" but aren't individually filterable.
+// dropdown option filters to an empty page. Legacy trends with other
+// categories still show under "All categories" but aren't filterable.
 const CATEGORIES = ["colour", "material", "pattern", "style", "seasonal"];
-const STATUSES = ["rising", "new", "plateau", "declining"];
 
-async function getData(params: Props["searchParams"]): Promise<{
-  trends: Trend[];
-  weeks: { week: string; generation_count: number }[];
-}> {
-  const [trends, weeks] = await Promise.all([
-    api.trends.list(params).catch(() => []),
-    api.trends.weeks().catch(() => []),
-  ]);
-  return { trends, weeks };
-}
+export default function TrendsPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
 
-export default async function TrendsPage({ searchParams }: Props) {
-  const { trends, weeks } = await getData(searchParams);
+  const [trends, setTrends] = useState<Trend[]>([]);
+  const [weeks, setWeeks] = useState<{ week: string; generation_count: number }[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // Determine active week and its generation count
-  const activeWeek = searchParams.week_start || weeks[0]?.week || null;
-  const weekInfo = weeks.find((w) => w.week === activeWeek);
-  const generationCount = weekInfo?.generation_count ?? 1;
-  const activeGen = searchParams.generation ? parseInt(searchParams.generation) : generationCount;
+  // Local filter state — no submit button, applies on change
+  const [category, setCategory] = useState("");
+  const [value, setValue] = useState("");
 
-  // Build generation tab URLs (preserve other filters, only swap generation)
+  // Server-driven params (generation tab lives in URL so links share cleanly)
+  const generationParam = searchParams.get("generation");
+
+  // Load trends + weeks whenever generation changes (Set 1 / Set 2 tabs)
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const params: Record<string, string> = {};
+    if (generationParam) params.generation = generationParam;
+    Promise.all([
+      api.trends.list(params).catch(() => [] as Trend[]),
+      api.trends.weeks().catch(() => [] as { week: string; generation_count: number }[]),
+    ]).then(([t, w]) => {
+      if (!cancelled) {
+        setTrends(t);
+        setWeeks(w);
+        setLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [generationParam]);
+
+  // Value dropdown options — trend names within the currently-selected
+  // category. Sorted alphabetically for scanability.
+  const valuesInCategory = useMemo(() => {
+    if (!category) return [];
+    const names = new Set<string>();
+    for (const t of trends) {
+      if (t.category === category) names.add(t.name);
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [trends, category]);
+
+  // Reset the value dropdown whenever category changes so stale "green"
+  // doesn't carry over into "Material"
+  useEffect(() => {
+    setValue("");
+  }, [category]);
+
+  // Client-side filtered view — no page reload / no Filter button
+  const filtered = useMemo(() => {
+    return trends.filter((t) => {
+      if (category && t.category !== category) return false;
+      if (value && t.name !== value) return false;
+      return true;
+    });
+  }, [trends, category, value]);
+
+  const activeGen = generationParam ? parseInt(generationParam) : (weeks[0]?.generation_count ?? 1);
+  const generationCount = weeks[0]?.generation_count ?? 1;
+  const hasMultipleGenerations = generationCount > 1;
+
   function genTabHref(gen: number) {
     const p = new URLSearchParams();
-    if (searchParams.week_start) p.set("week_start", searchParams.week_start);
-    if (searchParams.category) p.set("category", searchParams.category);
-    if (searchParams.status) p.set("status", searchParams.status);
     p.set("generation", String(gen));
-    return `?${p.toString()}`;
+    return `${pathname}?${p.toString()}`;
   }
-
-  const hasMultipleGenerations = generationCount > 1;
 
   return (
     <div className="space-y-6">
@@ -56,27 +92,16 @@ export default async function TrendsPage({ searchParams }: Props) {
         <TrendsActionButton initialHasAnalysis={weeks.length > 0} />
       </div>
 
-      {/* Filters */}
-      <form className="flex flex-wrap gap-3 items-end">
-        <div>
-          <label className="block text-xs font-medium text-stone-500 mb-1">Week</label>
-          <select
-            name="week_start"
-            defaultValue={searchParams.week_start || ""}
-            className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white"
-          >
-            <option value="">All weeks</option>
-            {weeks.map((w) => (
-              <option key={w.week} value={w.week}>{w.week}</option>
-            ))}
-          </select>
-        </div>
-
+      {/* Filters — auto-apply on change, no submit button. Week + Status
+          are intentionally hidden per user request (2026-07-28); the
+          engine is single-week and status is "New" for everything until
+          we have two consecutive weekly reports. */}
+      <div className="flex flex-wrap gap-3 items-end">
         <div>
           <label className="block text-xs font-medium text-stone-500 mb-1">Category</label>
           <select
-            name="category"
-            defaultValue={searchParams.category || ""}
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
             className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white"
           >
             <option value="">All categories</option>
@@ -86,29 +111,27 @@ export default async function TrendsPage({ searchParams }: Props) {
           </select>
         </div>
 
-        <div>
-          <label className="block text-xs font-medium text-stone-500 mb-1">Status</label>
-          <select
-            name="status"
-            defaultValue={searchParams.status || ""}
-            className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white"
-          >
-            <option value="">All statuses</option>
-            {STATUSES.map((s) => (
-              <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>
-            ))}
-          </select>
-        </div>
+        {/* Cascading value dropdown — only appears once a category is picked */}
+        {category && valuesInCategory.length > 0 && (
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">
+              {category.charAt(0).toUpperCase() + category.slice(1)}
+            </label>
+            <select
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white"
+            >
+              <option value="">All {category}s</option>
+              {valuesInCategory.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
 
-        <button
-          type="submit"
-          className="bg-stone-900 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-stone-700 transition-colors"
-        >
-          Filter
-        </button>
-      </form>
-
-      {/* Generation tabs — shown when multiple sets exist for this week */}
+      {/* Generation tabs — shown when multiple sets exist */}
       {hasMultipleGenerations && (
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-stone-400 font-medium">Set:</span>
@@ -130,23 +153,20 @@ export default async function TrendsPage({ searchParams }: Props) {
         </div>
       )}
 
-      {/* Clear button when only one set exists */}
       {weeks.length > 0 && !hasMultipleGenerations && (
         <div className="flex justify-end">
           <ClearSetsButton target="trends" />
         </div>
       )}
 
-      {/* Trend count */}
       <p className="text-sm text-stone-500">
-        {trends.length} trend{trends.length !== 1 ? "s" : ""} found
+        {loading ? "Loading…" : `${filtered.length} trend${filtered.length !== 1 ? "s" : ""} found`}
         {hasMultipleGenerations && ` · Set ${activeGen} of ${generationCount}`}
       </p>
 
-      {/* Grid */}
-      {trends.length > 0 ? (
+      {loading ? null : filtered.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {trends.map((t) => (
+          {filtered.map((t) => (
             <TrendCard key={t.id} trend={t} />
           ))}
         </div>
