@@ -266,20 +266,27 @@ class DesignTrendEngine:
     ) -> list[dict]:
         """Count how often each value appears in `attrs.<attr_name>` and
         emit one trend per distinct value that clears MIN_RETAILERS."""
+        # NB: product_ids is a *set* — a product whose tag list contains
+        # the same value twice (e.g. colours=['sage', 'sage']) must not
+        # produce two TrendExample rows for the same (trend, product) pair.
         buckets: dict[str, dict] = defaultdict(lambda: {
-            "product_ids": [],
+            "product_ids": set(),
             "retailers": set(),
             "markets": set(),
             "prices": [],
         })
         for p in products:
             vals = getattr(p["attrs"], attr_name, None) or []
+            # Dedupe values inside a single product too, so one product
+            # only ever adds itself once to any given bucket.
+            seen_here: set[str] = set()
             for v in vals:
                 v = (v or "").strip().lower()
-                if not v or v in GENERIC_PATTERN_STOPWORDS:
+                if not v or v in GENERIC_PATTERN_STOPWORDS or v in seen_here:
                     continue
+                seen_here.add(v)
                 b = buckets[v]
-                b["product_ids"].append(p["product"].id)
+                b["product_ids"].add(p["product"].id)
                 b["retailers"].add(p["retailer"].slug)
                 b["markets"].add(p["retailer"].country)
                 if p["product"].price:
@@ -292,7 +299,7 @@ class DesignTrendEngine:
             trends.append({
                 "category": category,
                 "name": _titlecase(value),
-                "product_ids": b["product_ids"],
+                "product_ids": sorted(b["product_ids"]),
                 "retailers": sorted(b["retailers"]),
                 "markets": sorted(b["markets"]),
                 "avg_price": round(sum(b["prices"]) / len(b["prices"]), 2) if b["prices"] else None,
@@ -342,14 +349,21 @@ class DesignTrendEngine:
         # into retailers / markets / prices without a second query
         sampled_by_id = {p["product"].id: p for p in sampled}
         trends: list[dict] = []
+        raw_motif_count = len(data.get("motifs", []) or [])
+        raw_seasonal_count = len(data.get("seasonal", []) or [])
+        rejected_thin: list[dict] = []
 
         for group_key, category in (("motifs", "pattern"), ("seasonal", "seasonal")):
             for item in data.get(group_key, []) or []:
                 name = (item.get("name") or "").strip()
                 if not name:
                     continue
-                pids = [pid for pid in (item.get("product_ids") or []) if pid in sampled_by_id]
+                # Dedupe + filter to sampled IDs (Claude occasionally hallucinates)
+                pids = list(dict.fromkeys(
+                    pid for pid in (item.get("product_ids") or []) if pid in sampled_by_id
+                ))
                 if len(pids) < 3:
+                    rejected_thin.append({"name": name, "reason": "products<3", "n": len(pids)})
                     continue
                 retailers = {sampled_by_id[pid]["retailer"].slug for pid in pids}
                 markets = {sampled_by_id[pid]["retailer"].country for pid in pids}
@@ -359,6 +373,7 @@ class DesignTrendEngine:
                     if sampled_by_id[pid]["product"].price
                 ]
                 if len(retailers) < MIN_RETAILERS:
+                    rejected_thin.append({"name": name, "reason": "retailers<3", "n": len(retailers)})
                     continue
                 trends.append({
                     "category": category,
@@ -375,8 +390,11 @@ class DesignTrendEngine:
 
         log.info(
             "motif_extract_done",
-            motifs=sum(1 for t in trends if t["category"] == "pattern"),
-            seasonal=sum(1 for t in trends if t["category"] == "seasonal"),
+            raw_motifs=raw_motif_count, raw_seasonal=raw_seasonal_count,
+            kept_motifs=sum(1 for t in trends if t["category"] == "pattern"),
+            kept_seasonal=sum(1 for t in trends if t["category"] == "seasonal"),
+            rejected=len(rejected_thin),
+            rejected_sample=rejected_thin[:5],
         )
         return trends
 
@@ -450,10 +468,16 @@ class DesignTrendEngine:
         used_image_urls: set[str],
     ):
         """Pick up to 10 example products for this trend. Prefer complete
-        (priced + image) products, and prefer retailer diversity."""
-        candidates = [pid for pid in rt["product_ids"] if pid in by_id and pid not in used_product_ids]
+        (priced + image) products, and prefer retailer diversity.
+        Dedupes defensively — the DB has a unique (trend_id, product_id)
+        constraint so any repeat here would blow the whole transaction."""
+        # dict.fromkeys preserves order while removing duplicate PIDs
+        candidates = list(dict.fromkeys(
+            pid for pid in rt["product_ids"]
+            if pid in by_id and pid not in used_product_ids
+        ))
         if not candidates:
-            candidates = rt["product_ids"][:10]  # graceful fallback if all reused
+            candidates = list(dict.fromkeys(rt["product_ids"]))[:10]
 
         def completeness(pid: int) -> tuple[float, int]:
             item = by_id.get(pid)
