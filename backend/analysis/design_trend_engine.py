@@ -102,7 +102,12 @@ RULES
 2. Keep keywords short (1-3 words) and lower-case.
 3. Do NOT include product_ids — we run the matching ourselves.
 
-Aim for 8-15 motifs, 6-10 palette colours, 3-6 seasonal. Prefer quality over count.
+TARGET COUNTS (be generous — err on the side of surfacing more keywords, we filter later)
+- MOTIFS: aim for 12-20 keywords. Include niche + specific motifs, not just the obvious few.
+- PALETTE_COLOURS: aim for 10-15 keywords. Cover warms, cools, neutrals, accents, muted, saturated.
+- SEASONAL: aim for 6-10 keywords. Include holidays AND seasonal moods (autumn, winter cosy, summer coastal).
+
+Fewer than these targets is only acceptable when the sample genuinely lacks signal. Never truncate.
 
 Output ONLY valid JSON (no prose, no code fences):
 
@@ -353,12 +358,14 @@ class DesignTrendEngine:
         the retailer threshold even when the underlying data had hundreds
         of matching products.
         """
-        # Sample recent products for the keyword-brainstorm call
+        # Sample recent products for the keyword-brainstorm call.
+        # 900 names gives Claude a wider view of seasonal / palette cues that
+        # a smaller 600 sample sometimes missed (per user report 2026-07-28).
         sorted_products = sorted(
             products, key=lambda p: p["product"].last_seen_at, reverse=True,
         )
-        pool = sorted_products[:1200]
-        sampled = random.sample(pool, min(600, len(pool)))
+        pool = sorted_products[:1500]
+        sampled = random.sample(pool, min(900, len(pool)))
         lines = [p["product"].name for p in sampled if p["product"].name]
         payload = "PRODUCT NAMES:\n" + "\n".join(lines) + \
             "\n\nExtract motif / palette-colour / seasonal keywords."
