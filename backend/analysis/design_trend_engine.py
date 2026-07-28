@@ -166,17 +166,31 @@ class DesignTrendEngine:
         by_id = {p["product"].id: p for p in products}
 
         self._progress(25, "Aggregating colour / material / style trends…")
-        raw_trends: list[dict] = []
-        raw_trends.extend(self._aggregate_attribute("colour", products, "colours"))
-        raw_trends.extend(self._aggregate_attribute("material", products, "materials"))
-        raw_trends.extend(self._aggregate_attribute("style", products, "style_tags"))
+        # Tag each trend with `_source` so we can apply the "don't repeat"
+        # filter only to Claude-generated content. Aggregation is deterministic
+        # (top style tag values are always the same), so if we excluded them
+        # on re-runs, Set 2+ ends up with an empty Style filter — a real UX
+        # issue reported by the buyers.
+        aggregate_trends: list[dict] = []
+        for t in self._aggregate_attribute("colour", products, "colours"):
+            t["_source"] = "aggregate"; aggregate_trends.append(t)
+        for t in self._aggregate_attribute("material", products, "materials"):
+            t["_source"] = "aggregate"; aggregate_trends.append(t)
+        for t in self._aggregate_attribute("style", products, "style_tags"):
+            t["_source"] = "aggregate"; aggregate_trends.append(t)
 
         self._progress(55, "Extracting motifs & seasonal themes from product names…")
-        motif_trends = await self._extract_motif_trends(products)
-        raw_trends.extend(motif_trends)
+        motif_trends_raw = await self._extract_motif_trends(products)
+        for t in motif_trends_raw:
+            t["_source"] = "motif"
 
-        # Filter out names already used in a prior generation this week.
-        raw_trends = [t for t in raw_trends if t["name"].strip().lower() not in excluded_names]
+        # Motif-derived trends: skip any name already produced in a prior set
+        # this week (Claude can surface genuinely different keywords per run).
+        motif_trends = [
+            t for t in motif_trends_raw
+            if t["name"].strip().lower() not in excluded_names
+        ]
+        raw_trends = aggregate_trends + motif_trends
         if not raw_trends:
             log.warning("design_trend_no_new_signals")
             return None
