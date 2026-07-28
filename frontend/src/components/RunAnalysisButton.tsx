@@ -55,6 +55,11 @@ export default function RunAnalysisButton({ onSuccess }: { onSuccess?: () => voi
           onSuccess?.();
           setTimeout(() => {
             router.refresh();
+            // Signal client-side TrendsClient to re-fetch; router.refresh()
+            // only re-runs server components.
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("trends-refresh"));
+            }
           }, 1_500);
         } else if (status.state === "FAILURE") {
           stopPolling();

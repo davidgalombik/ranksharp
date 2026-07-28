@@ -26,10 +26,16 @@ export default function TrendsClient() {
   const [category, setCategory] = useState("");
   const [value, setValue] = useState("");
 
+  // Bumped when a "Try Again" / "Run" completes elsewhere on the page,
+  // to force this component to re-fetch trends. Custom event dispatched
+  // by RunAnalysisButton + TryAgainTrendsButton on state === SUCCESS.
+  const [refreshTick, setRefreshTick] = useState(0);
+
   // Server-driven params (generation tab lives in URL so links share cleanly)
   const generationParam = searchParams.get("generation");
 
   // Load trends + weeks whenever generation changes (Set 1 / Set 2 tabs)
+  // or when the action buttons signal a re-run completed.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -46,7 +52,14 @@ export default function TrendsClient() {
       }
     });
     return () => { cancelled = true; };
-  }, [generationParam]);
+  }, [generationParam, refreshTick]);
+
+  // Listen for the analysis-complete signal from the action buttons
+  useEffect(() => {
+    const handler = () => setRefreshTick((n) => n + 1);
+    window.addEventListener("trends-refresh", handler);
+    return () => window.removeEventListener("trends-refresh", handler);
+  }, []);
 
   // Value dropdown options — trend names within the currently-selected
   // category. Sorted alphabetically for scanability.

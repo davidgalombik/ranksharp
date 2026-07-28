@@ -50,7 +50,16 @@ export default function TryAgainTrendsButton() {
           setPct(100);
           setStep("New set ready! Refreshing…");
           setPhase("done");
-          setTimeout(() => router.refresh(), 1_500);
+          setTimeout(() => {
+            // router.refresh() only re-runs server components; the trends
+            // grid moved to a client component (TrendsClient) so it needs
+            // an explicit signal to re-fetch. Fire a window event that
+            // TrendsClient listens for.
+            router.refresh();
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("trends-refresh"));
+            }
+          }, 1_500);
         } else if (status.state === "FAILURE") {
           stopPolling();
           setPhase("error");

@@ -63,7 +63,11 @@ async def list_trends(
     category: Optional[str] = None,
     status: Optional[TrendStatus] = None,
     generation: Optional[int] = None,
-    limit: int = Query(default=20, le=100),
+    # Default bumped 20 -> 300 so the frontend receives the full set of
+    # trends for a generation (a run typically emits ~60-100 trends across
+    # 5 categories; the old default silently truncated to style+material,
+    # which dominate on product_count). Frontend filters client-side.
+    limit: int = Query(default=300, le=500),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
