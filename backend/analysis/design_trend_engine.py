@@ -71,36 +71,55 @@ GENERIC_PATTERN_STOPWORDS = {
 }
 
 
-MOTIF_SYSTEM_PROMPT = """You are a retail trends analyst extracting specific visual motifs \
-from a list of product names.
+MOTIF_SYSTEM_PROMPT = """You are a retail-trend analyst. You will read a list of home décor and \
+storage product NAMES with IDs, and extract three kinds of recurring design signals.
 
-A "motif" is a concrete recurring design theme — something a buyer would recognise \
-as a nameable pattern or print. Examples: cherry, mushroom, tortoise shell, polka dot, \
-gingham, checkerboard, stripes, floral, harvest, dinosaur, unicorn, botanical.
+CRITICAL: what to extract vs. what to IGNORE
 
-You will also identify seasonal / calendar themes — Halloween, back-to-school, \
-Valentine's, autumn/harvest, coastal summer, holiday, spring florals — grouped separately.
+MOTIFS = decorative subject or surface pattern applied ACROSS multiple product types.
+YES: cherry, tortoise shell, mushroom, gingham, polka dot, floral, stripe, checkerboard, \
+scalloped, ribbed, dinosaur, unicorn, palm leaf, botanical, gnome, ghost, pumpkin, harvest wheat, \
+american flag, hearts, stars, animal print, evil eye, retro flowers.
 
-RULES
-- A motif or seasonal theme must appear across at least 3 distinct products.
-- Prefer specific over generic: "cherry" beats "fruit"; "tortoise shell" beats "animal print".
-- Skip generic tags: printed, plain, solid, textured.
-- Return the exact product_id of every product that fits each motif/theme.
+NO — these are NOT motifs, do not include them:
+- Product types: "stainless steel cookware", "muffin cupcake pan", "baking sheet", \
+"food storage container", "trash can", "coffee mug", "salad bowl"
+- Materials on their own: "wood", "glass", "ceramic", "resin", "plastic"
+- Generic descriptors: "textured", "printed", "solid", "plain", "modern", "large"
+- Functional features: "with lid", "collapsible", "portable", "waterproof"
 
-Output ONLY valid JSON:
+PALETTE_COLOURS = specific colour or colour combination named in the product name itself.
+YES: sage green, dusty pink, terracotta, warm white, charcoal, ochre, matte black, \
+navy, coral, sky blue, olive, blush, cream, taupe, mustard, forest green.
+
+NO: bare "black" / "white" / "brown" without qualifier; product names that just describe the \
+material colour incidentally.
+
+SEASONAL = Christmas, Halloween, back-to-school, Valentine's Day, Easter, autumn/harvest, \
+spring florals, summer coastal, winter cosy, thanksgiving. Only include if clearly seasonal.
+
+HARD RULES (apply strictly — reject any group failing these)
+
+1. Every group MUST have >= 3 product_ids from the input list. Groups with 1-2 products are FORBIDDEN.
+2. Every product_id you include must be an ID that literally appeared in the input; do not invent IDs.
+3. Group names are short (1-3 Title Case words): "Cherry", "Sage Green", "Halloween", not \
+long descriptions.
+4. Do not repeat a product_id across more than one motif in the same category.
+
+Aim for 6-12 MOTIFS, 6-10 PALETTE_COLOURS, 3-5 SEASONAL. Quality > quantity — output fewer if \
+the signal isn't strong.
+
+Output ONLY valid JSON (no prose, no code fences):
 
 {
   "motifs": [
-    {
-      "name": "<title case 1-3 words>",
-      "product_ids": [<int>, <int>, ...]
-    }
+    {"name": "<1-3 word Title Case>", "product_ids": [<int>, <int>, <int>, ...]}
+  ],
+  "palette_colours": [
+    {"name": "<1-3 word Title Case>", "product_ids": [<int>, ...]}
   ],
   "seasonal": [
-    {
-      "name": "<title case theme name>",
-      "product_ids": [<int>, ...]
-    }
+    {"name": "<1-3 word Title Case>", "product_ids": [<int>, ...]}
   ]
 }
 """
@@ -353,7 +372,16 @@ class DesignTrendEngine:
         raw_seasonal_count = len(data.get("seasonal", []) or [])
         rejected_thin: list[dict] = []
 
-        for group_key, category in (("motifs", "pattern"), ("seasonal", "seasonal")):
+        # New: also consume palette_colours from Claude, since the DB
+        # colours column is mostly empty (vision didn't populate reliably)
+        # so aggregation alone produces zero colour trends.
+        raw_palette_count = len(data.get("palette_colours", []) or [])
+
+        for group_key, category in (
+            ("motifs", "pattern"),
+            ("palette_colours", "colour"),
+            ("seasonal", "seasonal"),
+        ):
             for item in data.get(group_key, []) or []:
                 name = (item.get("name") or "").strip()
                 if not name:
@@ -382,7 +410,7 @@ class DesignTrendEngine:
                     "retailers": sorted(retailers),
                     "markets": sorted(markets),
                     "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
-                    "dominant_colours": [],
+                    "dominant_colours": [name.lower()] if category == "colour" else [],
                     "dominant_materials": [],
                     "dominant_styles": [],
                     "dominant_patterns": [name.lower()] if category == "pattern" else [],
@@ -390,8 +418,11 @@ class DesignTrendEngine:
 
         log.info(
             "motif_extract_done",
-            raw_motifs=raw_motif_count, raw_seasonal=raw_seasonal_count,
+            raw_motifs=raw_motif_count,
+            raw_palette=raw_palette_count,
+            raw_seasonal=raw_seasonal_count,
             kept_motifs=sum(1 for t in trends if t["category"] == "pattern"),
+            kept_colour=sum(1 for t in trends if t["category"] == "colour"),
             kept_seasonal=sum(1 for t in trends if t["category"] == "seasonal"),
             rejected=len(rejected_thin),
             rejected_sample=rejected_thin[:5],
