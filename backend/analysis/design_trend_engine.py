@@ -351,7 +351,7 @@ class DesignTrendEngine:
         try:
             response = await self.client.messages.create(
                 model=settings.nlp_model,
-                max_tokens=6000,
+                max_tokens=8000,
                 system=MOTIF_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": payload}],
             )
@@ -359,9 +359,16 @@ class DesignTrendEngine:
             if raw.startswith("```"):
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw)
-            data = json.loads(raw)
+            # Some models emit prose or multiple objects around the JSON.
+            # Extract only the first well-formed top-level {...} block.
+            json_str = _extract_first_json_object(raw)
+            data = json.loads(json_str)
         except Exception as exc:
-            log.error("motif_extract_failed", error=str(exc))
+            log.error(
+                "motif_extract_failed",
+                error=str(exc),
+                preview=(raw[:400] if 'raw' in locals() else 'no response'),
+            )
             return []
 
         # Index the sampled products so we can turn Claude's product IDs
@@ -581,6 +588,47 @@ class DesignTrendEngine:
 
 
 # -- Module helpers -----------------------------------------------------------
+
+def _extract_first_json_object(text: str) -> str:
+    """Return the first well-formed top-level {...} block in `text`.
+
+    Models sometimes emit prose or multiple JSON objects around the target,
+    e.g. `{...}\\n\\n{...}` or `Sure, here's the JSON:\\n{...}`. A plain
+    json.loads on that raises "Extra data" or "Expecting value". This
+    walks the string with a bracket counter that ignores braces inside
+    strings + honours backslash escapes, so it picks out exactly the first
+    balanced object regardless of what surrounds it.
+
+    Falls back to the input verbatim if no balanced object is found —
+    json.loads will then raise a clear error the caller already logs.
+    """
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if start == -1:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    return text[start:i + 1]
+    return text
+
 
 def _titlecase(s: str) -> str:
     """Simple title case that preserves & and doesn't lowercase acronyms."""
