@@ -71,56 +71,45 @@ GENERIC_PATTERN_STOPWORDS = {
 }
 
 
-MOTIF_SYSTEM_PROMPT = """You are a retail-trend analyst. You will read a list of home décor and \
-storage product NAMES with IDs, and extract three kinds of recurring design signals.
+MOTIF_SYSTEM_PROMPT = """You are a retail-trend analyst reading a sample of home décor and \
+storage product NAMES. Your job is to identify recurring DESIGN SIGNALS across the sample.
 
-CRITICAL: what to extract vs. what to IGNORE
+Output three lists of short search keywords — one keyword per signal. \
+For each keyword, we'll run a text search across the full 156k product catalogue \
+and count how many retailers stock matching products. So keywords must be:
 
-MOTIFS = decorative subject or surface pattern applied ACROSS multiple product types.
-YES: cherry, tortoise shell, mushroom, gingham, polka dot, floral, stripe, checkerboard, \
-scalloped, ribbed, dinosaur, unicorn, palm leaf, botanical, gnome, ghost, pumpkin, harvest wheat, \
-american flag, hearts, stars, animal print, evil eye, retro flowers.
+- Short (1-3 words) and specific enough to survive a substring match
+- Words that would literally appear inside product names (not adjectives *about* the design)
 
-NO — these are NOT motifs, do not include them:
-- Product types: "stainless steel cookware", "muffin cupcake pan", "baking sheet", \
-"food storage container", "trash can", "coffee mug", "salad bowl"
-- Materials on their own: "wood", "glass", "ceramic", "resin", "plastic"
-- Generic descriptors: "textured", "printed", "solid", "plain", "modern", "large"
-- Functional features: "with lid", "collapsible", "portable", "waterproof"
+WHAT TO EXTRACT
 
-PALETTE_COLOURS = specific colour or colour combination named in the product name itself.
-YES: sage green, dusty pink, terracotta, warm white, charcoal, ochre, matte black, \
-navy, coral, sky blue, olive, blush, cream, taupe, mustard, forest green.
+MOTIFS = specific decorative subject / pattern that shows up ACROSS multiple product types.
+Good keywords: cherry, tortoise, mushroom, gingham, polka dot, checkerboard, scalloped, \
+ribbed, dinosaur, unicorn, palm, botanical, gnome, ghost, pumpkin, harvest, flag, hearts, \
+stars, animal print, evil eye, floral, striped.
+Bad keywords (do NOT list): "stainless steel cookware", "coffee mug", "trash can" (product types); \
+"printed", "textured", "solid" (generic descriptors); "modern", "large", "with lid".
 
-NO: bare "black" / "white" / "brown" without qualifier; product names that just describe the \
-material colour incidentally.
+PALETTE_COLOURS = specific colour or colour combo named in product names.
+Good: sage, terracotta, dusty pink, matte black, ochre, blush, olive, navy, mustard, forest green, warm white.
+Bad: bare "black" / "white" / "brown" without a qualifier.
 
-SEASONAL = Christmas, Halloween, back-to-school, Valentine's Day, Easter, autumn/harvest, \
-spring florals, summer coastal, winter cosy, thanksgiving. Only include if clearly seasonal.
+SEASONAL = holiday or calendar keywords: halloween, valentine, easter, christmas, thanksgiving, \
+back-to-school, autumn, harvest, spring, summer coastal, winter cosy.
 
-HARD RULES (apply strictly — reject any group failing these)
+RULES
+1. Only propose a keyword if you saw at least 2 different products in the sample match it.
+2. Keep keywords short (1-3 words) and lower-case.
+3. Do NOT include product_ids — we run the matching ourselves.
 
-1. Every group MUST have >= 3 product_ids from the input list. Groups with 1-2 products are FORBIDDEN.
-2. Every product_id you include must be an ID that literally appeared in the input; do not invent IDs.
-3. Group names are short (1-3 Title Case words): "Cherry", "Sage Green", "Halloween", not \
-long descriptions.
-4. Do not repeat a product_id across more than one motif in the same category.
-
-Aim for 6-12 MOTIFS, 6-10 PALETTE_COLOURS, 3-5 SEASONAL. Quality > quantity — output fewer if \
-the signal isn't strong.
+Aim for 8-15 motifs, 6-10 palette colours, 3-6 seasonal. Prefer quality over count.
 
 Output ONLY valid JSON (no prose, no code fences):
 
 {
-  "motifs": [
-    {"name": "<1-3 word Title Case>", "product_ids": [<int>, <int>, <int>, ...]}
-  ],
-  "palette_colours": [
-    {"name": "<1-3 word Title Case>", "product_ids": [<int>, ...]}
-  ],
-  "seasonal": [
-    {"name": "<1-3 word Title Case>", "product_ids": [<int>, ...]}
-  ]
+  "motifs": ["cherry", "tortoise", "mushroom", ...],
+  "palette_colours": ["sage green", "terracotta", "dusty pink", ...],
+  "seasonal": ["halloween", "autumn", ...]
 }
 """
 
@@ -334,24 +323,36 @@ class DesignTrendEngine:
     # -- Motif + seasonal extraction via Claude -------------------------------
 
     async def _extract_motif_trends(self, products: list[dict]) -> list[dict]:
-        """Send a sample of product NAMES to Claude and ask it to identify
-        specific visual motifs (cherry, tortoise, mushroom, polka dot…) and
-        seasonal themes (Halloween, back-to-school…). Each returned motif
-        becomes one trend."""
-        # Sample ~600 names — enough signal for Claude, small enough context.
-        # Weight sampling toward newer products so seasonal drift shows up.
+        """Two-phase motif extraction.
+
+        Phase 1: Claude reads a 600-product sample and proposes KEYWORDS
+        for motifs / palette colours / seasonal themes. It doesn't need to
+        cite product IDs — its job is just to name what design signals it
+        sees.
+
+        Phase 2: For every keyword, we substring-match against the FULL
+        product catalogue in memory (products was loaded earlier by
+        _load_products, so no extra DB round trip). This lets us count
+        retailer spread accurately — the reason the previous approach
+        returned zero trends was that a 600-product sample of 156k rarely
+        contained 3+ examples of any specific motif, so every group failed
+        the retailer threshold even when the underlying data had hundreds
+        of matching products.
+        """
+        # Sample recent products for the keyword-brainstorm call
         sorted_products = sorted(
             products, key=lambda p: p["product"].last_seen_at, reverse=True,
         )
-        pool = sorted_products[:800]
+        pool = sorted_products[:1200]
         sampled = random.sample(pool, min(600, len(pool)))
-        lines = [f"[ID:{p['product'].id}] {p['product'].name}" for p in sampled]
-        payload = "PRODUCT NAMES:\n" + "\n".join(lines) + "\n\nIdentify recurring motifs and seasonal themes."
+        lines = [p["product"].name for p in sampled if p["product"].name]
+        payload = "PRODUCT NAMES:\n" + "\n".join(lines) + \
+            "\n\nExtract motif / palette-colour / seasonal keywords."
 
         try:
             response = await self.client.messages.create(
                 model=settings.nlp_model,
-                max_tokens=8000,
+                max_tokens=4000,
                 system=MOTIF_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": payload}],
             )
@@ -359,68 +360,57 @@ class DesignTrendEngine:
             if raw.startswith("```"):
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw)
-            # Some models emit prose or multiple objects around the JSON.
-            # Extract only the first well-formed top-level {...} block.
             json_str = _extract_first_json_object(raw)
             data = json.loads(json_str)
         except Exception as exc:
             log.error(
                 "motif_extract_failed",
                 error=str(exc),
-                preview=(raw[:400] if 'raw' in locals() else 'no response'),
+                preview=(raw[:400] if "raw" in locals() else "no response"),
             )
             return []
 
-        # Index the sampled products so we can turn Claude's product IDs
-        # into retailers / markets / prices without a second query
-        sampled_by_id = {p["product"].id: p for p in sampled}
-        trends: list[dict] = []
         raw_motif_count = len(data.get("motifs", []) or [])
-        raw_seasonal_count = len(data.get("seasonal", []) or [])
-        rejected_thin: list[dict] = []
-
-        # New: also consume palette_colours from Claude, since the DB
-        # colours column is mostly empty (vision didn't populate reliably)
-        # so aggregation alone produces zero colour trends.
         raw_palette_count = len(data.get("palette_colours", []) or [])
+        raw_seasonal_count = len(data.get("seasonal", []) or [])
+
+        # Phase 2: run each keyword against the full loaded product set
+        trends: list[dict] = []
+        rejected_thin: list[dict] = []
 
         for group_key, category in (
             ("motifs", "pattern"),
             ("palette_colours", "colour"),
             ("seasonal", "seasonal"),
         ):
-            for item in data.get(group_key, []) or []:
-                name = (item.get("name") or "").strip()
-                if not name:
+            for keyword_raw in (data.get(group_key) or []):
+                if not isinstance(keyword_raw, str):
                     continue
-                # Dedupe + filter to sampled IDs (Claude occasionally hallucinates)
-                pids = list(dict.fromkeys(
-                    pid for pid in (item.get("product_ids") or []) if pid in sampled_by_id
-                ))
-                if len(pids) < 3:
-                    rejected_thin.append({"name": name, "reason": "products<3", "n": len(pids)})
+                keyword = keyword_raw.strip().lower()
+                if not keyword or len(keyword) < 3:
                     continue
-                retailers = {sampled_by_id[pid]["retailer"].slug for pid in pids}
-                markets = {sampled_by_id[pid]["retailer"].country for pid in pids}
-                prices = [
-                    sampled_by_id[pid]["product"].price
-                    for pid in pids
-                    if sampled_by_id[pid]["product"].price
-                ]
+                matched = _match_keyword(products, keyword)
+                if len(matched) < 3:
+                    rejected_thin.append({"name": keyword, "reason": "products<3", "n": len(matched)})
+                    continue
+                retailers = {m["retailer"].slug for m in matched}
+                markets = {m["retailer"].country for m in matched}
+                prices = [m["product"].price for m in matched if m["product"].price]
                 if len(retailers) < MIN_RETAILERS:
-                    rejected_thin.append({"name": name, "reason": "retailers<3", "n": len(retailers)})
+                    rejected_thin.append({"name": keyword, "reason": "retailers<3", "n": len(retailers)})
                     continue
+                pids = [m["product"].id for m in matched]
                 trends.append({
                     "category": category,
-                    "name": _titlecase(name),
+                    "name": _titlecase(keyword),
                     "product_ids": pids,
                     "retailers": sorted(retailers),
                     "markets": sorted(markets),
                     "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
-                    "dominant_colours": [name.lower()] if category == "colour" else [],
+                    "dominant_colours": [keyword] if category == "colour" else [],
                     "dominant_materials": [],
                     "dominant_styles": [],
-                    "dominant_patterns": [name.lower()] if category == "pattern" else [],
+                    "dominant_patterns": [keyword] if category == "pattern" else [],
                 })
 
         log.info(
@@ -588,6 +578,26 @@ class DesignTrendEngine:
 
 
 # -- Module helpers -----------------------------------------------------------
+
+def _match_keyword(products: list[dict], keyword: str) -> list[dict]:
+    """Return the products whose name contains `keyword` as a case-insensitive
+    substring. Dedupes by product_id so a keyword like "cherry" that appears
+    twice in one name only counts the product once. Preserves the retailer +
+    price context the caller needs for the trend record."""
+    keyword_lc = keyword.lower()
+    seen: set[int] = set()
+    matched: list[dict] = []
+    for p in products:
+        name = (p["product"].name or "").lower()
+        if keyword_lc not in name:
+            continue
+        pid = p["product"].id
+        if pid in seen:
+            continue
+        seen.add(pid)
+        matched.append(p)
+    return matched
+
 
 def _extract_first_json_object(text: str) -> str:
     """Return the first well-formed top-level {...} block in `text`.
