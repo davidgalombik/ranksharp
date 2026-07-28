@@ -9,7 +9,12 @@ interface Props {
   searchParams: { week_start?: string; category?: string; status?: string; generation?: string };
 }
 
-const CATEGORIES = ["colour", "material", "pattern", "style", "shape", "seasonal", "functional"];
+// Matches the categories the DesignTrendEngine actually produces so no
+// dropdown option filters down to an empty page (the "no trends match"
+// issue the buyers hit on 2026-07-23). Legacy trends with other
+// categories (shape / functional / hardware / finish) still show under
+// "All categories" but aren't individually filterable.
+const CATEGORIES = ["colour", "material", "pattern", "style", "seasonal"];
 const STATUSES = ["rising", "new", "plateau", "declining"];
 
 async function getData(params: Props["searchParams"]): Promise<{

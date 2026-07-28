@@ -194,13 +194,17 @@ def regenerate_trend_analysis_task(self):
 
 
 async def _run_trend_analysis(task):
+    """Run the design-first trend engine that produces single-dimension
+    trends (specific colour / material / pattern / style / seasonal
+    signals). The legacy TrendEngine in analysis/trend_engine.py is kept
+    on disk for potential rollback but is no longer wired to any task."""
     from database.db import AsyncSessionLocal, async_engine
-    from analysis.trend_engine import TrendEngine
+    from analysis.design_trend_engine import DesignTrendEngine
 
     await async_engine.dispose()
 
     async with AsyncSessionLocal() as session:
-        engine_instance = TrendEngine(session, task=task)
+        engine_instance = DesignTrendEngine(session, task=task)
         report = await engine_instance.regenerate_analysis()
         if report:
             log.info(
