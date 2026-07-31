@@ -2,6 +2,7 @@ import { api, type Trend, type TrendExample } from "@/lib/api";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import clsx from "clsx";
+import ViewAllProductsButton from "@/components/ViewAllProductsButton";
 
 const STATUS_STYLES = {
   rising:   "bg-emerald-100 text-emerald-800",
@@ -283,9 +284,17 @@ export default async function TrendDetailPage({ params }: { params: { id: string
       {/* Example products — portrait grid */}
       {allExamples.length > 0 && (
         <section>
-          <h2 className="text-base font-semibold text-stone-900 mb-4">
-            Example products ({allExamples.length})
-          </h2>
+          <div className="flex items-baseline justify-between gap-3 mb-4 flex-wrap">
+            <h2 className="text-base font-semibold text-stone-900">
+              Example products ({allExamples.length})
+            </h2>
+            {/* Same modal as on TrendCard — lets the buyer browse the full
+                set (up to 100) sorted best-sellers first, without leaving
+                this page. */}
+            {trend.product_count > allExamples.length && (
+              <ViewAllProductsButton trend={trend} />
+            )}
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
             {allExamples.map((example) => (
               <ProductCard key={example.product_id} example={example} />
