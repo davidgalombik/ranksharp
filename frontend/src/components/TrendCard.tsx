@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Trend, TrendExample } from "@/lib/api";
 import clsx from "clsx";
+import ViewAllProductsButton from "./ViewAllProductsButton";
 
 const STATUS_STYLES = {
   rising:   "bg-emerald-100 text-emerald-800",
@@ -201,6 +202,10 @@ export default function TrendCard({ trend }: { trend: Trend }) {
                 <span>${trend.avg_price.toFixed(0)} avg</span>
               )}
             </div>
+
+            {/* Opens the modal with up to 100 matching products,
+                sorted best-sellers first. */}
+            <ViewAllProductsButton trend={trend} />
           </div>
         </div>
       </article>

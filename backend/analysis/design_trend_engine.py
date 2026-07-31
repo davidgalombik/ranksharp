@@ -54,6 +54,10 @@ log = structlog.get_logger()
 MIN_RETAILERS = 3
 # Maximum trends produced per dimension so the page doesn't explode.
 MAX_PER_DIMENSION = 12
+# Maximum example products stored per trend. The card still previews ~10;
+# the "View all N products" modal loads all of them. Bumped from 10 to 100
+# per user feedback (2026-07-28) — buyers want to browse the full set.
+EXAMPLES_PER_TREND = 100
 
 # Candle / fragrance products live in the Fragrance tab; exclude here to avoid
 # double-counting scent trends across surfaces.
@@ -659,8 +663,16 @@ class DesignTrendEngine:
         used_product_ids: set[int],
         used_image_urls: set[str],
     ):
-        """Pick up to 10 example products for this trend. Prefer complete
-        (priced + image) products, and prefer retailer diversity.
+        """Pick up to EXAMPLES_PER_TREND example products for this trend and
+        write them as TrendExample rows.
+
+        Rank order:
+          1. Best-sellers first (bumped 2026-07-28 per user feedback so the
+             "View all" modal surfaces buyer-actionable products at the top).
+          2. Then by completeness (priced + image + description).
+          3. Retailer diversity in the first 6 slots — no single retailer
+             hogs the hero row.
+
         Dedupes defensively — the DB has a unique (trend_id, product_id)
         constraint so any repeat here would blow the whole transaction."""
         # dict.fromkeys preserves order while removing duplicate PIDs
@@ -669,12 +681,12 @@ class DesignTrendEngine:
             if pid in by_id and pid not in used_product_ids
         ))
         if not candidates:
-            candidates = list(dict.fromkeys(rt["product_ids"]))[:10]
+            candidates = list(dict.fromkeys(rt["product_ids"]))[:EXAMPLES_PER_TREND]
 
-        def completeness(pid: int) -> tuple[float, int]:
+        def rank_key(pid: int) -> tuple:
             item = by_id.get(pid)
             if not item:
-                return (0.0, 0)
+                return (0, 0.0, 0)
             p = item["product"]
             score = 0.0
             if p.price:
@@ -683,10 +695,11 @@ class DesignTrendEngine:
                 score += 0.5 * len(p.image_urls)
             if p.description:
                 score += 1.0
-            return (score, hash(pid) % 1000)  # tiebreak by stable-ish hash
+            # Best-sellers ranked before non-best-sellers, then completeness
+            return (1 if p.is_best_seller else 0, score, hash(pid) % 1000)
 
-        # Diverse: take 10 top-scoring, spreading across retailers
-        sorted_ids = sorted(candidates, key=completeness, reverse=True)
+        # Sort best-sellers first, then by completeness (descending)
+        sorted_ids = sorted(candidates, key=rank_key, reverse=True)
         selected: list[int] = []
         retailer_seen: set[str] = set()
         for pid in sorted_ids:
@@ -698,16 +711,16 @@ class DesignTrendEngine:
                 continue  # first 6 slots enforce retailer diversity
             selected.append(pid)
             retailer_seen.add(r_slug)
-            if len(selected) >= 10:
+            if len(selected) >= EXAMPLES_PER_TREND:
                 break
         if not selected:
-            selected = sorted_ids[:10]
+            selected = sorted_ids[:EXAMPLES_PER_TREND]
 
         for rank, pid in enumerate(selected):
             self.db.add(TrendExample(
                 trend_id=trend.id,
                 product_id=pid,
-                relevance_score=max(0.1, 1.0 - rank * 0.08),
+                relevance_score=max(0.1, 1.0 - rank * 0.008),
                 is_hero=(rank == 0),
             ))
             used_product_ids.add(pid)

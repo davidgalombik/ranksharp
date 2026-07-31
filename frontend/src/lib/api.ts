@@ -30,6 +30,7 @@ export interface TrendExample {
   materials: string[];
   style_tags: string[];
   is_hero: boolean;
+  is_best_seller: boolean;
 }
 
 export interface Trend {

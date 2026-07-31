@@ -26,6 +26,9 @@ class TrendExampleOut(BaseModel):
     materials: list[str]
     style_tags: list[str]
     is_hero: bool
+    # Populated from Product.is_best_seller so the "View all" modal can
+    # badge best-seller cards and sort them first (2026-07-28).
+    is_best_seller: bool = False
 
     class Config:
         from_attributes = True
@@ -145,12 +148,14 @@ async def latest_trends(
 
 @router.get("/{trend_id}", response_model=TrendOut)
 async def get_trend(trend_id: int, db: AsyncSession = Depends(get_db)):
-    """Get a single trend with all examples."""
+    """Get a single trend with all examples (up to 100 — used by the
+    "View all N products" modal on the frontend). List/latest endpoints
+    stay at ~10 examples for card previews to keep payload small."""
     result = await db.execute(select(Trend).where(Trend.id == trend_id))
     trend = result.scalar_one_or_none()
     if not trend:
         raise HTTPException(status_code=404, detail="Trend not found")
-    return await _build_trend_out(trend, db, max_examples=20)
+    return await _build_trend_out(trend, db, max_examples=100)
 
 
 class WeekInfo(BaseModel):
@@ -182,7 +187,14 @@ async def _build_trend_out(
         .outerjoin(ProductAttributes, Product.id == ProductAttributes.product_id)
         .join(Retailer, Product.retailer_id == Retailer.id)
         .where(TrendExample.trend_id == trend.id)
-        .order_by(desc(TrendExample.is_hero), desc(TrendExample.relevance_score))
+        # Best-sellers ranked first (matches DesignTrendEngine._create_examples),
+        # then hero flag, then relevance_score. Modal on the frontend can
+        # still re-sort but this is the sensible default.
+        .order_by(
+            desc(Product.is_best_seller),
+            desc(TrendExample.is_hero),
+            desc(TrendExample.relevance_score),
+        )
         .limit(max_examples)
     )
 
@@ -202,6 +214,7 @@ async def _build_trend_out(
             materials=attrs.materials if attrs else [],
             style_tags=attrs.style_tags if attrs else [],
             is_hero=ex.is_hero,
+            is_best_seller=bool(product.is_best_seller),
         ))
 
     return TrendOut(
