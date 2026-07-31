@@ -138,6 +138,24 @@ STYLE_UMBRELLAS: dict[str, list[str]] = {
     ],
 }
 
+# Patterns — 8 umbrellas the buyers want reliably surfaced. Emit alongside
+# Claude motif extraction which still discovers narrower / one-off motifs
+# (Cherry, Tortoise, etc.). Overlap is intentional: a cherry product counts
+# toward both the specific Cherry motif AND the broader Fruit umbrella.
+PATTERN_UMBRELLAS: dict[str, list[str]] = {
+    "Fruit": [
+        "fruit", "cherry", "strawberry", "lemon", "apple", "pear", "grape",
+        "pineapple", "watermelon", "berry", "citrus",
+    ],
+    "Stripe": ["stripe", "striped", "pinstripe"],
+    "Gingham": ["gingham", "checkered"],
+    "Bows": ["bow", "ribbon"],
+    "Marble": ["marble", "marbled", "marbling"],
+    "Tropical": ["tropical", "palm", "banana leaf", "monstera", "hibiscus"],
+    "Nautical": ["nautical", "anchor", "sailboat", "seashell", "starfish"],
+    "Fluted": ["fluted", "fluting", "reeded"],
+}
+
 
 MOTIF_SYSTEM_PROMPT = """You are a retail-trend analyst reading a sample of home décor and \
 storage product NAMES. Your job is to identify recurring DESIGN SIGNALS across the sample.
@@ -268,6 +286,10 @@ class DesignTrendEngine:
         aggregate_trends.extend(self._build_umbrella_trends(
             products, SEASONAL_UMBRELLAS, category="seasonal",
             tag_attrs=(),  # no seasonal tag column — name-only match
+        ))
+        aggregate_trends.extend(self._build_umbrella_trends(
+            products, PATTERN_UMBRELLAS, category="pattern",
+            tag_attrs=("patterns",),
         ))
 
         self._progress(55, "Extracting motifs & seasonal themes from product names…")
