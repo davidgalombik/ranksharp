@@ -1,9 +1,8 @@
 """Trend API routes."""
-import re
 from datetime import datetime, date
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, desc, func, or_, text as sa_text
+from sqlalchemy import select, desc, func, or_, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.db import get_db
@@ -226,51 +225,45 @@ async def get_trend_products(
     if not keywords:
         return TrendProductsPage(total=0, items=[])
 
-    # Word-boundary regex covering every keyword. Postgres uses \y for
-    # word boundary. Case-insensitive via the ~* operator on the SQL side.
-    name_regex = r"\y(?:" + "|".join(re.escape(k) for k in keywords) + r")\y"
+    # Pure-ORM keyword match: for each keyword build (name ILIKE '%kw%'
+    # OR tag_column::text ILIKE '%kw%'), then OR them all together.
+    # Casting a JSONB array to text gives something like `["minimalist",
+    # "modern"]` — ILIKE against that catches products tagged with the
+    # keyword without needing a lateral jsonb_array_elements_text join.
+    # No word-boundary matching (slight false-positive risk on very short
+    # keywords) — the trade-off for the earlier bind-param version
+    # returning zero results on every trend.
+    tag_col_name = TAG_COLUMN_BY_CATEGORY.get(trend.category)
 
-    # Tag column check (JSONB array contains any of the keywords, case-
-    # insensitive via a lateral join over jsonb_array_elements_text).
-    tag_col = TAG_COLUMN_BY_CATEGORY.get(trend.category)
-    if tag_col:
-        tag_clause = sa_text(
-            f"EXISTS (SELECT 1 FROM jsonb_array_elements_text(product_attributes.{tag_col}) t "
-            f"WHERE lower(t) = ANY(:kws))"
-        )
-    else:
-        tag_clause = None
+    def match_for(kw: str):
+        name_cond = Product.name.ilike(f"%{kw}%")
+        if not tag_col_name:
+            return name_cond
+        tag_col_attr = getattr(ProductAttributes, tag_col_name)
+        tag_cond = cast(tag_col_attr, String).ilike(f"%{kw}%")
+        return or_(name_cond, tag_cond)
 
-    name_clause = sa_text("products.name ~* :name_regex")
-    where_conds = [name_clause] if tag_clause is None else [or_(name_clause, tag_clause)]
-
-    base_bind = {"name_regex": name_regex}
-    if tag_clause is not None:
-        base_bind["kws"] = keywords
+    match_clause = or_(*(match_for(kw) for kw in keywords))
+    where_conds = [Product.is_active == True, match_clause]
+    if only_best_sellers:
+        where_conds.append(Product.is_best_seller == True)
 
     count_stmt = (
         select(func.count())
         .select_from(Product)
         .outerjoin(ProductAttributes, ProductAttributes.product_id == Product.id)
-        .where(Product.is_active == True, *where_conds)
+        .where(*where_conds)
     )
-    if only_best_sellers:
-        count_stmt = count_stmt.where(Product.is_best_seller == True)
-    count_stmt = count_stmt.params(**base_bind)
     total = (await db.execute(count_stmt)).scalar_one()
 
     items_stmt = (
         select(Product, ProductAttributes, Retailer)
         .outerjoin(ProductAttributes, ProductAttributes.product_id == Product.id)
         .join(Retailer, Retailer.id == Product.retailer_id)
-        .where(Product.is_active == True, *where_conds)
+        .where(*where_conds)
         .order_by(desc(Product.is_best_seller), desc(Product.id))
         .limit(limit).offset(offset)
     )
-    if only_best_sellers:
-        items_stmt = items_stmt.where(Product.is_best_seller == True)
-    items_stmt = items_stmt.params(**base_bind)
-
     rows = (await db.execute(items_stmt)).all()
     items = [
         TrendExampleOut(
