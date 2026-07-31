@@ -71,6 +71,74 @@ GENERIC_PATTERN_STOPWORDS = {
 }
 
 
+# ── Hardcoded umbrella groups (user feedback 2026-07-28) ────────────────────
+#
+# Each umbrella emits ONE trend card whenever >= 3 retailers have at least
+# one matching product. Matching is word-boundary substring against the
+# product name AND the relevant tag column, so a product tagged
+# `materials=["rattan"]` and one literally named "Rattan Basket" both count.
+#
+# These emit ALONGSIDE the existing top-N individual value trends — they
+# don't replace them. So the Materials filter still shows Wood / Ceramic /
+# Glass etc., PLUS an umbrella card for "Natural Materials" grouping
+# rattan + seagrass + water hyacinth + jute + bamboo etc.
+
+# Materials — 4 umbrellas covering fabric-family, natural fibres, paper,
+# resin. Empty list is not permitted; each umbrella has at least one
+# canonical keyword the buyer requested.
+MATERIAL_UMBRELLAS: dict[str, list[str]] = {
+    "Fabrics": [
+        "cotton", "linen", "wool", "velvet", "canvas", "denim", "silk",
+        "jersey", "polyester", "felt", "tweed", "boucle", "corduroy",
+    ],
+    "Natural Materials": [
+        "rattan", "seagrass", "water hyacinth", "jute", "bamboo", "cork",
+        "wicker", "sisal", "cane", "hemp",
+    ],
+    "Paper": ["paper", "cardboard", "kraft"],
+    "Resin": ["resin", "polyresin", "epoxy"],
+}
+
+# Seasonal — 12 hardcoded themes the buyers want visible whenever the data
+# supports them. Word-boundary matched so "spring" doesn't match "springform".
+SEASONAL_UMBRELLAS: dict[str, list[str]] = {
+    "Halloween": ["halloween", "spooky", "witch", "ghost"],
+    "Thanksgiving": ["thanksgiving", "turkey"],
+    "Fall": ["fall", "autumn", "harvest", "maple", "acorn", "gourd", "pumpkin"],
+    "Christmas": [
+        "christmas", "xmas", "santa", "reindeer", "ornament", "snowflake",
+        "nutcracker",
+    ],
+    "Easter": ["easter", "bunny", "chick"],
+    "Valentine's Day": ["valentine", "cupid"],
+    "Spring": ["spring", "blossom"],
+    "Summer": ["summer", "beach", "tropical"],
+    "Winter": ["winter", "snowy", "cabin"],
+    "Americana": [
+        "americana", "patriotic", "july 4", "fourth of july", "flag",
+        "red white blue",
+    ],
+    "Mother's Day": ["mother's day", "mothers day", "mom", "mama"],
+    "Father's Day": ["father's day", "fathers day", "dad", "papa"],
+}
+
+# Styles — 4 umbrellas keeping Modern separate from Contemporary per the
+# design distinction (mid-century vs current-day).
+STYLE_UMBRELLAS: dict[str, list[str]] = {
+    "Modern": ["modern", "mid-century", "mid century", "mcm", "danish modern"],
+    "Vintage": [
+        "vintage", "antique", "retro", "art deco", "victorian", "edwardian",
+        "heritage", "nostalgic",
+    ],
+    "Mediterranean": [
+        "mediterranean", "tuscan", "greek", "moroccan", "spanish colonial",
+    ],
+    "Traditional": [
+        "traditional", "classic english", "colonial", "georgian", "chesterfield",
+    ],
+}
+
+
 MOTIF_SYSTEM_PROMPT = """You are a retail-trend analyst reading a sample of home décor and \
 storage product NAMES. Your job is to identify recurring DESIGN SIGNALS across the sample.
 
@@ -183,6 +251,24 @@ class DesignTrendEngine:
             t["_source"] = "aggregate"; aggregate_trends.append(t)
         for t in self._aggregate_attribute("style", products, "style_tags"):
             t["_source"] = "aggregate"; aggregate_trends.append(t)
+
+        # Hardcoded umbrella groups (2026-07-28 user feedback). These emit
+        # alongside the individual aggregates so buyers can see both the
+        # umbrella card ("Natural Materials", "Fall") AND the specific
+        # value cards ("Rattan", "Christmas"). All are _source=aggregate
+        # so they re-emit on every generation.
+        aggregate_trends.extend(self._build_umbrella_trends(
+            products, MATERIAL_UMBRELLAS, category="material",
+            tag_attrs=("materials",),
+        ))
+        aggregate_trends.extend(self._build_umbrella_trends(
+            products, STYLE_UMBRELLAS, category="style",
+            tag_attrs=("style_tags",),
+        ))
+        aggregate_trends.extend(self._build_umbrella_trends(
+            products, SEASONAL_UMBRELLAS, category="seasonal",
+            tag_attrs=(),  # no seasonal tag column — name-only match
+        ))
 
         self._progress(55, "Extracting motifs & seasonal themes from product names…")
         motif_trends_raw = await self._extract_motif_trends(products)
@@ -338,6 +424,41 @@ class DesignTrendEngine:
         # Rank by product count, cap per dimension so the page stays scannable
         trends.sort(key=lambda t: len(t["product_ids"]), reverse=True)
         return trends[:MAX_PER_DIMENSION]
+
+    # -- Hardcoded umbrella group aggregation ---------------------------------
+
+    def _build_umbrella_trends(
+        self,
+        products: list[dict],
+        umbrellas: dict[str, list[str]],
+        category: str,
+        tag_attrs: tuple[str, ...],
+    ) -> list[dict]:
+        """For each entry in `umbrellas`, find all products matching any of
+        its keywords (word-boundary regex against name, plus direct set
+        membership against tag columns). Emit one trend per umbrella that
+        clears MIN_RETAILERS. Logs the ones that miss so we can see why."""
+        trends: list[dict] = []
+        rejected: list[dict] = []
+        for umbrella_name, keywords in umbrellas.items():
+            matched = _match_umbrella(products, keywords, tag_attrs)
+            trend = _umbrella_to_trend(umbrella_name, category, matched)
+            if trend is None:
+                rejected.append({
+                    "name": umbrella_name,
+                    "n_products": len(matched),
+                    "n_retailers": len({m["retailer"].slug for m in matched}),
+                })
+                continue
+            trends.append(trend)
+        log.info(
+            "umbrella_trends_built",
+            category=category,
+            kept=len(trends),
+            rejected=len(rejected),
+            rejected_sample=rejected[:3],
+        )
+        return trends
 
     # -- Motif + seasonal extraction via Claude -------------------------------
 
@@ -618,6 +739,91 @@ def _match_keyword(products: list[dict], keyword: str) -> list[dict]:
         seen.add(pid)
         matched.append(p)
     return matched
+
+
+def _match_umbrella(
+    products: list[dict],
+    keywords: list[str],
+    tag_attrs: tuple[str, ...] = (),
+) -> list[dict]:
+    """Return every product whose NAME contains any of `keywords` (word-
+    boundary regex) OR whose values in any of `tag_attrs` on ProductAttributes
+    match any keyword. Dedupes by product_id.
+
+    Word-boundary matching avoids "spring" hitting "springform pan" while
+    still catching "Spring Floral Napkin". Multi-word keywords like
+    "water hyacinth" or "art deco" also work naturally with \\b anchors.
+    """
+    if not keywords:
+        return []
+    import re
+    # Compile one big alternation regex — faster than looping keywords per
+    # product, especially for the seasonal umbrellas with many products.
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(k.lower()) for k in keywords) + r")\b",
+        flags=re.IGNORECASE,
+    )
+    kw_lower = {k.lower() for k in keywords}
+    seen: set[int] = set()
+    matched: list[dict] = []
+    for p in products:
+        pid = p["product"].id
+        if pid in seen:
+            continue
+        # Product name (most common match path)
+        name = p["product"].name or ""
+        if pattern.search(name):
+            seen.add(pid)
+            matched.append(p)
+            continue
+        # Tag columns — direct set membership is enough since tag values are
+        # short, single-concept strings ("cotton", "rattan", "mid-century").
+        if tag_attrs:
+            attrs = p["attrs"]
+            hit = False
+            for attr in tag_attrs:
+                vals = getattr(attrs, attr, None) or []
+                for v in vals:
+                    if isinstance(v, str) and v.strip().lower() in kw_lower:
+                        hit = True
+                        break
+                if hit:
+                    break
+            if hit:
+                seen.add(pid)
+                matched.append(p)
+    return matched
+
+
+def _umbrella_to_trend(
+    name: str,
+    category: str,
+    matched: list[dict],
+    dominant_key: str | None = None,
+) -> dict | None:
+    """Turn an umbrella match into the trend-dict shape the rest of the
+    engine consumes. Returns None if the match doesn't clear MIN_RETAILERS
+    so the caller can filter cleanly."""
+    if len(matched) < 3:
+        return None
+    retailers = sorted({m["retailer"].slug for m in matched})
+    if len(retailers) < MIN_RETAILERS:
+        return None
+    markets = sorted({m["retailer"].country for m in matched})
+    prices = [m["product"].price for m in matched if m["product"].price]
+    trend = {
+        "category": category,
+        "name": name,
+        "product_ids": [m["product"].id for m in matched],
+        "retailers": retailers,
+        "markets": markets,
+        "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
+        "dominant_colours": [name.lower()] if category == "colour" else [],
+        "dominant_materials": [name.lower()] if category == "material" else [],
+        "dominant_styles": [name.lower()] if category == "style" else [],
+        "dominant_patterns": [name.lower()] if category == "pattern" else [],
+    }
+    return trend
 
 
 def _extract_first_json_object(text: str) -> str:
