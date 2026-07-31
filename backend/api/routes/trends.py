@@ -1,8 +1,9 @@
 """Trend API routes."""
+import re
 from datetime import datetime, date
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, or_, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.db import get_db
@@ -10,6 +11,39 @@ from database.models import Trend, TrendExample, Product, ProductAttributes, Ret
 from pydantic import BaseModel
 
 router = APIRouter()
+
+# JSON column names on ProductAttributes to check for a given trend category.
+# None means the tag column doesn't exist for that dimension (Seasonal has
+# no seasonal tag — matching is name-only).
+TAG_COLUMN_BY_CATEGORY: dict[str, Optional[str]] = {
+    "colour": "colours",
+    "material": "materials",
+    "style": "style_tags",
+    "pattern": "patterns",
+    "seasonal": None,
+}
+
+
+def _get_trend_keywords(trend: Trend) -> list[str]:
+    """Return the list of keywords to substring-match a trend against
+    the products table. Umbrella trends (name matches a key in
+    MATERIAL_UMBRELLAS / STYLE_UMBRELLAS / SEASONAL_UMBRELLAS /
+    PATTERN_UMBRELLAS) expand to their full keyword list; other trends
+    fall back to the single trend name."""
+    from analysis.design_trend_engine import (
+        MATERIAL_UMBRELLAS, STYLE_UMBRELLAS,
+        SEASONAL_UMBRELLAS, PATTERN_UMBRELLAS,
+    )
+    umbrellas_by_category = {
+        "material": MATERIAL_UMBRELLAS,
+        "style": STYLE_UMBRELLAS,
+        "seasonal": SEASONAL_UMBRELLAS,
+        "pattern": PATTERN_UMBRELLAS,
+    }
+    umbrellas = umbrellas_by_category.get(trend.category, {})
+    if trend.name in umbrellas:
+        return umbrellas[trend.name]
+    return [trend.name]
 
 
 class TrendExampleOut(BaseModel):
@@ -156,6 +190,108 @@ async def get_trend(trend_id: int, db: AsyncSession = Depends(get_db)):
     if not trend:
         raise HTTPException(status_code=404, detail="Trend not found")
     return await _build_trend_out(trend, db, max_examples=100)
+
+
+class TrendProductsPage(BaseModel):
+    total: int
+    items: list[TrendExampleOut]
+
+
+@router.get("/{trend_id}/products", response_model=TrendProductsPage)
+async def get_trend_products(
+    trend_id: int,
+    limit: int = Query(default=48, le=200),
+    offset: int = 0,
+    only_best_sellers: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the paginated list of products matching a trend, computed
+    live against the full products table (not the ~100 stored examples).
+
+    Matching:
+      * name substring — every keyword for the trend (umbrella lists for
+        Fabrics/Modern/Fall/etc., else the trend name) is turned into
+        `\\y<keyword>\\y` regex and OR'd with the product name
+      * tag column — for colour/material/style/pattern, the same keyword
+        list is checked against `ProductAttributes.<col>` array values
+      * A product counts if EITHER match hits
+
+    Sorted best-sellers first, then by product id desc (stable-ish).
+    """
+    trend = (await db.execute(select(Trend).where(Trend.id == trend_id))).scalar_one_or_none()
+    if not trend:
+        raise HTTPException(status_code=404, detail="Trend not found")
+
+    keywords = [k.lower() for k in _get_trend_keywords(trend) if k]
+    if not keywords:
+        return TrendProductsPage(total=0, items=[])
+
+    # Word-boundary regex covering every keyword. Postgres uses \y for
+    # word boundary. Case-insensitive via the ~* operator on the SQL side.
+    name_regex = r"\y(?:" + "|".join(re.escape(k) for k in keywords) + r")\y"
+
+    # Tag column check (JSONB array contains any of the keywords, case-
+    # insensitive via a lateral join over jsonb_array_elements_text).
+    tag_col = TAG_COLUMN_BY_CATEGORY.get(trend.category)
+    if tag_col:
+        tag_clause = sa_text(
+            f"EXISTS (SELECT 1 FROM jsonb_array_elements_text(product_attributes.{tag_col}) t "
+            f"WHERE lower(t) = ANY(:kws))"
+        )
+    else:
+        tag_clause = None
+
+    name_clause = sa_text("products.name ~* :name_regex")
+    where_conds = [name_clause] if tag_clause is None else [or_(name_clause, tag_clause)]
+
+    base_bind = {"name_regex": name_regex}
+    if tag_clause is not None:
+        base_bind["kws"] = keywords
+
+    count_stmt = (
+        select(func.count())
+        .select_from(Product)
+        .outerjoin(ProductAttributes, ProductAttributes.product_id == Product.id)
+        .where(Product.is_active == True, *where_conds)
+    )
+    if only_best_sellers:
+        count_stmt = count_stmt.where(Product.is_best_seller == True)
+    count_stmt = count_stmt.params(**base_bind)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    items_stmt = (
+        select(Product, ProductAttributes, Retailer)
+        .outerjoin(ProductAttributes, ProductAttributes.product_id == Product.id)
+        .join(Retailer, Retailer.id == Product.retailer_id)
+        .where(Product.is_active == True, *where_conds)
+        .order_by(desc(Product.is_best_seller), desc(Product.id))
+        .limit(limit).offset(offset)
+    )
+    if only_best_sellers:
+        items_stmt = items_stmt.where(Product.is_best_seller == True)
+    items_stmt = items_stmt.params(**base_bind)
+
+    rows = (await db.execute(items_stmt)).all()
+    items = [
+        TrendExampleOut(
+            product_id=p.id,
+            name=p.name,
+            url=p.url,
+            price=p.price,
+            currency=p.currency,
+            primary_image_url=p.primary_image_url,
+            retailer_name=r.name,
+            retailer_slug=r.slug,
+            retailer_country=r.country,
+            colours=attrs.colours if attrs else [],
+            materials=attrs.materials if attrs else [],
+            style_tags=attrs.style_tags if attrs else [],
+            is_hero=False,
+            is_best_seller=bool(p.is_best_seller),
+        )
+        for p, attrs, r in rows
+    ]
+    return TrendProductsPage(total=total, items=items)
 
 
 class WeekInfo(BaseModel):

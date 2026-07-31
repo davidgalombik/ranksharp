@@ -1,50 +1,73 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type Trend, type TrendExample } from "@/lib/api";
 import clsx from "clsx";
 
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
+const PAGE_SIZE = 48;
 
 interface Props {
-  trend: Trend;      // used for the header + fallback if fetch fails
+  trend: Trend;
   onClose: () => void;
 }
 
 /**
- * "View all N products" modal for a trend card.
+ * "View all N products" modal for a trend card. Paginated live query
+ * against the products table — so a trend with 36k matching products
+ * is fully browsable, not capped at the ~100 stored TrendExample rows.
  *
- * Fetches the full detail (up to 100 example products) via /api/trends/{id}
- * on open — the list endpoint only sends ~10 for card previews, so we go
- * fresh here to get the full set with best-seller flags.
- *
- * Sorts best-sellers first by default (matches backend ordering).
- * "Only best sellers" toggle at the top narrows to just the badged ones,
- * with a caveat that some retailers don't tag best-seller status at all.
+ * "Only best sellers" toggle re-fetches with the filter applied
+ * (so the total count reflects the toggle state).
  */
 export default function TrendProductsModal({ trend, onClose }: Props) {
-  const [products, setProducts] = useState<TrendExample[] | null>(null);
+  const [products, setProducts] = useState<TrendExample[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [onlyBestSellers, setOnlyBestSellers] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Initial page + reset when the toggle changes
+  const loadFirstPage = useCallback(async () => {
     setLoading(true);
-    api.trends
-      .get(trend.id)
-      .then((full) => {
-        if (!cancelled) setProducts(full.examples ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setProducts(trend.examples ?? []);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+    setOffset(0);
+    try {
+      const res = await api.trends.products(trend.id, {
+        limit: PAGE_SIZE,
+        offset: 0,
+        only_best_sellers: onlyBestSellers,
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [trend.id]);
+      setProducts(res.items);
+      setTotal(res.total);
+    } catch {
+      setProducts([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [trend.id, onlyBestSellers]);
+
+  useEffect(() => {
+    loadFirstPage();
+  }, [loadFirstPage]);
+
+  async function loadMore() {
+    if (loadingMore || total === null || products.length >= total) return;
+    setLoadingMore(true);
+    const nextOffset = offset + PAGE_SIZE;
+    try {
+      const res = await api.trends.products(trend.id, {
+        limit: PAGE_SIZE,
+        offset: nextOffset,
+        only_best_sellers: onlyBestSellers,
+      });
+      setProducts((prev) => [...prev, ...res.items]);
+      setOffset(nextOffset);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   // Close on Escape
   useEffect(() => {
@@ -53,16 +76,7 @@ export default function TrendProductsModal({ trend, onClose }: Props) {
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  const totalCount = products?.length ?? 0;
-  const bestSellerCount = useMemo(
-    () => (products ?? []).filter((p) => p.is_best_seller).length,
-    [products]
-  );
-  const visible = useMemo(() => {
-    const list = products ?? [];
-    if (!onlyBestSellers) return list;
-    return list.filter((p) => p.is_best_seller);
-  }, [products, onlyBestSellers]);
+  const showLoadMore = total !== null && products.length < total && !loading;
 
   return (
     <div
@@ -84,8 +98,11 @@ export default function TrendProductsModal({ trend, onClose }: Props) {
             </p>
             <h2 className="text-xl font-bold text-stone-900 mt-0.5">{trend.name}</h2>
             <p className="text-sm text-stone-500 mt-1">
-              Showing {visible.length} of {trend.product_count.toLocaleString()} total
-              matching products across {trend.retailer_count} retailers
+              {loading
+                ? "Loading matching products…"
+                : total === null
+                  ? ""
+                  : `Showing ${products.length.toLocaleString()} of ${total.toLocaleString()} matching products across ${trend.retailer_count} retailers`}
             </p>
           </div>
           <button
@@ -107,7 +124,6 @@ export default function TrendProductsModal({ trend, onClose }: Props) {
               className="rounded"
             />
             Only best sellers
-            <span className="text-xs text-stone-400">({bestSellerCount})</span>
           </label>
           {onlyBestSellers && (
             <p className="text-xs text-stone-400">
@@ -121,18 +137,38 @@ export default function TrendProductsModal({ trend, onClose }: Props) {
         <div className="flex-1 overflow-y-auto p-6">
           {loading ? (
             <p className="text-center text-stone-400 py-16">Loading products…</p>
-          ) : visible.length === 0 ? (
+          ) : products.length === 0 ? (
             <p className="text-center text-stone-400 py-16">
               {onlyBestSellers
                 ? "No best-seller products in this trend."
-                : "No product examples available."}
+                : "No products match this trend."}
             </p>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-              {visible.map((p) => (
-                <ProductTile key={p.product_id} p={p} />
-              ))}
-            </div>
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {products.map((p) => (
+                  <ProductTile key={p.product_id} p={p} />
+                ))}
+              </div>
+              {showLoadMore && (
+                <div className="pt-6 text-center">
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    className={clsx(
+                      "px-5 py-2 rounded-lg text-sm font-medium transition-colors",
+                      loadingMore
+                        ? "bg-stone-100 text-stone-400 cursor-not-allowed"
+                        : "bg-stone-900 text-white hover:bg-stone-700"
+                    )}
+                  >
+                    {loadingMore
+                      ? "Loading…"
+                      : `Load ${Math.min(PAGE_SIZE, (total ?? 0) - products.length)} more`}
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

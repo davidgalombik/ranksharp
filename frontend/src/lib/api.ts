@@ -202,6 +202,18 @@ export const api = {
     latest: () => apiFetch<Trend[]>("/api/trends/latest"),
     get: (id: number) => apiFetch<Trend>(`/api/trends/${id}`),
     weeks: () => apiFetch<{ week: string; generation_count: number }[]>("/api/trends/weeks/"),
+    // Paginated live query of every product matching a trend — used by
+    // the "View all N products" modal so the buyer can browse the full
+    // set, not just the ~100 stored TrendExample rows.
+    products: (id: number, params?: { limit?: number; offset?: number; only_best_sellers?: boolean }) =>
+      apiFetch<{ total: number; items: TrendExample[] }>(
+        `/api/trends/${id}/products`,
+        {
+          limit: String(params?.limit ?? 48),
+          offset: String(params?.offset ?? 0),
+          ...(params?.only_best_sellers ? { only_best_sellers: "true" } : {}),
+        }
+      ),
   },
   reports: {
     list: () => apiFetch<Report[]>("/api/reports/"),
