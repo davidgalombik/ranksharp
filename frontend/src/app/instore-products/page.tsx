@@ -1025,17 +1025,28 @@ function ImageCard({
 
 function ImageDetailModal({
   imageId,
+  imageIds,
+  onNavigate,
   onClose,
   onItemUpdated,
   onItemDeleted,
 }: {
   imageId: number;
+  // Ordered list of image IDs currently visible on the page (from whichever
+  // view is active — image grid or flat product list). Lets the modal show
+  // prev/next arrows so buyers can flip through shelves without closing.
+  imageIds: number[];
+  onNavigate: (newImageId: number) => void;
   onClose: () => void;
   onItemUpdated: (id: number, patch: { product_name?: string; category?: string }) => Promise<void>;
   onItemDeleted: (id: number) => Promise<void>;
 }) {
   const [detail, setDetail] = useState<ImageDetail | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const currentIndex = imageIds.indexOf(imageId);
+  const prevId = currentIndex > 0 ? imageIds[currentIndex - 1] : null;
+  const nextId = currentIndex >= 0 && currentIndex < imageIds.length - 1 ? imageIds[currentIndex + 1] : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -1048,10 +1059,14 @@ function ImageDetailModal({
   }, [imageId]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      else if (e.key === "ArrowLeft" && prevId !== null) onNavigate(prevId);
+      else if (e.key === "ArrowRight" && nextId !== null) onNavigate(nextId);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, onNavigate, prevId, nextId]);
 
   const handleItemPatch = async (id: number, patch: { product_name?: string; category?: string }) => {
     await onItemUpdated(id, patch);
@@ -1078,6 +1093,34 @@ function ImageDetailModal({
             alt={detail?.filename || ""}
             className="max-w-full max-h-[85vh] object-contain rounded-lg"
           />
+
+          {/* Prev / next navigation — appears when there are neighbouring
+              images in the currently-visible list. Keyboard: ← / →. */}
+          {prevId !== null && (
+            <button
+              onClick={() => onNavigate(prevId)}
+              title="Previous image (←)"
+              aria-label="Previous image"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-stone-900 text-xl leading-none flex items-center justify-center shadow-lg transition-colors"
+            >
+              ‹
+            </button>
+          )}
+          {nextId !== null && (
+            <button
+              onClick={() => onNavigate(nextId)}
+              title="Next image (→)"
+              aria-label="Next image"
+              className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-stone-900 text-xl leading-none flex items-center justify-center shadow-lg transition-colors"
+            >
+              ›
+            </button>
+          )}
+          {imageIds.length > 1 && currentIndex >= 0 && (
+            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-white/85 text-xs text-stone-700 font-medium">
+              {currentIndex + 1} / {imageIds.length}
+            </span>
+          )}
         </div>
 
         {/* Right: items list */}
@@ -1878,10 +1921,20 @@ export default function InStoreProductsPage() {
         <FailedImagesPanel onRetryAll={retryAllFailed} reload={failedReload} />
       )}
 
-      {/* Image detail modal */}
+      {/* Image detail modal — pass the ordered list of visible image
+          IDs so the modal can offer prev/next navigation. In "image"
+          view mode this is the direct order of the image grid; in
+          "product" mode it's the order that items appear (deduped by
+          image_id so we don't loop over the same image N times). */}
       {openImageId !== null && (
         <ImageDetailModal
           imageId={openImageId}
+          imageIds={
+            viewMode === "image"
+              ? images.map((img) => img.id)
+              : Array.from(new Set(products.map((p) => p.image_id)))
+          }
+          onNavigate={setOpenImageId}
           onClose={() => setOpenImageId(null)}
           onItemUpdated={updateItem}
           onItemDeleted={deleteItem}
