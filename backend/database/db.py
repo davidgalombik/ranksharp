@@ -277,6 +277,13 @@ async def seed_retailers():
         dict(slug="meijer", name="Meijer", base_url="https://www.meijer.com", country="US",
              tier=ScrapeTier.HTTP, adapter_class="scraper.adapters.tier2_http.meijer.MeijerAdapter",
              categories={"storage": "home-storage", "decor": "home-decor"}),
+        # CSV-only retailer (2026-07-28 user add). No scraper; products
+        # populate via /api/retailers/csv-upload. tier=HTTP + empty
+        # adapter_class is the current CSV-only convention (nothing in
+        # the scraper dispatcher tries to invoke an empty adapter_class).
+        dict(slug="uncharted", name="Uncharted", base_url="https://www.uncharted.com/", country="US",
+             tier=ScrapeTier.HTTP, adapter_class="",
+             categories={}),
         dict(slug="next-uk", name="Next UK", base_url="https://www.next.co.uk", country="GB",
              tier=ScrapeTier.HTTP, adapter_class="scraper.adapters.tier2_http.next_uk.NextUKAdapter",
              categories={"storage": "storage-boxes", "decor": "home-accessories"}),
