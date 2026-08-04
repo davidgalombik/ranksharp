@@ -284,6 +284,19 @@ async def seed_retailers():
         dict(slug="uncharted", name="Uncharted", base_url="https://www.uncharted.com/", country="US",
              tier=ScrapeTier.HTTP, adapter_class="",
              categories={}),
+        # Additional CSV-only US retailers (2026-07-28). Both Pottery Barn
+        # Baby and Pottery Barn Kids sit on potterybarnkids.com — Baby is a
+        # sub-section (/baby/) rather than a separate site.
+        dict(slug="macys", name="Macy's", base_url="https://www.macys.com", country="US",
+             tier=ScrapeTier.HTTP, adapter_class="", categories={}),
+        dict(slug="marshalls", name="Marshalls", base_url="https://www.marshalls.com", country="US",
+             tier=ScrapeTier.HTTP, adapter_class="", categories={}),
+        dict(slug="pottery-barn-teens", name="Pottery Barn Teens", base_url="https://www.pbteen.com", country="US",
+             tier=ScrapeTier.HTTP, adapter_class="", categories={}),
+        dict(slug="pottery-barn-baby", name="Pottery Barn Baby", base_url="https://www.potterybarnkids.com", country="US",
+             tier=ScrapeTier.HTTP, adapter_class="", categories={}),
+        dict(slug="pottery-barn-kids", name="Pottery Barn Kids", base_url="https://www.potterybarnkids.com", country="US",
+             tier=ScrapeTier.HTTP, adapter_class="", categories={}),
         dict(slug="next-uk", name="Next UK", base_url="https://www.next.co.uk", country="GB",
              tier=ScrapeTier.HTTP, adapter_class="scraper.adapters.tier2_http.next_uk.NextUKAdapter",
              categories={"storage": "storage-boxes", "decor": "home-accessories"}),
