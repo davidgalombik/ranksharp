@@ -18,6 +18,10 @@ export function CsvUploadModal({
   const [preview, setPreview] = useState<CsvPreviewResult | null>(null);
   const [commit, setCommit] = useState<CsvCommitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Merge mode: this CSV is one piece of a multi-file upload (e.g. a 58k
+  // scrape split into 3 files). Skip the snapshot sweep so absent
+  // products from sibling files aren't wrongly moved to Historical.
+  const [mergeMode, setMergeMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handlePreview = async () => {
@@ -25,7 +29,7 @@ export function CsvUploadModal({
     setError(null);
     setPhase("previewing");
     try {
-      const result = await api.retailers.csvPreview(file);
+      const result = await api.retailers.csvPreview(file, mergeMode);
       setPreview(result);
       setPhase("previewed");
     } catch (e: unknown) {
@@ -39,7 +43,7 @@ export function CsvUploadModal({
     setError(null);
     setPhase("committing");
     try {
-      const result = await api.retailers.csvCommit(file);
+      const result = await api.retailers.csvCommit(file, mergeMode);
       setCommit(result);
       setPhase("done");
     } catch (e: unknown) {
@@ -104,7 +108,7 @@ export function CsvUploadModal({
                 )}
                 {!file && (
                   <p className="text-xs text-stone-400 mt-1">
-                    Max 5,000 rows · required columns: url, name, primary_image_url, retailer_slug
+                    Max 40,000 rows per file · required columns: url, name, primary_image_url, retailer_slug
                   </p>
                 )}
                 <input
@@ -129,6 +133,29 @@ export function CsvUploadModal({
                   Leave colours / materials / season / room out — they&apos;re filled in by the analysis pipeline.
                 </p>
               </div>
+
+              {/* Merge mode — for multi-file uploads. Off by default so a
+                  single-file weekly refresh still moves absent products to
+                  Historical (the normal snapshot behaviour). */}
+              <label className="flex items-start gap-2.5 p-3 rounded-lg border border-stone-200 hover:bg-stone-50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={mergeMode}
+                  onChange={(e) => setMergeMode(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-stone-300 text-stone-900 focus:ring-stone-900"
+                />
+                <div className="text-xs">
+                  <p className="font-semibold text-stone-700">
+                    Merge mode — this is part of a multi-file upload
+                  </p>
+                  <p className="text-stone-500 mt-0.5">
+                    Skip the snapshot sweep. Products in the database that aren&apos;t
+                    in this CSV stay active. Use for a scrape that was split across
+                    several files. <b>Leave off</b> for a normal weekly refresh
+                    where this file is the retailer&apos;s complete current inventory.
+                  </p>
+                </div>
+              </label>
             </div>
           )}
 
@@ -138,20 +165,36 @@ export function CsvUploadModal({
 
           {phase === "previewed" && preview && (
             <div className="space-y-3">
+              {mergeMode && (
+                <div className="bg-sky-50 border border-sky-200 rounded-lg p-3 flex items-start gap-2">
+                  <span className="text-sky-600 text-sm">🔗</span>
+                  <p className="text-xs text-sky-900">
+                    <span className="font-semibold">Merge mode is on.</span>{" "}
+                    Products absent from this CSV will stay active — the snapshot
+                    sweep is skipped. Use this only when this file is one piece of
+                    a multi-file upload.
+                  </p>
+                </div>
+              )}
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 <Counter label="Total rows" value={preview.total_rows} />
                 <Counter label="Will insert" value={preview.new_count} className="text-emerald-600" />
                 <Counter label="Will update" value={preview.update_count} className="text-amber-600" />
-                <Counter label="Will move to Historical" value={preview.would_deactivate} className="text-stone-600" />
+                <Counter
+                  label={mergeMode ? "Move to Historical" : "Will move to Historical"}
+                  value={preview.would_deactivate}
+                  className="text-stone-600"
+                />
                 <Counter label="Rejects" value={preview.rejects.length} className="text-red-500" />
               </div>
-              {preview.would_deactivate > 0 && (
+              {!mergeMode && preview.would_deactivate > 0 && (
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
                   <p className="text-xs text-amber-900">
                     <span className="font-semibold">Heads-up:</span> {preview.would_deactivate} active product
                     {preview.would_deactivate !== 1 ? "s" : ""} not in this CSV will be moved to Historical
                     Products. This treats the CSV as the complete current inventory for the retailer
-                    {preview.retailers_referenced.length === 1 ? "" : "s"} listed.
+                    {preview.retailers_referenced.length === 1 ? "" : "s"} listed. Turn on <i>Merge mode</i>{" "}
+                    if this is one piece of a multi-file upload.
                   </p>
                 </div>
               )}

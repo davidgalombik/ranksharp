@@ -471,10 +471,13 @@ export const api = {
       fetch(`${API_BASE}/api/retailers/${id}/analyse`, { method: "POST" }).then((r) => r.json()),
     analyseAll: () =>
       fetch(`${API_BASE}/api/retailers/analyse-all`, { method: "POST" }).then((r) => r.json()),
-    csvPreview: async (file: File) => {
+    // skipDeactivate: merge mode — part of a multi-file upload. When true,
+    // absent products are NOT moved to Historical. Preview reflects that.
+    csvPreview: async (file: File, skipDeactivate = false) => {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`${API_BASE}/api/retailers/csv-upload/preview`, { method: "POST", body: fd });
+      const url = `${API_BASE}/api/retailers/csv-upload/preview${skipDeactivate ? "?skip_deactivate=true" : ""}`;
+      const res = await fetch(url, { method: "POST", body: fd });
       if (!res.ok) {
         let detail: string;
         try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
@@ -482,10 +485,11 @@ export const api = {
       }
       return res.json() as Promise<CsvPreviewResult>;
     },
-    csvCommit: async (file: File) => {
+    csvCommit: async (file: File, skipDeactivate = false) => {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`${API_BASE}/api/retailers/csv-upload/commit`, { method: "POST", body: fd });
+      const url = `${API_BASE}/api/retailers/csv-upload/commit${skipDeactivate ? "?skip_deactivate=true" : ""}`;
+      const res = await fetch(url, { method: "POST", body: fd });
       if (!res.ok) {
         let detail: string;
         try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }

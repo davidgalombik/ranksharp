@@ -390,9 +390,16 @@ async def _count_would_deactivate(
 @router.post("/preview", response_model=PreviewSummary)
 async def preview_csv_upload(
     file: UploadFile = File(...),
+    skip_deactivate: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    """Parse and validate the CSV. No DB writes. Returns summary + rejects."""
+    """Parse and validate the CSV. No DB writes. Returns summary + rejects.
+
+    skip_deactivate: when true, the CSV is treated as a partial update (one
+    piece of a multi-file upload) rather than a full snapshot — products
+    absent from this file are NOT moved to Historical. Preview reflects that
+    by reporting would_deactivate=0.
+    """
     rows, rejects, retailer_map, missing_slugs, valid = await _preflight(file, db)
 
     # Policy: if the file references retailer slugs that don't exist, we will
@@ -403,7 +410,7 @@ async def preview_csv_upload(
         pass
 
     new_count, update_count, _ = await _classify_new_vs_update(valid, db)
-    would_deactivate = await _count_would_deactivate(valid, db)
+    would_deactivate = 0 if skip_deactivate else await _count_would_deactivate(valid, db)
 
     return PreviewSummary(
         total_rows=len(rows),
@@ -421,10 +428,18 @@ async def preview_csv_upload(
 @router.post("/commit", response_model=CommitSummary)
 async def commit_csv_upload(
     file: UploadFile = File(...),
+    skip_deactivate: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """Parse, validate, and upsert. Rejects the whole file if any row references
-    an unknown retailer_slug."""
+    an unknown retailer_slug.
+
+    skip_deactivate: when true, treat this CSV as a partial update — insert new
+    rows and refresh existing rows but do NOT run the snapshot sweep that would
+    move absent products to Historical. Use for multi-file uploads (e.g. a 58k
+    Macy's scrape split into three CSVs) where no single file represents the
+    retailer's full current inventory.
+    """
     rows, rejects, retailer_map, missing_slugs, valid = await _preflight(file, db)
 
     # Policy: fail whole file if any unknown retailer_slug
@@ -551,35 +566,41 @@ async def commit_csv_upload(
     # product whose URL is NOT in the CSV. Moves orphaned products from
     # Online -> Historical. Scoped per-retailer so a CSV for X never touches Y.
     #
+    # Skipped in merge mode (skip_deactivate=True): the caller is uploading
+    # one piece of a multi-file batch, so no single file represents the
+    # retailer's full inventory and the sweep would incorrectly retire
+    # products from sibling files.
+    #
     # Implementation note: we compute the diff in Python and UPDATE with IN
     # rather than UPDATE WHERE url NOT IN (csv_urls). Building a NOT IN with
     # thousands of bind parameters causes asyncpg/Postgres to fail. The IN
     # list is bounded by the much smaller diff set.
     deactivated = 0
-    for retailer_id, csv_urls in _urls_by_retailer(valid).items():
-        result = await db.execute(
-            select(Product.url).where(
-                Product.retailer_id == retailer_id,
-                Product.is_active == True,
-            )
-        )
-        active_urls = {row[0] for row in result.all()}
-        to_deactivate = list(active_urls - csv_urls)
-        if not to_deactivate:
-            continue
-        # Chunk the UPDATE so an enormous deactivation list still stays
-        # within DB driver limits.
-        for i in range(0, len(to_deactivate), 500):
-            chunk = to_deactivate[i:i+500]
-            res = await db.execute(
-                update(Product)
-                .where(
+    if not skip_deactivate:
+        for retailer_id, csv_urls in _urls_by_retailer(valid).items():
+            result = await db.execute(
+                select(Product.url).where(
                     Product.retailer_id == retailer_id,
-                    Product.url.in_(chunk),
+                    Product.is_active == True,
                 )
-                .values(is_active=False)
             )
-            deactivated += res.rowcount or 0
+            active_urls = {row[0] for row in result.all()}
+            to_deactivate = list(active_urls - csv_urls)
+            if not to_deactivate:
+                continue
+            # Chunk the UPDATE so an enormous deactivation list still stays
+            # within DB driver limits.
+            for i in range(0, len(to_deactivate), 500):
+                chunk = to_deactivate[i:i+500]
+                res = await db.execute(
+                    update(Product)
+                    .where(
+                        Product.retailer_id == retailer_id,
+                        Product.url.in_(chunk),
+                    )
+                    .values(is_active=False)
+                )
+                deactivated += res.rowcount or 0
 
     await db.commit()
 
@@ -601,6 +622,7 @@ async def commit_csv_upload(
         "csv_upload_commit",
         inserted=inserted, updated=updated, deactivated=deactivated,
         queued=queued_count, rejects=len(rejects),
+        merge_mode=skip_deactivate,
     )
 
     return CommitSummary(
