@@ -63,6 +63,13 @@ def analyse_aldi_upload(self, upload_id: int, file_b64: str | None = None) -> in
                 upload.product_categories = result.get("product_categories", [])
                 upload.season_occasion = result.get("season_occasion")
                 upload.mood_descriptors = result.get("mood_descriptors", [])
+                # Claude decides whether the board is thematic enough to
+                # warrant literal-keyword pre-filtering downstream.
+                # Empty list means "stylistic — use pure semantic search".
+                upload.filter_keywords = [
+                    k.strip().lower() for k in (result.get("filter_keywords") or [])
+                    if isinstance(k, str) and k.strip()
+                ]
                 upload.raw_analysis = result
 
                 if upload.session_id:
@@ -364,12 +371,21 @@ def _maybe_trigger_session_ideas(session, session_id: int) -> None:
     log.info("aldi_session_all_done", session_id=session_id, upload_count=len(uploads))
 
 
-def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: int = 125) -> list[dict]:
-    """Find similar products using merged session trend data.
+def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: int = 125) -> tuple[list[dict], int]:
+    """Find products matching the merged session mood board.
 
-    Fetches a pool of limit*3 from the DB then randomly samples `limit` from it,
-    so every call (including each Try Again regeneration) returns a different set
-    of products from within the relevant similarity neighbourhood.
+    Two paths depending on whether Claude flagged the mood board as
+    thematic (via filter_keywords) or stylistic (empty list):
+
+      * THEMATIC (Halloween, Christmas, etc.) — pre-filter product names
+        by word-boundary regex against the keywords, then semantic-rank
+        WITHIN that filtered subset. Guarantees the pool is
+        actually-on-theme instead of colour/material-adjacent noise.
+      * STYLISTIC (default) — pure semantic search across the whole
+        catalogue as before.
+
+    Returns a tuple of (sampled_pool, total_matched_count). The second
+    element powers the low-match warning banner on the frontend.
     """
     from analysis.embeddings import embed_text_sync
 
@@ -384,16 +400,41 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
     ]))
 
     if not query_text.strip():
-        return []
+        return ([], 0)
 
     query_vec = embed_text_sync(query_text)
     if query_vec is None:
-        return []
+        return ([], 0)
     vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
     fetch_limit = limit * 3  # fetch a wide neighbourhood, then sample
 
+    # Build the pre-filter regex if this is a thematic mood board.
+    # Postgres \y is a word boundary. Case-insensitive via ~*.
+    keywords = [k for k in (sess_obj.filter_keywords or []) if k]
+    keyword_clause = ""
+    keyword_bind: dict = {}
+    total_matches = 0
+    if keywords:
+        import re as _re
+        pattern = r"\y(?:" + "|".join(_re.escape(k) for k in keywords) + r")\y"
+        keyword_clause = "AND p.name ~* :kw_pattern"
+        keyword_bind["kw_pattern"] = pattern
+        log.info("aldi_session_thematic_filter",
+                 session_id=sess_obj.id, keywords=keywords)
+
     try:
-        result = session.execute(text(f"""
+        # Count matching products first so the UI knows the true scope
+        count_sql = text(f"""
+            SELECT COUNT(*) FROM products p
+            JOIN product_attributes pa ON pa.product_id = p.id
+            WHERE pa.embedding IS NOT NULL
+              AND p.is_active = TRUE
+              {keyword_clause}
+        """)
+        total_matches = session.execute(count_sql, keyword_bind).scalar() or 0
+
+        # Then rank + sample
+        rank_sql = text(f"""
             SELECT p.id, p.name, p.url, p.price, p.primary_image_url,
                    p.is_best_seller,
                    r.name AS retailer_name,
@@ -403,11 +444,13 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
             JOIN retailers r ON r.id = p.retailer_id
             WHERE pa.embedding IS NOT NULL
               AND p.is_active = TRUE
+              {keyword_clause}
             ORDER BY
               (pa.embedding <=> '{vec_str}'::vector)
               * (CASE WHEN p.is_best_seller THEN 0.7 ELSE 1.0 END)
             LIMIT {fetch_limit}
-        """))
+        """)
+        result = session.execute(rank_sql, keyword_bind)
         pool = [
             {
                 "id": row.id,
@@ -424,10 +467,13 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
             }
             for row in result.fetchall()
         ]
-        return random.sample(pool, min(limit, len(pool))) if len(pool) > limit else pool
+        sampled = (
+            random.sample(pool, min(limit, len(pool))) if len(pool) > limit else pool
+        )
+        return (sampled, total_matches)
     except Exception as exc:
         log.error("similar_products_for_session_failed", error=str(exc))
-        return []
+        return ([], 0)
 
 
 # ── Task 3: Session idea generation ──────────────────────────────────────────
@@ -467,6 +513,7 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
             merged_prints = _merge([u.key_prints or [] for u in done_uploads])
             merged_categories = _merge([u.product_categories or [] for u in done_uploads])
             merged_mood = _merge([u.mood_descriptors or [] for u in done_uploads])
+            merged_filter_keywords = _merge([u.filter_keywords or [] for u in done_uploads])
             # For season: take most common or first
             seasons = [u.season_occasion for u in done_uploads if u.season_occasion]
             merged_season = seasons[0] if seasons else None
@@ -480,11 +527,19 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
             sess_obj.product_categories = merged_categories
             sess_obj.mood_descriptors = merged_mood
             sess_obj.season_occasion = merged_season
+            sess_obj.filter_keywords = merged_filter_keywords
             db_session.flush()
 
             # Find similar products — fetch 50, sample 20 inside generate_ideas
-            similar_products = _find_similar_products_for_session(db_session, sess_obj, limit=125)
-            log.info("aldi_session_similar_products", session_id=session_id, count=len(similar_products))
+            similar_products, similar_count = _find_similar_products_for_session(
+                db_session, sess_obj, limit=125,
+            )
+            sess_obj.similar_products_count = similar_count
+            log.info("aldi_session_similar_products",
+                     session_id=session_id,
+                     sampled=len(similar_products),
+                     total_matched=similar_count,
+                     thematic=bool(merged_filter_keywords))
 
             product_map = {p["id"]: p for p in similar_products}
 
@@ -496,6 +551,10 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                 "product_categories": merged_categories,
                 "season_occasion": merged_season,
                 "mood_descriptors": merged_mood,
+                # Carried into the idea prompt so Claude can honestly
+                # explain when the mood board is out-of-scope.
+                "total_matched_products": similar_count,
+                "filter_keywords": merged_filter_keywords,
             }
 
             # Pass existing idea names so regeneration produces different results
@@ -620,7 +679,10 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
 
         try:
             # Find similar products
-            similar_products = _find_similar_products_for_session(db_session, sess_obj, limit=125)
+            similar_products, similar_count = _find_similar_products_for_session(
+                db_session, sess_obj, limit=125,
+            )
+            sess_obj.similar_products_count = similar_count
             product_map = {p["id"]: p for p in similar_products}
 
             trend_data = {
@@ -631,6 +693,8 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
                 "product_categories": sess_obj.product_categories or [],
                 "season_occasion": sess_obj.season_occasion,
                 "mood_descriptors": sess_obj.mood_descriptors or [],
+                "total_matched_products": similar_count,
+                "filter_keywords": sess_obj.filter_keywords or [],
             }
 
             ideas = asyncio.run(

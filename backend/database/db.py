@@ -196,6 +196,16 @@ async def init_db():
              "SELECT 1 FROM information_schema.columns "
              "WHERE table_name='product_attributes' AND column_name='fragrance' "
              "AND character_maximum_length >= 500"),
+            # Aldi hybrid keyword filter (2026-07-28). Vision extraction
+            # now outputs filter_keywords for thematic mood boards
+            # (Halloween etc.); those are stored per-upload and merged onto
+            # the session for the pre-filter path.
+            ("ALTER TABLE aldi_uploads ADD COLUMN IF NOT EXISTS filter_keywords JSONB DEFAULT '[]'",
+             _col("aldi_uploads", "filter_keywords")),
+            ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS filter_keywords JSONB DEFAULT '[]'",
+             _col("aldi_sessions", "filter_keywords")),
+            ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS similar_products_count INTEGER",
+             _col("aldi_sessions", "similar_products_count")),
             # In-store catalogue images: country tag (AU/US). Default 'US'
             # so existing rows backfill automatically.
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "

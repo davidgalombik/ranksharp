@@ -264,6 +264,14 @@ class AldiSession(Base):
     product_categories: Mapped[list] = mapped_column(JSON, default=list)
     season_occasion: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     mood_descriptors: Mapped[list] = mapped_column(JSON, default=list)
+    # Claude-decided keywords for pre-filtering product name matches on
+    # strongly thematic mood boards (Halloween, Christmas, etc.). Empty
+    # list = stylistic board, fall through to pure semantic search.
+    filter_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    # How many products cleared the similar-products query on the last
+    # generation. Used by the frontend to show a low-match warning when
+    # the mood board falls outside the catalogue's coverage.
+    similar_products_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -306,6 +314,10 @@ class AldiUpload(Base):
     product_categories: Mapped[list] = mapped_column(JSON, default=list)
     season_occasion: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     mood_descriptors: Mapped[list] = mapped_column(JSON, default=list)
+    # Claude-decided keywords for pre-filtering the product-name match on
+    # strongly thematic mood boards. Populated during analyse_aldi_upload
+    # and later merged onto the session for cross-upload matching.
+    filter_keywords: Mapped[list] = mapped_column(JSON, default=list)
     raw_analysis: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -58,6 +58,12 @@ interface AldiSession {
   product_categories?: string[];
   season_occasion?: string | null;
   mood_descriptors?: string[];
+  // Claude-decided keywords used to pre-filter the catalogue for a
+  // thematic mood board. Empty for stylistic boards.
+  filter_keywords?: string[];
+  // How many products matched the theme in the whole 156k catalogue on
+  // the last generation. Drives the low-match warning banner.
+  similar_products_count?: number | null;
   error_message?: string | null;
   uploads?: AldiUploadDoc[];
   ideas?: AldiIdea[];
@@ -623,6 +629,50 @@ function SessionDetailView({
 
       {/* Right: combined ideas */}
       <div>
+        {/* Low-match warning banner — shown when the mood board didn't
+            match many products in the catalogue, so buyers understand
+            why the recommendations look thin / off-theme rather than
+            assuming the tool is broken. */}
+        {session.status === "done" &&
+          typeof session.similar_products_count === "number" &&
+          session.similar_products_count < 50 && (
+          <div
+            className={clsx(
+              "mb-3 rounded-xl border p-3.5 text-xs space-y-1.5",
+              session.similar_products_count < 5
+                ? "bg-red-50 border-red-200 text-red-800"
+                : "bg-amber-50 border-amber-200 text-amber-900"
+            )}
+          >
+            <p className="font-semibold flex items-center gap-1.5">
+              <span>{session.similar_products_count < 5 ? "⚠️" : "ℹ️"}</span>
+              <span>
+                {session.similar_products_count < 5
+                  ? "Mood board may be out of scope"
+                  : "Limited catalogue coverage"}
+              </span>
+            </p>
+            <p>
+              Only <b>{session.similar_products_count}</b>{" "}
+              product{session.similar_products_count === 1 ? "" : "s"} in the
+              catalogue matched this mood board&apos;s theme
+              {(session.filter_keywords || []).length > 0 && (
+                <>
+                  {" "}(searched for{" "}
+                  <i>
+                    {session.filter_keywords!.slice(0, 6).join(", ")}
+                    {session.filter_keywords!.length > 6 ? ", …" : ""}
+                  </i>
+                  )
+                </>
+              )}
+              .{" "}
+              {session.similar_products_count < 5
+                ? "The theme likely falls outside our home-décor, storage, tabletop and kitchenware coverage. Try a mood board focused on those categories."
+                : "Recommendations may not fully align with the mood board — try a mood board with a more concrete theme, or add more images."}
+            </p>
+          </div>
+        )}
         {/* Header row: title + Try Again button */}
         <div className="flex items-center justify-between mb-1 gap-2">
           <h3 className="font-semibold text-stone-800">

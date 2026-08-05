@@ -112,6 +112,15 @@ class AldiSessionDetailOut(AldiSessionOut):
     product_categories: list = []
     season_occasion: Optional[str] = None
     mood_descriptors: list = []
+    # Claude-decided keywords used to pre-filter the product catalogue
+    # (thematic mood boards only — empty for stylistic boards). Exposed
+    # so the frontend can show buyers what was used and why.
+    filter_keywords: list = []
+    # How many catalogue products matched the mood board on the last
+    # generation. Nullable = never generated. Used by the frontend to
+    # show a low-match warning banner when the theme falls outside our
+    # coverage (e.g. Outdoor Sports).
+    similar_products_count: Optional[int] = None
     error_message: Optional[str] = None
     uploads: list[AldiUploadSummary] = []
     ideas: list[AldiIdeaOut] = []
@@ -546,6 +555,8 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         product_categories=sess_obj.product_categories or [],
         season_occasion=sess_obj.season_occasion,
         mood_descriptors=sess_obj.mood_descriptors or [],
+        filter_keywords=sess_obj.filter_keywords or [],
+        similar_products_count=sess_obj.similar_products_count,
         error_message=sess_obj.error_message,
         uploads=[
             AldiUploadSummary(

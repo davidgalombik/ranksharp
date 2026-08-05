@@ -30,8 +30,36 @@ Extract the following trend intelligence and return ONLY valid JSON:
   "product_categories": ["<home product categories visible or implied, e.g. 'table linen', 'ceramic canisters', 'wicker baskets', 'rag rugs'>"],
   "season_occasion": "<season or occasion this trend targets, e.g. 'Spring 2025', 'Easter Entertaining', 'Summer Farmhouse'>",
   "mood_descriptors": ["<adjectives describing the feeling, e.g. 'warm', 'nostalgic', 'relaxed', 'artisan', 'cottage', 'wholesome'>"],
+  "filter_keywords": ["<see instructions below>"],
   "confidence": <0.0-1.0>
 }
+
+FILTER_KEYWORDS INSTRUCTIONS — read carefully.
+Downstream, we match this mood board to products in a 156k home-décor catalogue.
+For most stylistic mood boards (e.g. "Sage Green Farmhouse Kitchen") pure semantic
+similarity works well — return an EMPTY array `[]`.
+
+BUT for strongly thematic / concept-driven mood boards (Halloween, Christmas,
+Valentine's, Easter, Thanksgiving, Back-to-School, Independence Day, Mother's Day,
+Father's Day, or any similarly narrow calendar or iconography-driven concept),
+semantic search struggles because the catalogue contains thousands of colour-
+adjacent-but-off-theme products. In those cases, populate filter_keywords with the
+LITERAL words a matching product's name would probably contain. Examples:
+
+  Halloween board  → ["halloween", "spooky", "pumpkin", "ghost", "witch",
+                      "skeleton", "spider", "haunted", "boo", "trick or treat",
+                      "jack-o-lantern"]
+  Christmas board  → ["christmas", "xmas", "santa", "reindeer", "ornament",
+                      "nutcracker", "stocking", "snowflake"]
+  Valentine board  → ["valentine", "heart", "cupid", "love"]
+  Boo Basket board → ["halloween", "boo", "spooky", "pumpkin", "ghost", "spider"]
+
+Rules for filter_keywords:
+- Empty array `[]` for stylistic / palette / material boards — the DEFAULT.
+- 5-15 concrete keywords for thematic boards.
+- All lowercase, single words or short phrases that would literally appear in
+  product NAMES (not adjectives about the design).
+- Prefer specificity — "pumpkin" over "orange", "santa" over "red-and-green".
 
 If Pantone colour names appear in the document (e.g. 'Pale Banana', 'Dusty Rose', 'Mistletoe'), include them exactly as written.
 If text labels or section headings appear (e.g. 'Key Prints — US Only', 'Key Materials', 'Spring Farmhouse'), use them to inform your extraction.
@@ -227,7 +255,7 @@ class MoodBoardAnalyser:
         try:
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=1200,
+                max_tokens=1600,  # bumped from 1200 to fit filter_keywords
                 messages=[{"role": "user", "content": content}],
             )
             raw = response.content[0].text.strip()
@@ -259,7 +287,26 @@ class MoodBoardAnalyser:
         pool = similar_products[:125]  # cap defensively
         sample = random.sample(pool, min(20, len(pool))) if len(pool) > 20 else pool
 
-        if sample:
+        # Honest "out of scope" prompt when the mood board barely matches
+        # anything in the catalogue. Better to explain than invent bad ideas.
+        total_matched = trend_data.get("total_matched_products", len(sample))
+        low_match = total_matched < 5
+
+        if low_match:
+            products_summary = (
+                f"IMPORTANT: only {total_matched} products in the entire 156k catalogue "
+                f"matched this mood board's theme. The mood board likely falls OUTSIDE "
+                f"our home-décor + storage catalogue scope. Return exactly ONE 'idea' "
+                f"whose name is 'Mood board out of scope' and whose description explains "
+                f"which categories we cover and suggests the buyer re-upload a mood board "
+                f"focused on home décor / storage / tabletop / kitchenware. Do not invent "
+                f"speculative products from the tiny sample below."
+            )
+            if sample:
+                products_summary += "\n\nAll {} matching products:\n".format(len(sample)) + "\n".join(
+                    f"[ID:{p['id']}] {p['name']} | {p['retailer_name']}" for p in sample
+                )
+        elif sample:
             products_summary = "\n".join(
                 f"[ID:{p['id']}] {p['name']} | {p['retailer_name']} | "
                 f"${p.get('price') or '?'} | "
