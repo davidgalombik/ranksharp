@@ -1,13 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams, usePathname } from "next/navigation";
+import { useSearchParams, usePathname, useRouter } from "next/navigation";
 import { api, type Trend } from "@/lib/api";
 import TrendCard from "@/components/TrendCard";
 import TrendsActionButton from "@/components/TrendsActionButton";
 import ClearSetsButton from "@/components/ClearSetsButton";
 import Link from "next/link";
 import clsx from "clsx";
+
+// A week's generation summary. `generations` is the actual list of set
+// numbers present that week (e.g. [1, 3, 4] after Set 2 is deleted).
+// `generation_count` is legacy (max of that list) kept for other callers.
+type WeekInfo = { week: string; generation_count: number; generations?: number[] };
 
 // Matches the categories the DesignTrendEngine actually produces so no
 // dropdown option filters to an empty page. Legacy trends with other
@@ -17,9 +22,10 @@ const CATEGORIES = ["colour", "material", "pattern", "style", "seasonal"];
 export default function TrendsClient() {
   const searchParams = useSearchParams();
   const pathname = usePathname();
+  const router = useRouter();
 
   const [trends, setTrends] = useState<Trend[]>([]);
-  const [weeks, setWeeks] = useState<{ week: string; generation_count: number }[]>([]);
+  const [weeks, setWeeks] = useState<WeekInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Local filter state — no submit button, applies on change
@@ -43,7 +49,7 @@ export default function TrendsClient() {
     if (generationParam) params.generation = generationParam;
     Promise.all([
       api.trends.list(params).catch(() => [] as Trend[]),
-      api.trends.weeks().catch(() => [] as { week: string; generation_count: number }[]),
+      api.trends.weeks().catch(() => [] as WeekInfo[]),
     ]).then(([t, w]) => {
       if (!cancelled) {
         setTrends(t);
@@ -87,14 +93,54 @@ export default function TrendsClient() {
     });
   }, [trends, category, value]);
 
-  const activeGen = generationParam ? parseInt(generationParam) : (weeks[0]?.generation_count ?? 1);
-  const generationCount = weeks[0]?.generation_count ?? 1;
-  const hasMultipleGenerations = generationCount > 1;
+  // Actual set numbers present for the most-recent week. Falls back to
+  // [1..generation_count] so old cached responses without `generations`
+  // still work; new server responses drive the exact list.
+  const latestWeek = weeks[0];
+  const generationList: number[] = latestWeek?.generations
+    ?? (latestWeek ? Array.from({ length: latestWeek.generation_count }, (_, i) => i + 1) : []);
+  const latestGeneration = generationList.length ? generationList[generationList.length - 1] : 1;
+  const activeGen = generationParam ? parseInt(generationParam) : latestGeneration;
+  const hasMultipleGenerations = generationList.length > 1;
 
   function genTabHref(gen: number) {
     const p = new URLSearchParams();
     p.set("generation", String(gen));
     return `${pathname}?${p.toString()}`;
+  }
+
+  // Delete one Set from the most-recent week. Refuse if it's the only
+  // remaining set (matches the backend 409). After a successful delete,
+  // navigate to the highest remaining set if we were viewing the one
+  // that was just removed.
+  async function handleDeleteGeneration(gen: number) {
+    if (!latestWeek) return;
+    if (generationList.length <= 1) {
+      alert("Can't delete the only remaining set — run a new analysis first, or clear all sets.");
+      return;
+    }
+    if (!confirm(
+      `Delete Set ${gen}? This removes every trend in that set. Can't be undone.`
+    )) return;
+    try {
+      const result = await api.trends.deleteGeneration(latestWeek.week, gen);
+      // Refetch weeks + trends. If we were viewing the deleted set,
+      // switch to the highest remaining.
+      const nextGen = activeGen === gen
+        ? (result.remaining_generations[result.remaining_generations.length - 1] ?? latestGeneration)
+        : activeGen;
+      if (nextGen !== activeGen) {
+        const p = new URLSearchParams();
+        p.set("generation", String(nextGen));
+        router.push(`${pathname}?${p.toString()}`);
+      } else {
+        // Same tab still valid — just trigger a re-fetch to update the
+        // weeks list (so the deleted tab disappears from the UI).
+        setRefreshTick((n) => n + 1);
+      }
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "Delete failed");
+    }
   }
 
   return (
@@ -143,24 +189,48 @@ export default function TrendsClient() {
         )}
       </div>
 
-      {/* Generation tabs — shown when multiple sets exist */}
+      {/* Generation tabs — shown when multiple sets exist. Each tab is a
+          compound control: label navigates via Link, the × next to it
+          deletes just that set (with confirm). Rendered from the actual
+          `generationList` so a delete leaves a clean gap rather than a
+          phantom empty tab. */}
       {hasMultipleGenerations && (
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-stone-400 font-medium">Set:</span>
-          {Array.from({ length: generationCount }, (_, i) => i + 1).map((gen) => (
-            <Link
-              key={gen}
-              href={genTabHref(gen)}
-              className={clsx(
-                "px-3 py-1 rounded-lg text-xs font-medium transition-colors border",
-                activeGen === gen
-                  ? "bg-stone-900 border-stone-900 text-white"
-                  : "bg-white border-stone-200 text-stone-600 hover:border-stone-400"
-              )}
-            >
-              {gen === generationCount ? `Set ${gen} ✨` : `Set ${gen}`}
-            </Link>
-          ))}
+          {generationList.map((gen) => {
+            const active = activeGen === gen;
+            return (
+              <div
+                key={gen}
+                className={clsx(
+                  "inline-flex items-stretch rounded-lg overflow-hidden border transition-colors",
+                  active
+                    ? "border-stone-900 bg-stone-900 text-white"
+                    : "border-stone-200 bg-white text-stone-600 hover:border-stone-400"
+                )}
+              >
+                <Link
+                  href={genTabHref(gen)}
+                  className="px-3 py-1 text-xs font-medium"
+                >
+                  {gen === latestGeneration ? `Set ${gen} ✨` : `Set ${gen}`}
+                </Link>
+                <button
+                  onClick={() => handleDeleteGeneration(gen)}
+                  title={`Delete Set ${gen}`}
+                  aria-label={`Delete Set ${gen}`}
+                  className={clsx(
+                    "px-1.5 text-xs border-l transition-colors",
+                    active
+                      ? "border-stone-700 hover:bg-stone-800"
+                      : "border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600"
+                  )}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
           <ClearSetsButton target="trends" />
         </div>
       )}
@@ -173,7 +243,7 @@ export default function TrendsClient() {
 
       <p className="text-sm text-stone-500">
         {loading ? "Loading…" : `${filtered.length} trend${filtered.length !== 1 ? "s" : ""} found`}
-        {hasMultipleGenerations && ` · Set ${activeGen} of ${generationCount}`}
+        {hasMultipleGenerations && ` · Set ${activeGen} of ${generationList.length}`}
       </p>
 
       {loading ? null : filtered.length > 0 ? (

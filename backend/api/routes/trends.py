@@ -289,21 +289,158 @@ async def get_trend_products(
 
 class WeekInfo(BaseModel):
     week: str
+    # Max generation number seen this week. Kept for backward compatibility
+    # with clients that only need "how many sets exist".
     generation_count: int
+    # The ACTUAL distinct generation numbers this week, sorted ascending.
+    # Populated so the frontend can render tabs for exactly what exists
+    # rather than assuming 1..N (which is wrong after a delete leaves a gap).
+    generations: list[int] = []
 
 
 @router.get("/weeks/", response_model=list[WeekInfo])
 async def list_weeks(db: AsyncSession = Depends(get_db)):
     """List all weeks with trend data, including generation count per week."""
     result = await db.execute(
-        select(Trend.week_start, func.max(Trend.generation).label("gen_count"))
-        .group_by(Trend.week_start)
-        .order_by(desc(Trend.week_start))
+        select(Trend.week_start, Trend.generation)
+        .group_by(Trend.week_start, Trend.generation)
+        .order_by(desc(Trend.week_start), Trend.generation)
     )
+    # Group into {week: [gens]} preserving week ordering (desc)
+    by_week: dict = {}
+    order: list = []
+    for row in result.all():
+        w = row.week_start
+        if w not in by_week:
+            by_week[w] = []
+            order.append(w)
+        by_week[w].append(int(row.generation))
     return [
-        WeekInfo(week=str(row.week_start.date()), generation_count=row.gen_count)
-        for row in result.all()
+        WeekInfo(
+            week=str(w.date()),
+            generation_count=max(by_week[w]),
+            generations=sorted(by_week[w]),
+        )
+        for w in order
     ]
+
+
+@router.delete("/week/{week_start}/generations/{generation}")
+async def delete_trend_generation(
+    week_start: date,
+    generation: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete a single Set N for a given week.
+
+    Order matters:
+      1. Count what's here and what would remain.
+      2. Null out any prev_trend_id from LATER weeks that references rows we
+         are about to delete — the FK has no ON DELETE clause, so leaving
+         those references would fail the DELETE with a FK violation.
+      3. Delete the TrendExample rows for the affected trends.
+      4. Delete the Trend rows themselves.
+
+    Guardrails:
+      - 404 if the week/generation has no trends.
+      - 409 if this would leave the week with zero trends — the caller
+        should delete no trends at all, or delete the whole week's data
+        via /api/analysis/reset if that's what they actually want.
+
+    Notes:
+      - Numbering is not compacted. Sets 1/2/3 with 2 removed becomes
+        Sets 1/3; the next Try Again produces Set 4 (max+1).
+      - Downstream trends' momentum_pct values stay intact (they were
+        snapshotted at creation time). Only the click-through backlink
+        via prev_trend_id is severed for rows that pointed at deletions.
+    """
+    from sqlalchemy import delete as sa_delete, update as sa_update
+
+    # Cast the path date back to a datetime at midnight to match the stored
+    # week_start values (which are stored as DateTime at 00:00:00).
+    week_dt = datetime.combine(week_start, datetime.min.time())
+
+    # Count what's in this generation for this week
+    count_row = await db.execute(
+        select(func.count(Trend.id)).where(
+            Trend.week_start == week_dt,
+            Trend.generation == generation,
+        )
+    )
+    to_delete = count_row.scalar_one() or 0
+    if to_delete == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No trends found for week {week_start} generation {generation}",
+        )
+
+    # Count what would remain for this week if we did the delete
+    remaining_row = await db.execute(
+        select(func.count(Trend.id)).where(
+            Trend.week_start == week_dt,
+            Trend.generation != generation,
+        )
+    )
+    remaining = remaining_row.scalar_one() or 0
+    if remaining == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing to delete — this is the only remaining generation for "
+                f"week {week_start}. Delete a different set or wipe the whole "
+                f"week's data via the analysis reset flow."
+            ),
+        )
+
+    # Collect the trend IDs we're about to delete — needed to sever any
+    # downstream prev_trend_id references and to scope the TrendExample delete.
+    id_rows = await db.execute(
+        select(Trend.id).where(
+            Trend.week_start == week_dt,
+            Trend.generation == generation,
+        )
+    )
+    trend_ids = [tid for (tid,) in id_rows.all()]
+
+    # 2. Null downstream backlinks (any Trend anywhere pointing at rows we
+    # are deleting). No cascade — we want to keep those downstream rows;
+    # they just lose the ability to link back to the prior. Their stored
+    # momentum_pct remains valid as a historical snapshot.
+    unlinked_result = await db.execute(
+        sa_update(Trend)
+        .where(Trend.prev_trend_id.in_(trend_ids))
+        .values(prev_trend_id=None)
+    )
+    unlinked = unlinked_result.rowcount or 0
+
+    # 3. Delete the TrendExample rows for the affected trends.
+    examples_result = await db.execute(
+        sa_delete(TrendExample).where(TrendExample.trend_id.in_(trend_ids))
+    )
+    examples_deleted = examples_result.rowcount or 0
+
+    # 4. Delete the Trend rows themselves.
+    await db.execute(
+        sa_delete(Trend).where(Trend.id.in_(trend_ids))
+    )
+    await db.commit()
+
+    # Return what's left for the frontend to update its tabs
+    remaining_gens_rows = await db.execute(
+        select(Trend.generation)
+        .where(Trend.week_start == week_dt)
+        .distinct()
+    )
+    remaining_gens = sorted({int(g) for (g,) in remaining_gens_rows.all()})
+
+    return {
+        "week": str(week_start),
+        "generation": generation,
+        "deleted_trends": to_delete,
+        "deleted_examples": examples_deleted,
+        "unlinked_backlinks": unlinked,
+        "remaining_generations": remaining_gens,
+    }
 
 
 async def _build_trend_out(

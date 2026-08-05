@@ -201,7 +201,13 @@ export const api = {
       apiFetch<Trend[]>("/api/trends/", params as Record<string, string>),
     latest: () => apiFetch<Trend[]>("/api/trends/latest"),
     get: (id: number) => apiFetch<Trend>(`/api/trends/${id}`),
-    weeks: () => apiFetch<{ week: string; generation_count: number }[]>("/api/trends/weeks/"),
+    // `generations` is the actual list of set numbers present that week
+    // (e.g. [1, 3, 4] after Set 2 was deleted). Frontend renders tabs
+    // from this list rather than assuming 1..generation_count.
+    weeks: () =>
+      apiFetch<{ week: string; generation_count: number; generations?: number[] }[]>(
+        "/api/trends/weeks/"
+      ),
     // Paginated live query of every product matching a trend — used by
     // the "View all N products" modal so the buyer can browse the full
     // set, not just the ~100 stored TrendExample rows.
@@ -214,6 +220,27 @@ export const api = {
           ...(params?.only_best_sellers ? { only_best_sellers: "true" } : {}),
         }
       ),
+    // Hard-delete a single Set N for the given week. Server returns
+    // {deleted_trends, deleted_examples, unlinked_backlinks, remaining_generations}.
+    deleteGeneration: async (week: string, generation: number) => {
+      const res = await fetch(
+        `${API_BASE}/api/trends/week/${week}/generations/${generation}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<{
+        week: string;
+        generation: number;
+        deleted_trends: number;
+        deleted_examples: number;
+        unlinked_backlinks: number;
+        remaining_generations: number[];
+      }>;
+    },
   },
   reports: {
     list: () => apiFetch<Report[]>("/api/reports/"),
