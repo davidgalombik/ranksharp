@@ -464,11 +464,13 @@ function SessionDetailView({
   onTryAgain,
   onAddMore,
   onFinalise,
+  onDeleteGeneration,
 }: {
   session: AldiSession;
   onTryAgain: () => void;
   onAddMore: (files: File[]) => Promise<void>;
   onFinalise: () => void;
+  onDeleteGeneration: (generation: number) => Promise<void>;
 }) {
   const [activeDocIdx, setActiveDocIdx] = useState(0);
   const uploads = session.uploads || [];
@@ -488,6 +490,15 @@ function SessionDetailView({
 
   const ideas = isProcessing ? allIdeas : allIdeas.filter((i) => i.generation === activeGen);
   const genNums = Array.from(new Set(allIdeas.map((i) => i.generation))).sort((a, b) => a - b);
+
+  // If the active tab was deleted (its ideas are gone), fall back to
+  // the highest remaining generation. Otherwise the right column shows
+  // "No ideas were generated." on a tab that no longer exists.
+  useEffect(() => {
+    if (genNums.length > 0 && !genNums.includes(activeGen)) {
+      setActiveGen(genNums[genNums.length - 1]);
+    }
+  }, [genNums, activeGen]);
 
   // Progress tracking
   const total = uploads.length;
@@ -701,23 +712,48 @@ function SessionDetailView({
           </p>
         )}
 
-        {/* Generation tabs (shown when multiple generations exist) */}
+        {/* Generation tabs (shown when multiple generations exist).
+            Each tab is a two-part control: main label selects the set,
+            the small × next to it deletes just that set (with confirm). */}
         {!isProcessing && genNums.length > 1 && (
           <div className="flex gap-1.5 flex-wrap mb-3">
-            {genNums.map((gen) => (
-              <button
-                key={gen}
-                onClick={() => setActiveGen(gen)}
-                className={clsx(
-                  "px-3 py-1 rounded-lg text-xs font-medium transition-colors border",
-                  activeGen === gen
-                    ? "bg-amber-500 border-amber-500 text-white"
-                    : "bg-white border-stone-200 text-stone-600 hover:border-amber-300 hover:text-amber-700"
-                )}
-              >
-                {gen === latestGen ? `Set ${gen} ✨` : `Set ${gen}`}
-              </button>
-            ))}
+            {genNums.map((gen) => {
+              const active = activeGen === gen;
+              return (
+                <div
+                  key={gen}
+                  className={clsx(
+                    "inline-flex items-stretch rounded-lg overflow-hidden border transition-colors",
+                    active
+                      ? "border-amber-500 bg-amber-500 text-white"
+                      : "border-stone-200 bg-white text-stone-600 hover:border-amber-300 hover:text-amber-700"
+                  )}
+                >
+                  <button
+                    onClick={() => setActiveGen(gen)}
+                    className="px-3 py-1 text-xs font-medium"
+                  >
+                    {gen === latestGen ? `Set ${gen} ✨` : `Set ${gen}`}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteGeneration(gen);
+                    }}
+                    title={`Delete Set ${gen}`}
+                    aria-label={`Delete Set ${gen}`}
+                    className={clsx(
+                      "px-1.5 text-xs border-l transition-colors",
+                      active
+                        ? "border-amber-400 hover:bg-amber-600"
+                        : "border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600"
+                    )}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -831,6 +867,28 @@ export default function AldiPage() {
     if (selectedId === id) setSelectedId(null);
   };
 
+  // Delete one generation (Set N) from a session. Backend refuses if
+  // this would leave the session empty — in that case surface the
+  // reason so the user can choose to delete the whole session instead.
+  const handleDeleteGeneration = useCallback(
+    async (sessionId: number, generation: number) => {
+      if (!confirm(`Delete Set ${generation}? This can't be undone.`)) return;
+      const res = await fetch(
+        `${API_BASE}/api/aldi/sessions/${sessionId}/generations/${generation}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || `Delete failed (${res.status})`);
+        return;
+      }
+      // Refetch to pick up the new tab list + idea_count
+      await fetchDetail(sessionId);
+      await fetchList();
+    },
+    [fetchDetail, fetchList]
+  );
+
   const handleAddMore = useCallback(async (sessionId: number, files: File[]) => {
     if (!files.length) return;
     const form = new FormData();
@@ -916,6 +974,7 @@ export default function AldiPage() {
                   onTryAgain={() => handleTryAgain(selectedDetail.id)}
                   onAddMore={(files) => handleAddMore(selectedDetail.id, files)}
                   onFinalise={() => handleFinalise(selectedDetail.id)}
+                  onDeleteGeneration={(gen) => handleDeleteGeneration(selectedDetail.id, gen)}
                 />
               </>
             ) : (

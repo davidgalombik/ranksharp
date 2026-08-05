@@ -649,6 +649,90 @@ async def regenerate_session_ideas(session_id: int, db: AsyncSession = Depends(g
     return {"task_id": task.id, "status": "queued", "session_id": session_id}
 
 
+@router.delete("/sessions/{session_id}/generations/{generation}")
+async def delete_session_generation(
+    session_id: int,
+    generation: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete a single generation (Set N) of ideas from a session.
+
+    Rules:
+    - 404 if the session doesn't exist.
+    - 404 if the session has no ideas at this generation.
+    - 409 if this would leave the session with zero ideas — the caller
+      should delete the whole session instead.
+    - Ideas from other generations are untouched; numbering is NOT
+      compacted, so deleting Set 2 from Sets 1/2/3 leaves Sets 1 and 3.
+    - The next Try Again continues from `max(remaining) + 1` (so the
+      example above would produce Set 4).
+    - Because Try Again's dedup context (previously-used names +
+      inspired_by product IDs) is re-collected live from the DB on each
+      regeneration, deleted ideas stop counting as \"seen\" — a
+      subsequent set may reuse a name or product from a deleted set.
+    """
+    from database.models import AldiSession
+
+    sess_obj = await db.get(AldiSession, session_id)
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Count what's in this generation and what's left after
+    count_row = await db.execute(
+        select(func.count(AldiProductIdea.id)).where(
+            AldiProductIdea.session_id == session_id,
+            AldiProductIdea.generation == generation,
+        )
+    )
+    to_delete = count_row.scalar_one() or 0
+    if to_delete == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session {session_id} has no ideas at generation {generation}",
+        )
+
+    total_row = await db.execute(
+        select(func.count(AldiProductIdea.id)).where(
+            AldiProductIdea.session_id == session_id,
+        )
+    )
+    total = total_row.scalar_one() or 0
+    if total - to_delete <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refusing to delete — this is the only remaining generation. "
+                "Delete the whole session instead if you want a clean slate."
+            ),
+        )
+
+    # Delete the generation
+    from sqlalchemy import delete as sa_delete
+    await db.execute(
+        sa_delete(AldiProductIdea).where(
+            AldiProductIdea.session_id == session_id,
+            AldiProductIdea.generation == generation,
+        )
+    )
+    await db.commit()
+
+    # Return what's left so the frontend can update its tabs without a
+    # second round-trip
+    remaining_rows = await db.execute(
+        select(AldiProductIdea.generation)
+        .where(AldiProductIdea.session_id == session_id)
+        .distinct()
+    )
+    remaining = sorted({int(g) for (g,) in remaining_rows.all()})
+
+    return {
+        "deleted": to_delete,
+        "session_id": session_id,
+        "generation": generation,
+        "remaining_generations": remaining,
+    }
+
+
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: int, db: AsyncSession = Depends(get_db)):
     """Delete a session and all its uploads and ideas."""
