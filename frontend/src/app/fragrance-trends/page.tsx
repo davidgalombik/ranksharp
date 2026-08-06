@@ -149,7 +149,7 @@ interface Props {
 }
 
 export default async function FragranceTrendsPage({ searchParams }: Props) {
-  const activeGen = searchParams.generation ? parseInt(searchParams.generation) : undefined;
+  const requestedGen = searchParams.generation ? parseInt(searchParams.generation) : undefined;
 
   const [weeks] = await Promise.all([
     api.fragranceTrends.weeks().catch(() => [] as { week: string; generation_count: number; generations?: number[] }[]),
@@ -163,7 +163,14 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
   const generationList: number[] = latestRun?.generations
     ?? (latestRun ? Array.from({ length: latestRun.generation_count }, (_, i) => i + 1) : []);
   const latestGeneration = generationList.length ? generationList[generationList.length - 1] : 1;
-  const effectiveGen = activeGen ?? latestGeneration;
+
+  // Clamp the requested generation to what actually exists. Otherwise a
+  // stale ?generation=2 URL from a prior session hides all the trends
+  // after a fresh run only creates Set 1 (`/latest?generation=2` still
+  // returns the report row but its trends filter to an empty set).
+  const effectiveGen = requestedGen && generationList.includes(requestedGen)
+    ? requestedGen
+    : latestGeneration;
 
   let report = null;
   try {
@@ -171,8 +178,6 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
   } catch {
     // No report yet
   }
-
-  const hasMultipleGenerations = generationList.length > 1;
 
   // Render the latest run's timestamp. The `week` field is misnamed but
   // holds an ISO datetime string; parse and format for display.
@@ -198,11 +203,11 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
         <FragranceActionButton initialHasAnalysis={weeks.length > 0} />
       </div>
 
-      {/* Generation tabs — client component so the × delete button
-          can call the API without a full page reload. Only rendered
-          when there's more than one set AND the report is loaded so we
-          have a runId to delete against. */}
-      {hasMultipleGenerations && report && (
+      {/* Generation tabs — always visible once a run exists so the
+          buyer can see "Set 1 ✨" from the very first run rather than
+          waiting for a Try Again. The × button on a single-set tab is
+          blocked at click time with a friendly alert. */}
+      {report && generationList.length > 0 && (
         <div className="flex items-center gap-2 flex-wrap">
           <FragranceGenerationTabs
             runId={report.id}
@@ -210,13 +215,6 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
             activeGen={effectiveGen}
             latestGeneration={latestGeneration}
           />
-          <ClearSetsButton target="fragrance" />
-        </div>
-      )}
-
-      {/* Clear button when only one set exists */}
-      {weeks.length > 0 && !hasMultipleGenerations && (
-        <div className="flex justify-end">
           <ClearSetsButton target="fragrance" />
         </div>
       )}
@@ -260,7 +258,7 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
         <>
           <p className="text-sm text-stone-500">
             {report.trend_count} trend{report.trend_count !== 1 ? "s" : ""} found
-            {hasMultipleGenerations && ` · Set ${effectiveGen} of ${generationList.length}`}
+            {generationList.length > 1 && ` · Set ${effectiveGen} of ${generationList.length}`}
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {report.trends.map((trend) => (
