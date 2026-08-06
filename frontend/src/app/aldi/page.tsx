@@ -954,13 +954,22 @@ function SessionDetailView({
               return `${ideas.length} Product Ideas`;
             })()}
           </h3>
-          {session.status === "done" && (
+          {/* Try Again is available on both DONE and FAILED — the backend
+              already allows regeneration from either terminal state, and
+              hiding it on FAILED left the user stuck with no way to retry
+              a transient Claude / parsing hiccup. */}
+          {(session.status === "done" || session.status === "failed") && (
             <button
               onClick={onTryAgain}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-800 rounded-lg text-xs font-medium transition-colors"
+              className={clsx(
+                "flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-xs font-medium transition-colors",
+                session.status === "failed"
+                  ? "bg-red-50 border-red-300 hover:bg-red-100 text-red-800"
+                  : "bg-amber-50 border-amber-300 hover:bg-amber-100 text-amber-800",
+              )}
             >
               <span>🔄</span>
-              <span>Try Again</span>
+              <span>{session.status === "failed" ? "Retry" : "Try Again"}</span>
             </button>
           )}
         </div>
