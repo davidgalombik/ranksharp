@@ -364,7 +364,7 @@ class MoodBoardAnalyser:
         else:
             exclusion_block = ""
 
-        allowed_cats = "\n".join(f"- {c}" for c in sorted(ALLOWED_CATEGORIES))
+        allowed_cats = "\n".join(f"- {c}" for c in sorted(ALLOWED_IDEA_CATEGORIES))
         prompt = CLUSTER_PROMPT_TEMPLATE.format(
             trend_json=json.dumps(trend_data, indent=2),
             products_summary=products_summary,
