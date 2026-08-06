@@ -50,15 +50,30 @@ _VALID_URL_HINTS: list[str] = [
 def image_ok_sql(column: str = "p.primary_image_url") -> str:
     """Return a raw SQL fragment safe to embed in a text() WHERE clause.
 
-    Escapes: none needed — the patterns are compile-time constants and
-    the column name is caller-supplied (usually a qualified column like
-    'p.primary_image_url'). Do not pass user input as `column`.
+    IMPORTANT: literal % characters in the ILIKE patterns are DOUBLED
+    (%%) so psycopg2 does not interpret them as parameter markers when
+    the surrounding text() query has other bind parameters. Without the
+    doubling, psycopg2 raises `TypeError: not enough arguments for
+    format string` on execute (or, worse, silently misparses the SQL
+    and the exception surfaces from deep in the driver where our
+    task-level try/except may not catch it cleanly).
+
+    asyncpg (the async driver used by the API) does not need the
+    doubling, but tolerates it — %% inside ILIKE literals still matches
+    a single '%' character because Postgres does not treat %% specially
+    inside string literals; ILIKE just sees %(anything)%. Safe on both.
+
+    Escapes: none needed for the column name — it's caller-supplied
+    (usually a qualified column like 'p.primary_image_url'). Do not
+    pass user input as `column`.
     """
+    def _escape(p: str) -> str:
+        return p.replace("%", "%%")
     not_placeholder = " AND ".join(
-        f"{column} NOT ILIKE '{p}'" for p in _PLACEHOLDER_PATTERNS
+        f"{column} NOT ILIKE '{_escape(p)}'" for p in _PLACEHOLDER_PATTERNS
     )
     is_image_like = " OR ".join(
-        f"{column} ILIKE '{h}'" for h in _VALID_URL_HINTS
+        f"{column} ILIKE '{_escape(h)}'" for h in _VALID_URL_HINTS
     )
     return (
         f"({column} IS NOT NULL "

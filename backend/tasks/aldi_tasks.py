@@ -574,7 +574,11 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
         ]
         return (pool, total_matches)
     except Exception as exc:
-        log.error("similar_products_for_session_failed", error=str(exc))
+        import traceback as _tb
+        log.error("similar_products_for_session_failed",
+                  session_id=sess_obj.id, error=str(exc),
+                  error_type=type(exc).__name__,
+                  traceback=_tb.format_exc())
         return ([], 0)
 
 
@@ -768,9 +772,12 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
             # is the count of image-qualified products in the whole
             # thematic pool (used by the low-match warning + downstream
             # live product queries).
+            log.info("aldi_regen_step", session_id=session_id, step="pre_search")
             similar_products, similar_count = _find_similar_products_for_session(
                 db_session, sess_obj, limit=250,
             )
+            log.info("aldi_regen_step", session_id=session_id, step="post_search",
+                     sampled=len(similar_products), total_matched=similar_count)
             sess_obj.similar_products_count = similar_count
             product_map = {p["id"]: p for p in similar_products}
 
@@ -802,12 +809,18 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
                 # Clustering path — buyer clicked Try Again, so exclude
                 # every prior cluster name across every set to force
                 # genuinely different framings from Claude.
+                log.info("aldi_regen_step", session_id=session_id,
+                         step="pre_cluster", sample_size=len(similar_products))
                 clusters = asyncio.run(
                     _cluster_products(
                         trend_data, similar_products,
                         previous_cluster_names=previous_idea_names,
                     )
                 )
+                log.info("aldi_regen_step", session_id=session_id,
+                         step="post_cluster",
+                         clusters=len(clusters) if clusters else 0,
+                         result_type=type(clusters).__name__)
                 if clusters:
                     _persist_clusters_as_ideas(
                         db_session, session_id, generation=next_generation,
@@ -831,9 +844,13 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
                     ideas = None
 
         except Exception as exc:
-            log.error("aldi_regenerate_failed", session_id=session_id, error=str(exc))
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            log.error("aldi_regenerate_failed", session_id=session_id,
+                      error=str(exc), error_type=type(exc).__name__,
+                      traceback=tb_str)
             sess_obj.status = AldiUploadStatus.FAILED
-            sess_obj.error_message = str(exc)
+            sess_obj.error_message = f"{type(exc).__name__}: {exc}"
             sess_obj.updated_at = datetime.utcnow()
             db_session.commit()
             raise self.retry(exc=exc, countdown=30)
