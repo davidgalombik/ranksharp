@@ -217,6 +217,56 @@ ALLOWED_IDEA_CATEGORIES = frozenset({
 })
 
 
+CLUSTER_PROMPT_TEMPLATE = """You are a merchandising assistant for Aldi's home + general merchandise buying team.
+
+Below is a trend mood board buyers uploaded, followed by REAL products from
+our supplier catalogue that semantically matched it. Your job is NOT to
+invent new products. Your job is to group these real products into 5 to 8
+buyable sub-themes the buyer can act on.
+
+MOOD BOARD:
+{trend_json}
+
+CATALOGUE PRODUCTS ({product_count} in sample; full match pool is {total_matched_products}):
+{products_summary}
+
+{exclusion_block}Return ONLY valid JSON — a top-level array of 5-8 clusters:
+
+[
+  {{
+    "name": "<short 3-5 word buyable sub-theme name, e.g. 'Spooky Ceramics', 'Autumnal Textiles', 'Pumpkin Motifs'>",
+    "description": "<one sentence — what the buyer should know about this sub-theme, e.g. 'Matte-glazed ceramic vessels featuring pumpkin and ghost silhouettes across US and AU retailers'>",
+    "category": "<one Category > Subcategory from the ALLOWED list at the end of these instructions>",
+    "product_ids": [<INTEGER IDs from the sample above — pick 6-30 real products that belong>],
+    "filter_keywords": ["<5-15 lowercase words that a product NAME would contain to belong to this sub-theme, e.g. ['pumpkin', 'jack-o-lantern', 'gourd', 'squash']>"]
+  }},
+  ...
+]
+
+RULES:
+- Every product_id you output MUST come from the sample above. Do not
+  invent IDs. Do not repeat an ID across clusters.
+- filter_keywords is CRITICAL — it will be used to run a LIVE word-boundary
+  regex over the entire 156k-product catalogue to find MORE products
+  matching each sub-theme (thousands, not just the sample). Choose keywords
+  that are:
+    * Lowercase, single words or short phrases
+    * Words that would appear in product NAMES (not just descriptions)
+    * Distinctive to the sub-theme (avoid generic words like 'home', 'décor')
+    * Include synonyms and related terms (e.g. pumpkin AND gourd AND squash)
+- If the mood board is thematic (Halloween, Christmas, etc.), each cluster's
+  keywords should stay within the theme — a "Spooky Ceramics" cluster should
+  still include halloween words, not just ceramic words.
+- Cluster names must be short and buyable — think about how a category
+  manager would describe it in a range plan.
+- If the mood board doesn't have enough breadth for 5 clusters, produce
+  fewer (minimum 2). Better than forcing weak clusters.
+
+ALLOWED (Category > Subcategory) — pick exactly one per cluster:
+{allowed_categories}
+"""
+
+
 class MoodBoardAnalyser:
     def __init__(self):
         self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -264,6 +314,112 @@ class MoodBoardAnalyser:
         except Exception as exc:
             log.error("mood_board_analysis_failed", context=context, error=str(exc))
             return None
+
+    async def cluster_products(
+        self,
+        trend_data: dict,
+        similar_products: list[dict],
+        previous_cluster_names: list[str] | None = None,
+    ) -> Optional[list[dict]]:
+        """New (2026-08-06) shape: cluster real catalogue products into
+        buyable sub-themes instead of inventing new product concepts.
+
+        Returns a list of {name, description, category, product_ids,
+        filter_keywords} dicts — 5 to 8 clusters unless the mood board
+        is too narrow. product_ids reference the semantic-search sample;
+        filter_keywords are used downstream to run a LIVE query against
+        the whole catalogue for the "View all N products" modal.
+
+        Returns None on Claude failure, [] if the caller should show the
+        out-of-scope explanation (very few matches).
+        """
+        total_matched = trend_data.get("total_matched_products", len(similar_products))
+        if total_matched < 5:
+            # Signal the caller to render the out-of-scope card via generate_ideas
+            # rather than trying to cluster from nothing.
+            return None
+
+        # Pass the full sample (up to 250) to Claude — no random sampling.
+        # Deterministic input; Try Again variation comes from Claude's own
+        # non-determinism plus the exclusion of previous cluster names.
+        products_summary = "\n".join(
+            f"[ID:{p['id']}] {p['name']} | {p['retailer_name']} | "
+            f"${p.get('price') or '?'} | "
+            f"Colours: {', '.join((p.get('colours') or [])[:3])} | "
+            f"Materials: {', '.join((p.get('materials') or [])[:3])}"
+            for p in similar_products
+        )
+
+        # Exclusion block — avoid repeating cluster names from previous Sets
+        if previous_cluster_names:
+            exclusion_lines = [
+                "PREVIOUSLY GENERATED CLUSTER NAMES — DO NOT REPEAT THESE:",
+                "The buyer clicked Try Again because these framings didn't land. "
+                "Cluster the same products under DIFFERENT names / groupings:",
+            ]
+            for name in previous_cluster_names:
+                exclusion_lines.append(f"- {name}")
+            exclusion_lines.append("")
+            exclusion_block = "\n".join(exclusion_lines) + "\n"
+        else:
+            exclusion_block = ""
+
+        allowed_cats = "\n".join(f"- {c}" for c in sorted(ALLOWED_CATEGORIES))
+        prompt = CLUSTER_PROMPT_TEMPLATE.format(
+            trend_json=json.dumps(trend_data, indent=2),
+            products_summary=products_summary,
+            product_count=len(similar_products),
+            total_matched_products=total_matched,
+            exclusion_block=exclusion_block,
+            allowed_categories=allowed_cats,
+        )
+
+        try:
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            raw = _strip_fences(raw)
+            clusters = json.loads(raw)
+        except Exception as exc:
+            log.error("cluster_products_failed", error=str(exc))
+            return None
+
+        if not isinstance(clusters, list):
+            log.warning("cluster_products_not_a_list", got=type(clusters).__name__)
+            return None
+
+        # Sanity-clean: drop clusters with no products / no keywords, dedupe
+        # product_ids across clusters (first cluster wins), keep only real IDs.
+        valid_ids = {p["id"] for p in similar_products}
+        used_ids: set[int] = set()
+        cleaned: list[dict] = []
+        for c in clusters:
+            if not isinstance(c, dict):
+                continue
+            name = (c.get("name") or "").strip()
+            if not name:
+                continue
+            pids = [pid for pid in (c.get("product_ids") or [])
+                    if isinstance(pid, int) and pid in valid_ids and pid not in used_ids]
+            kws = [k.strip().lower() for k in (c.get("filter_keywords") or [])
+                   if isinstance(k, str) and k.strip()]
+            if not pids or not kws:
+                log.info("cluster_dropped_empty", name=name,
+                         pids=len(pids), keywords=len(kws))
+                continue
+            used_ids.update(pids)
+            cleaned.append({
+                "name": name[:500],
+                "description": (c.get("description") or "").strip()[:1000],
+                "category": (c.get("category") or "Household > Homewares").strip()[:200],
+                "product_ids": pids,
+                "filter_keywords": kws,
+            })
+
+        return cleaned
 
     async def generate_ideas(
         self,

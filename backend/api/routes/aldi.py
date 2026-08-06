@@ -43,6 +43,12 @@ class AldiIdeaOut(BaseModel):
     price_point: str
     rationale: str
     inspired_by_products: list = []
+    # New shape (2026-08-06):
+    #   kind = 'cluster' → new sub-theme-of-real-products card
+    #   kind = 'out_of_scope' → single explainer card, no product grid
+    #   kind = null / other  → legacy synthesized idea (old UI)
+    kind: Optional[str] = None
+    filter_keywords: list[str] = []
 
     class Config:
         from_attributes = True
@@ -255,6 +261,8 @@ async def get_upload(upload_id: int, db: AsyncSession = Depends(get_db)):
                 price_point=i.price_point,
                 rationale=i.rationale,
                 inspired_by_products=i.inspired_by_products or [],
+                kind=i.kind,
+                filter_keywords=i.filter_keywords or [],
             )
             for i in ideas_sorted
         ],
@@ -587,6 +595,8 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
                 price_point=i.price_point,
                 rationale=i.rationale,
                 inspired_by_products=i.inspired_by_products or [],
+                kind=i.kind,
+                filter_keywords=i.filter_keywords or [],
             )
             for i in ideas_sorted
         ],
@@ -754,3 +764,124 @@ async def delete_session(session_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(sess_obj)
     await db.commit()
     return {"deleted": True, "id": session_id}
+
+
+# ── Cluster products (live paginated) ────────────────────────────────────────
+
+class AldiClusterProductOut(BaseModel):
+    id: int
+    name: str
+    url: str
+    price: Optional[float] = None
+    primary_image_url: Optional[str] = None
+    retailer_name: str
+    retailer_slug: str
+    is_best_seller: bool = False
+
+
+class AldiClusterProductsPage(BaseModel):
+    total: int
+    items: list[AldiClusterProductOut]
+
+
+@router.get("/ideas/{idea_id}/products", response_model=AldiClusterProductsPage)
+async def get_cluster_products(
+    idea_id: int,
+    limit: int = 48,
+    offset: int = 0,
+    only_best_sellers: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Live paginated query of every catalogue product matching a cluster's
+    keywords. Powers the 'View all N products' modal.
+
+    Filters:
+      - Product is active (is_active = TRUE)
+      - Product NAME matches the cluster's filter_keywords via word-boundary
+        regex (Postgres \\y)
+      - Image-quality gate (same as the search that produced the cluster)
+      - Optional best-sellers-only toggle
+
+    Sort: best-sellers first, then name — same as Product Trends modal.
+    Live-query approach lets a single cluster surface thousands of matches
+    without storing every one at cluster-creation time.
+    """
+    from database.models import Retailer
+    from sqlalchemy import text as sa_text
+    from analysis.image_filter import image_ok_sql
+    import re as _re
+
+    idea = await db.get(AldiProductIdea, idea_id)
+    if not idea:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    keywords = [k for k in (idea.filter_keywords or []) if k]
+    if not keywords:
+        # out_of_scope clusters and legacy synthesized ideas have no
+        # keywords — return the snapshotted inspired_by_products as-is
+        # so the UI still has something to render (best-sellers first).
+        snapshots = list(idea.inspired_by_products or [])
+        snapshots.sort(key=lambda s: (0 if s.get("is_best_seller") else 1))
+        items = [
+            AldiClusterProductOut(
+                id=int(s.get("id") or 0),
+                name=s.get("name") or "",
+                url=s.get("url") or "",
+                price=None,
+                primary_image_url=s.get("image_url"),
+                retailer_name=s.get("retailer_name") or "",
+                retailer_slug="",
+                is_best_seller=bool(s.get("is_best_seller")),
+            )
+            for s in snapshots
+            if s.get("id")
+        ]
+        return AldiClusterProductsPage(total=len(items), items=items[offset:offset + limit])
+
+    # Word-boundary regex over product names — same shape as
+    # _find_similar_products_for_session so results feel consistent.
+    pattern = r"\y(?:" + "|".join(_re.escape(k) for k in keywords) + r")\y"
+
+    best_seller_clause = "AND p.is_best_seller = TRUE" if only_best_sellers else ""
+    image_clause = f"AND {image_ok_sql()}"
+
+    count_sql = sa_text(f"""
+        SELECT COUNT(*) FROM products p
+        WHERE p.is_active = TRUE
+          AND p.name ~* :kw_pattern
+          {best_seller_clause}
+          {image_clause}
+    """)
+    total = (await db.execute(count_sql, {"kw_pattern": pattern})).scalar() or 0
+
+    page_sql = sa_text(f"""
+        SELECT p.id, p.name, p.url, p.price, p.primary_image_url,
+               p.is_best_seller, r.name AS retailer_name, r.slug AS retailer_slug
+        FROM products p
+        JOIN retailers r ON r.id = p.retailer_id
+        WHERE p.is_active = TRUE
+          AND p.name ~* :kw_pattern
+          {best_seller_clause}
+          {image_clause}
+        ORDER BY p.is_best_seller DESC, p.name ASC
+        LIMIT :lim OFFSET :off
+    """)
+    rows = (await db.execute(
+        page_sql,
+        {"kw_pattern": pattern, "lim": limit, "off": offset},
+    )).all()
+
+    items = [
+        AldiClusterProductOut(
+            id=r.id,
+            name=r.name,
+            url=r.url,
+            price=r.price,
+            primary_image_url=r.primary_image_url,
+            retailer_name=r.retailer_name,
+            retailer_slug=r.retailer_slug,
+            is_best_seller=bool(r.is_best_seller),
+        )
+        for r in rows
+    ]
+    return AldiClusterProductsPage(total=total, items=items)

@@ -13,6 +13,9 @@ interface InspiredProduct {
   retailer_name: string;
   url: string;
   image_url: string | null;
+  // Only present on new-shape clusters (2026-08-06). Ranked to the front
+  // so the card's hero mosaic promotes best-sellers.
+  is_best_seller?: boolean;
 }
 
 interface AldiIdea {
@@ -25,6 +28,12 @@ interface AldiIdea {
   price_point: string;
   rationale: string;
   inspired_by_products: InspiredProduct[];
+  // New shape (2026-08-06):
+  //   kind = 'cluster'      → sub-theme of real catalogue products (new UI)
+  //   kind = 'out_of_scope'  → single "mood board out of scope" explainer card
+  //   kind = null / other    → legacy synthesized idea (old IdeaCard UI)
+  kind?: string | null;
+  filter_keywords?: string[];
 }
 
 interface AldiUploadDoc {
@@ -320,6 +329,249 @@ function DocAnalysisPanel({ doc }: { doc: AldiUploadDoc }) {
 }
 
 // ── Idea card ─────────────────────────────────────────────────────────────────
+
+// ── New (2026-08-06) cluster shape ────────────────────────────────────────────
+
+interface ClusterProduct {
+  id: number;
+  name: string;
+  url: string;
+  price: number | null;
+  primary_image_url: string | null;
+  retailer_name: string;
+  retailer_slug: string;
+  is_best_seller: boolean;
+}
+
+/**
+ * AldiClusterCard — new sub-theme-of-real-products card. Shape mirrors
+ * Product Trends' TrendCard: image mosaic (best-sellers first) + name +
+ * description + "View all N products" button that opens the paginated
+ * modal against the live catalogue.
+ */
+function AldiClusterCard({ idea }: { idea: AldiIdea }) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const products = idea.inspired_by_products || [];
+  const heroes = products.slice(0, 3);
+  const bestSellerBadge = products.some((p) => p.is_best_seller);
+  return (
+    <>
+      <article className="bg-white rounded-xl border border-stone-200 overflow-hidden flex flex-col">
+        <div className="h-40 flex gap-0.5 overflow-hidden bg-stone-100">
+          {heroes.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center text-stone-300 text-4xl">📦</div>
+          ) : heroes.length === 1 ? (
+            <img src={heroes[0].image_url ?? ""} alt={heroes[0].name}
+                 className="w-full h-full object-cover" title={`${heroes[0].retailer_name}: ${heroes[0].name}`} />
+          ) : (
+            <>
+              <div className="flex-[3] overflow-hidden">
+                <img src={heroes[0].image_url ?? ""} alt={heroes[0].name}
+                     className="w-full h-full object-cover" title={`${heroes[0].retailer_name}: ${heroes[0].name}`} />
+              </div>
+              <div className="flex-[2] flex flex-col gap-0.5">
+                {heroes.slice(1, 3).map((p) => (
+                  <div key={p.id} className="flex-1 overflow-hidden">
+                    <img src={p.image_url ?? ""} alt={p.name}
+                         className="w-full h-full object-cover" title={`${p.retailer_name}: ${p.name}`} />
+                  </div>
+                ))}
+                {heroes.length < 3 && <div className="flex-1 bg-stone-200" />}
+              </div>
+            </>
+          )}
+        </div>
+        <div className="p-4 space-y-2 flex-1 flex flex-col">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-stone-400">{idea.category}</p>
+              <h3 className="text-sm font-semibold text-stone-900 leading-snug mt-0.5">{idea.name}</h3>
+            </div>
+            {bestSellerBadge && (
+              <span className="flex-shrink-0 px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-semibold">★</span>
+            )}
+          </div>
+          <p className="text-xs text-stone-600 leading-relaxed line-clamp-3">{idea.description}</p>
+          <div className="flex-1" />
+          <button
+            onClick={() => setModalOpen(true)}
+            className="mt-2 w-full text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg px-3 py-2 transition-colors"
+          >
+            View all matching products →
+          </button>
+        </div>
+      </article>
+      {modalOpen && (
+        <AldiClusterProductsModal idea={idea} onClose={() => setModalOpen(false)} />
+      )}
+    </>
+  );
+}
+
+/**
+ * Single-card "mood board out of scope" explainer. Shown when the
+ * semantic search matched fewer than 5 products in the whole catalogue —
+ * clustering would invent nonsense, so we serve an honest summary instead.
+ */
+function OutOfScopeCard({ idea }: { idea: AldiIdea }) {
+  return (
+    <div className="col-span-full bg-red-50 border border-red-200 rounded-xl p-5 space-y-2">
+      <p className="text-sm font-semibold text-red-800">⚠️ {idea.name}</p>
+      <p className="text-xs text-red-700 leading-relaxed">{idea.description}</p>
+    </div>
+  );
+}
+
+/**
+ * Paginated modal listing every catalogue product matching the cluster's
+ * keywords. Best-sellers first, "Only best sellers" toggle, Load More.
+ * Same shape as Product Trends' TrendProductsModal.
+ */
+function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: () => void }) {
+  const PAGE_SIZE = 48;
+  const [products, setProducts] = useState<ClusterProduct[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [onlyBestSellers, setOnlyBestSellers] = useState(false);
+
+  const loadFirstPage = useCallback(async () => {
+    setLoading(true);
+    setOffset(0);
+    try {
+      const qs = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: "0",
+        ...(onlyBestSellers ? { only_best_sellers: "true" } : {}),
+      });
+      const res = await fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/products?${qs}`);
+      const data = await res.json();
+      setProducts(data.items || []);
+      setTotal(data.total ?? 0);
+    } catch {
+      setProducts([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [idea.id, onlyBestSellers]);
+
+  useEffect(() => { loadFirstPage(); }, [loadFirstPage]);
+
+  async function loadMore() {
+    if (loadingMore || total === null || products.length >= total) return;
+    setLoadingMore(true);
+    const next = offset + PAGE_SIZE;
+    try {
+      const qs = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(next),
+        ...(onlyBestSellers ? { only_best_sellers: "true" } : {}),
+      });
+      const res = await fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/products?${qs}`);
+      const data = await res.json();
+      setProducts((prev) => [...prev, ...(data.items || [])]);
+      setOffset(next);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  const showLoadMore = total !== null && products.length < total && !loading;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-stone-900/60 flex items-center justify-center p-4"
+      onClick={onClose} role="dialog" aria-modal="true"
+    >
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col"
+           onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between p-6 border-b border-stone-200 gap-4">
+          <div className="min-w-0">
+            <p className="text-xs text-stone-400 uppercase tracking-wider">{idea.category}</p>
+            <h2 className="text-xl font-bold text-stone-900 mt-0.5">{idea.name}</h2>
+            <p className="text-sm text-stone-500 mt-1">
+              {loading
+                ? "Loading matching products…"
+                : total === null
+                  ? ""
+                  : `Showing ${products.length.toLocaleString()} of ${total.toLocaleString()} matching products`}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-900 text-2xl leading-none px-2" aria-label="Close">×</button>
+        </div>
+        <div className="px-6 py-3 border-b border-stone-100 flex items-center gap-4 flex-wrap">
+          <label className="flex items-center gap-2 text-sm text-stone-700 cursor-pointer">
+            <input type="checkbox" checked={onlyBestSellers} onChange={(e) => setOnlyBestSellers(e.target.checked)} className="rounded" />
+            Only best sellers
+          </label>
+          {onlyBestSellers && (
+            <p className="text-xs text-stone-400">Note: not every retailer publishes best-seller flags.</p>
+          )}
+        </div>
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading ? (
+            <p className="text-center text-stone-400 py-16">Loading products…</p>
+          ) : products.length === 0 ? (
+            <p className="text-center text-stone-400 py-16">
+              {onlyBestSellers ? "No best-seller products in this cluster." : "No products match this cluster."}
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {products.map((p) => (
+                  <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer"
+                     className="group block bg-white border border-stone-200 hover:border-amber-300 rounded-lg overflow-hidden transition-colors">
+                    <div className="aspect-square bg-stone-100 relative">
+                      {p.primary_image_url ? (
+                        <img src={p.primary_image_url} alt={p.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-stone-300 text-3xl">📦</div>
+                      )}
+                      {p.is_best_seller && (
+                        <span className="absolute top-1 right-1 px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-semibold">★</span>
+                      )}
+                    </div>
+                    <div className="p-2 space-y-0.5">
+                      <p className="text-xs text-stone-500 truncate">{p.retailer_name}</p>
+                      <p className="text-xs text-stone-800 leading-snug line-clamp-2">{p.name}</p>
+                      {p.price != null && <p className="text-xs text-stone-500">${p.price.toFixed(2)}</p>}
+                    </div>
+                  </a>
+                ))}
+              </div>
+              {showLoadMore && (
+                <div className="pt-6 text-center">
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    className={clsx(
+                      "px-5 py-2 rounded-lg text-sm font-medium transition-colors",
+                      loadingMore
+                        ? "bg-stone-100 text-stone-400 cursor-not-allowed"
+                        : "bg-stone-900 text-white hover:bg-stone-700",
+                    )}
+                  >
+                    {loadingMore ? "Loading…" : `Load ${Math.min(PAGE_SIZE, (total ?? 0) - products.length)} more`}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Legacy synthesized-idea card (kept for backward compat) ───────────────────
 
 function IdeaCard({ idea }: { idea: AldiIdea }) {
   const [expanded, setExpanded] = useState(false);
@@ -684,14 +936,23 @@ function SessionDetailView({
             </p>
           </div>
         )}
-        {/* Header row: title + Try Again button */}
+        {/* Header row: title + Try Again button. Label switches on the
+            shape of the visible ideas — new-shape clusters read as "N
+            recommendations", legacy synthesized ideas as "N Product Ideas". */}
         <div className="flex items-center justify-between mb-1 gap-2">
           <h3 className="font-semibold text-stone-800">
-            {isProcessing
-              ? isGenerating
-                ? "Generating ideas…"
-                : `${allIdeas.length > 0 ? allIdeas.length + " " : ""}Product Ideas`
-              : `${ideas.length} Product Ideas`}
+            {(() => {
+              if (isProcessing) {
+                return isGenerating
+                  ? "Generating recommendations…"
+                  : `${allIdeas.length > 0 ? allIdeas.length + " " : ""}Recommendations`;
+              }
+              const isCluster = ideas.some((i) => i.kind === "cluster");
+              const isOOS = ideas.some((i) => i.kind === "out_of_scope");
+              if (isOOS) return "Recommendations";
+              if (isCluster) return `${ideas.length} Recommendation${ideas.length !== 1 ? "s" : ""}`;
+              return `${ideas.length} Product Ideas`;
+            })()}
           </h3>
           {session.status === "done" && (
             <button
@@ -769,12 +1030,35 @@ function SessionDetailView({
             ))}
           </div>
         ) : (
-          <div className="space-y-3">
-            {ideas.map((idea) => <IdeaCard key={idea.id} idea={idea} />)}
+          <>
+            {/* out-of-scope card spans the full width regardless of grid */}
+            {ideas.some((i) => i.kind === "out_of_scope") && (
+              <div className="mb-3">
+                {ideas
+                  .filter((i) => i.kind === "out_of_scope")
+                  .map((idea) => <OutOfScopeCard key={idea.id} idea={idea} />)}
+              </div>
+            )}
+            {/* New-shape clusters render in a 2-col grid like Product Trends */}
+            {ideas.some((i) => i.kind === "cluster") && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {ideas
+                  .filter((i) => i.kind === "cluster")
+                  .map((idea) => <AldiClusterCard key={idea.id} idea={idea} />)}
+              </div>
+            )}
+            {/* Legacy synthesized ideas — historical sessions still work */}
+            {ideas.some((i) => !i.kind) && (
+              <div className="space-y-3">
+                {ideas
+                  .filter((i) => !i.kind)
+                  .map((idea) => <IdeaCard key={idea.id} idea={idea} />)}
+              </div>
+            )}
             {session.status === "done" && ideas.length === 0 && (
               <p className="text-sm text-stone-400 text-center py-8">No ideas were generated.</p>
             )}
-          </div>
+          </>
         )}
       </div>
     </div>

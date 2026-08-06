@@ -229,6 +229,98 @@ async def _generate_ideas(trend_data: dict, similar_products: list, previous_ide
     return await MoodBoardAnalyser().generate_ideas(trend_data, similar_products, n=10, previous_idea_names=previous_idea_names)
 
 
+async def _cluster_products(trend_data: dict, similar_products: list, previous_cluster_names: list[str] | None = None) -> list | None:
+    """New (2026-08-06) shape: ask Claude to cluster real catalogue products
+    into buyable sub-themes. Returns [{name, description, category,
+    product_ids, filter_keywords}, ...] or None on failure."""
+    from analysis.aldi_vision import MoodBoardAnalyser
+    return await MoodBoardAnalyser().cluster_products(
+        trend_data, similar_products, previous_cluster_names=previous_cluster_names,
+    )
+
+
+def _persist_clusters_as_ideas(
+    db_session,
+    session_id: int,
+    generation: int,
+    clusters: list[dict],
+    product_map: dict[int, dict],
+) -> int:
+    """Write clustering results as AldiProductIdea rows with kind='cluster'.
+    Returns the number of rows written. Snapshots enough product info for
+    the card's hero image mosaic without needing another DB round-trip."""
+    written = 0
+    for pos, cluster in enumerate(clusters):
+        pids = cluster.get("product_ids") or []
+        snapshots = [
+            {
+                "id": pid,
+                "name": product_map[pid]["name"],
+                "retailer_name": product_map[pid]["retailer_name"],
+                "url": product_map[pid]["url"],
+                "image_url": product_map[pid].get("primary_image_url"),
+                "is_best_seller": bool(product_map[pid].get("is_best_seller")),
+            }
+            for pid in pids if pid in product_map
+        ]
+        # Rank the snapshots best-sellers first — the frontend uses the
+        # first few for the card's hero mosaic.
+        snapshots.sort(key=lambda s: (0 if s.get("is_best_seller") else 1))
+        idea = AldiProductIdea(
+            session_id=session_id,
+            upload_id=None,
+            generation=generation,
+            position=pos,
+            name=cluster.get("name", ""),
+            description=cluster.get("description", ""),
+            category=cluster.get("category", "Household > Homewares"),
+            price_point="",  # not applicable for cluster shape
+            rationale="",    # not applicable for cluster shape
+            inspired_by_product_ids=pids,
+            inspired_by_products=snapshots,
+            filter_keywords=cluster.get("filter_keywords") or [],
+            kind="cluster",
+        )
+        db_session.add(idea)
+        written += 1
+    return written
+
+
+def _persist_out_of_scope(
+    db_session,
+    session_id: int,
+    generation: int,
+    total_matched: int,
+    filter_keywords: list[str],
+) -> None:
+    """Write a single 'Mood board out of scope' cluster when the semantic
+    search returned fewer than 5 matching products. Buyer sees an honest
+    explanation instead of a wall of bad recommendations."""
+    kw_hint = (", ".join(filter_keywords[:6]) if filter_keywords else "the mood board's theme")
+    description = (
+        f"Only {total_matched} product{'s' if total_matched != 1 else ''} in our "
+        f"156k-product catalogue matched {kw_hint}. This mood board likely falls "
+        f"outside our home-décor / storage / tabletop / kitchenware coverage. "
+        f"Try a mood board that leans into those categories."
+    )
+    idea = AldiProductIdea(
+        session_id=session_id,
+        upload_id=None,
+        generation=generation,
+        position=0,
+        name="Mood board out of scope",
+        description=description,
+        category="Household > Homewares",
+        price_point="",
+        rationale="",
+        inspired_by_product_ids=[],
+        inspired_by_products=[],
+        filter_keywords=[],
+        kind="out_of_scope",
+    )
+    db_session.add(idea)
+
+
 # ── Similarity search (sync) ──────────────────────────────────────────────────
 
 def _find_similar_products(session, upload: AldiUpload, limit: int = 125) -> list[dict]:
@@ -371,7 +463,7 @@ def _maybe_trigger_session_ideas(session, session_id: int) -> None:
     log.info("aldi_session_all_done", session_id=session_id, upload_count=len(uploads))
 
 
-def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: int = 125) -> tuple[list[dict], int]:
+def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: int = 250) -> tuple[list[dict], int]:
     """Find products matching the merged session mood board.
 
     Two paths depending on whether Claude flagged the mood board as
@@ -384,10 +476,17 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
       * STYLISTIC (default) — pure semantic search across the whole
         catalogue as before.
 
-    Returns a tuple of (sampled_pool, total_matched_count). The second
-    element powers the low-match warning banner on the frontend.
+    Also applies the Aldi image-quality gate — buyers must never see a
+    product without a proper product image.
+
+    Returns a tuple of (top_ranked_pool, total_matched_count). The pool
+    is the deterministic top-N by similarity (best-sellers weighted
+    higher) — fed to Claude for clustering. The count is the total
+    number of image-qualified products matching the theme, used to
+    power the low-match warning banner on the frontend.
     """
     from analysis.embeddings import embed_text_sync
+    from analysis.image_filter import image_ok_sql
 
     query_text = " | ".join(filter(None, [
         " ".join(sess_obj.themes or []),
@@ -406,7 +505,6 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
     if query_vec is None:
         return ([], 0)
     vec_str = "[" + ",".join(f"{x:.8f}" for x in query_vec) + "]"
-    fetch_limit = limit * 3  # fetch a wide neighbourhood, then sample
 
     # Build the pre-filter regex if this is a thematic mood board.
     # Postgres \y is a word boundary. Case-insensitive via ~*.
@@ -422,6 +520,9 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
         log.info("aldi_session_thematic_filter",
                  session_id=sess_obj.id, keywords=keywords)
 
+    # Image-quality gate — never surface a product without a proper image.
+    image_clause = f"AND {image_ok_sql()}"
+
     try:
         # Count matching products first so the UI knows the true scope
         count_sql = text(f"""
@@ -430,10 +531,13 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
             WHERE pa.embedding IS NOT NULL
               AND p.is_active = TRUE
               {keyword_clause}
+              {image_clause}
         """)
         total_matches = session.execute(count_sql, keyword_bind).scalar() or 0
 
-        # Then rank + sample
+        # Deterministic top-N by similarity (best-sellers weighted higher).
+        # Try Again variation comes from Claude's clustering non-determinism,
+        # not from random sampling of the input pool.
         rank_sql = text(f"""
             SELECT p.id, p.name, p.url, p.price, p.primary_image_url,
                    p.is_best_seller,
@@ -445,10 +549,11 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
             WHERE pa.embedding IS NOT NULL
               AND p.is_active = TRUE
               {keyword_clause}
+              {image_clause}
             ORDER BY
               (pa.embedding <=> '{vec_str}'::vector)
               * (CASE WHEN p.is_best_seller THEN 0.7 ELSE 1.0 END)
-            LIMIT {fetch_limit}
+            LIMIT {limit}
         """)
         result = session.execute(rank_sql, keyword_bind)
         pool = [
@@ -467,10 +572,7 @@ def _find_similar_products_for_session(session, sess_obj: AldiSession, limit: in
             }
             for row in result.fetchall()
         ]
-        sampled = (
-            random.sample(pool, min(limit, len(pool))) if len(pool) > limit else pool
-        )
-        return (sampled, total_matches)
+        return (pool, total_matches)
     except Exception as exc:
         log.error("similar_products_for_session_failed", error=str(exc))
         return ([], 0)
@@ -532,7 +634,7 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
 
             # Find similar products — fetch 50, sample 20 inside generate_ideas
             similar_products, similar_count = _find_similar_products_for_session(
-                db_session, sess_obj, limit=125,
+                db_session, sess_obj, limit=250,
             )
             sess_obj.similar_products_count = similar_count
             log.info("aldi_session_similar_products",
@@ -557,66 +659,43 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                 "filter_keywords": merged_filter_keywords,
             }
 
-            # Pass existing idea names so regeneration produces different results
-            existing_ideas = db_session.execute(
-                sa_select(AldiProductIdea.name).where(AldiProductIdea.session_id == session_id)
-            ).scalars().all()
+            # Wipe any prior ideas for this session — a fresh generation
+            # replaces them entirely. Try Again (regenerate) preserves
+            # history; this path is only the first run.
+            db_session.execute(
+                text("DELETE FROM aldi_product_ideas WHERE session_id = :sid"),
+                {"sid": session_id},
+            )
+            db_session.flush()
 
-            ideas = asyncio.run(_generate_ideas(trend_data, similar_products, previous_idea_names=list(existing_ideas)))
-
-            if ideas:
-                db_session.execute(
-                    text("DELETE FROM aldi_product_ideas WHERE session_id = :sid"),
-                    {"sid": session_id},
+            # Very-few-matches path — write a single 'out of scope' card
+            # instead of asking Claude to invent nonsense from 2 products.
+            if similar_count < 5:
+                _persist_out_of_scope(
+                    db_session, session_id, generation=1,
+                    total_matched=similar_count,
+                    filter_keywords=merged_filter_keywords,
                 )
-                db_session.flush()
-
-                used_inspired_ids: set[int] = set()
-                for idea_data in ideas:
-                    # Only keep IDs that Claude actually referenced AND exist in product_map
-                    # (guards against hallucinated sequential IDs when products list was empty)
-                    inspired_ids = [
-                        pid for pid in idea_data.get("inspired_by_product_ids", [])
-                        if isinstance(pid, int) and pid not in used_inspired_ids and pid in product_map
-                    ]
-                    # Backfill to minimum 3 from unused products in the pool
-                    if len(inspired_ids) < 3:
-                        for p in similar_products:
-                            if len(inspired_ids) >= 3:
-                                break
-                            if p["id"] not in used_inspired_ids and p["id"] not in inspired_ids:
-                                inspired_ids.append(p["id"])
-                    used_inspired_ids.update(inspired_ids)
-                    inspired_snapshots = [
-                        {
-                            "id": pid,
-                            "name": product_map[pid]["name"],
-                            "retailer_name": product_map[pid]["retailer_name"],
-                            "url": product_map[pid]["url"],
-                            "image_url": product_map[pid].get("primary_image_url"),
-                        }
-                        for pid in inspired_ids if pid in product_map
-                    ]
-                    idea = AldiProductIdea(
-                        session_id=session_id,
-                        upload_id=None,
-                        generation=1,
-                        position=idea_data.get("position", 0),
-                        name=idea_data.get("name", ""),
-                        description=idea_data.get("description", ""),
-                        category=idea_data.get("category", ""),
-                        price_point=idea_data.get("price_point", ""),
-                        rationale=idea_data.get("rationale", ""),
-                        inspired_by_product_ids=inspired_ids,
-                        inspired_by_products=inspired_snapshots,
-                    )
-                    db_session.add(idea)
-
                 sess_obj.status = AldiUploadStatus.DONE
-                log.info("aldi_session_ideas_done", session_id=session_id, count=len(ideas))
+                log.info("aldi_session_out_of_scope",
+                         session_id=session_id, matched=similar_count)
+                ideas = [None]  # so the return dict says 'ideas: 1' rather than 'ideas: 0'
             else:
-                sess_obj.status = AldiUploadStatus.FAILED
-                sess_obj.error_message = "Idea generation returned no results"
+                # Clustering path — group the semantic sample into buyable sub-themes
+                clusters = asyncio.run(_cluster_products(trend_data, similar_products))
+                if clusters:
+                    _persist_clusters_as_ideas(
+                        db_session, session_id, generation=1,
+                        clusters=clusters, product_map=product_map,
+                    )
+                    sess_obj.status = AldiUploadStatus.DONE
+                    log.info("aldi_session_clusters_done",
+                             session_id=session_id, clusters=len(clusters))
+                    ideas = clusters
+                else:
+                    sess_obj.status = AldiUploadStatus.FAILED
+                    sess_obj.error_message = "Clustering returned no results"
+                    ideas = None
 
         except Exception as exc:
             log.error("aldi_session_ideas_failed", session_id=session_id, error=str(exc))
@@ -678,9 +757,13 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
         )
 
         try:
-            # Find similar products
+            # Find similar products. limit=250 matches the fresh flow —
+            # Claude gets a wide sample to cluster over, and total_matched
+            # is the count of image-qualified products in the whole
+            # thematic pool (used by the low-match warning + downstream
+            # live product queries).
             similar_products, similar_count = _find_similar_products_for_session(
-                db_session, sess_obj, limit=125,
+                db_session, sess_obj, limit=250,
             )
             sess_obj.similar_products_count = similar_count
             product_map = {p["id"]: p for p in similar_products}
@@ -697,63 +780,42 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
                 "filter_keywords": sess_obj.filter_keywords or [],
             }
 
-            ideas = asyncio.run(
-                _generate_ideas(trend_data, similar_products, previous_idea_names=previous_idea_names)
-            )
-
-            if ideas:
-                # Deduplicate inspired_by ACROSS all generations using the existing used set.
-                # Also filter out any hallucinated IDs not present in product_map.
-                new_used: set[int] = set()
-                for idea_data in ideas:
-                    # Only keep IDs that exist in product_map and aren't already used
-                    inspired_ids = [
-                        pid for pid in idea_data.get("inspired_by_product_ids", [])
-                        if isinstance(pid, int) and pid not in used_inspired_ids
-                        and pid not in new_used and pid in product_map
-                    ]
-                    # Backfill to minimum 3 from unused products
-                    if len(inspired_ids) < 3:
-                        for p in similar_products:
-                            if len(inspired_ids) >= 3:
-                                break
-                            if (p["id"] not in used_inspired_ids
-                                    and p["id"] not in new_used
-                                    and p["id"] not in inspired_ids):
-                                inspired_ids.append(p["id"])
-                    new_used.update(inspired_ids)
-
-                    inspired_snapshots = [
-                        {
-                            "id": pid,
-                            "name": product_map[pid]["name"],
-                            "retailer_name": product_map[pid]["retailer_name"],
-                            "url": product_map[pid]["url"],
-                            "image_url": product_map[pid].get("primary_image_url"),
-                        }
-                        for pid in inspired_ids if pid in product_map
-                    ]
-                    idea = AldiProductIdea(
-                        session_id=session_id,
-                        upload_id=None,
-                        generation=next_generation,
-                        position=idea_data.get("position", 0),
-                        name=idea_data.get("name", ""),
-                        description=idea_data.get("description", ""),
-                        category=idea_data.get("category", ""),
-                        price_point=idea_data.get("price_point", ""),
-                        rationale=idea_data.get("rationale", ""),
-                        inspired_by_product_ids=inspired_ids,
-                        inspired_by_products=inspired_snapshots,
-                    )
-                    db_session.add(idea)
-
+            # Very-few-matches path — same treatment as fresh flow.
+            if similar_count < 5:
+                _persist_out_of_scope(
+                    db_session, session_id, generation=next_generation,
+                    total_matched=similar_count,
+                    filter_keywords=sess_obj.filter_keywords or [],
+                )
                 sess_obj.status = AldiUploadStatus.DONE
-                log.info("aldi_regenerate_done", session_id=session_id,
-                         generation=next_generation, count=len(ideas))
+                log.info("aldi_regenerate_out_of_scope",
+                         session_id=session_id, generation=next_generation,
+                         matched=similar_count)
+                ideas = [None]
             else:
-                sess_obj.status = AldiUploadStatus.FAILED
-                sess_obj.error_message = "Idea regeneration returned no results"
+                # Clustering path — buyer clicked Try Again, so exclude
+                # every prior cluster name across every set to force
+                # genuinely different framings from Claude.
+                clusters = asyncio.run(
+                    _cluster_products(
+                        trend_data, similar_products,
+                        previous_cluster_names=previous_idea_names,
+                    )
+                )
+                if clusters:
+                    _persist_clusters_as_ideas(
+                        db_session, session_id, generation=next_generation,
+                        clusters=clusters, product_map=product_map,
+                    )
+                    sess_obj.status = AldiUploadStatus.DONE
+                    log.info("aldi_regenerate_clusters_done",
+                             session_id=session_id, generation=next_generation,
+                             clusters=len(clusters))
+                    ideas = clusters
+                else:
+                    sess_obj.status = AldiUploadStatus.FAILED
+                    sess_obj.error_message = "Cluster regeneration returned no results"
+                    ideas = None
 
         except Exception as exc:
             log.error("aldi_regenerate_failed", session_id=session_id, error=str(exc))

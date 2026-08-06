@@ -353,6 +353,15 @@ class AldiProductIdea(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     inspired_by_product_ids: Mapped[list] = mapped_column(JSON, default=list)
     inspired_by_products: Mapped[list] = mapped_column(JSON, default=list)
+    # New shape (2026-08-06): keyword list Claude assigns to the cluster so
+    # the frontend's "View all N products" modal can run a LIVE paginated
+    # query against the full match pool rather than just Claude's ~40 samples.
+    # Empty list for legacy synthesized ideas.
+    filter_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    # 'cluster' for the new sub-theme-of-real-products shape.
+    # NULL for legacy synthesized product ideas — frontend renders those
+    # with the old IdeaCard UI so historical sessions still work.
+    kind: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     upload: Mapped[Optional["AldiUpload"]] = relationship(
