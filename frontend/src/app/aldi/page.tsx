@@ -388,7 +388,9 @@ function AldiClusterCard({ idea }: { idea: AldiIdea }) {
               <h3 className="text-sm font-semibold text-stone-900 leading-snug mt-0.5">{idea.name}</h3>
             </div>
             {bestSellerBadge && (
-              <span className="flex-shrink-0 px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-semibold">★</span>
+              <span className="flex-shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+                ★ Best Seller
+              </span>
             )}
           </div>
           <p className="text-xs text-stone-600 leading-relaxed line-clamp-3">{idea.description}</p>
@@ -536,7 +538,14 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
                         <div className="w-full h-full flex items-center justify-center text-stone-300 text-3xl">📦</div>
                       )}
                       {p.is_best_seller && (
-                        <span className="absolute top-1 right-1 px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-semibold">★</span>
+                        <span
+                          className={clsx(
+                            "absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-full",
+                            "text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200"
+                          )}
+                        >
+                          ★ Best Seller
+                        </span>
                       )}
                     </div>
                     <div className="p-2 space-y-0.5">

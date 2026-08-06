@@ -230,7 +230,7 @@ MOOD BOARD:
 CATALOGUE PRODUCTS ({product_count} in sample; full match pool is {total_matched_products}):
 {products_summary}
 
-{exclusion_block}Return ONLY valid JSON — a top-level array of 5-8 clusters:
+{theme_lock_block}{exclusion_block}Return ONLY valid JSON — a top-level array of 5-8 clusters:
 
 [
   {{
@@ -238,7 +238,7 @@ CATALOGUE PRODUCTS ({product_count} in sample; full match pool is {total_matched
     "description": "<one sentence — what the buyer should know about this sub-theme, e.g. 'Matte-glazed ceramic vessels featuring pumpkin and ghost silhouettes across US and AU retailers'>",
     "category": "<one Category > Subcategory from the ALLOWED list at the end of these instructions>",
     "product_ids": [<INTEGER IDs from the sample above — pick 6-30 real products that belong>],
-    "filter_keywords": ["<5-15 lowercase words that a product NAME would contain to belong to this sub-theme, e.g. ['pumpkin', 'jack-o-lantern', 'gourd', 'squash']>"]
+    "filter_keywords": ["<5-15 lowercase words that a product NAME would contain to belong to this sub-theme, e.g. ['halloween', 'pumpkin', 'jack-o-lantern', 'gourd', 'squash']>"]
   }},
   ...
 ]
@@ -252,11 +252,11 @@ RULES:
   that are:
     * Lowercase, single words or short phrases
     * Words that would appear in product NAMES (not just descriptions)
-    * Distinctive to the sub-theme (avoid generic words like 'home', 'décor')
+    * Distinctive to the sub-theme (avoid generic words like 'home', 'décor',
+      'kitchen', 'candle', 'wax', 'melt', 'holder', 'organizer' — those
+      match half the catalogue and pollute the sub-theme with off-theme
+      products)
     * Include synonyms and related terms (e.g. pumpkin AND gourd AND squash)
-- If the mood board is thematic (Halloween, Christmas, etc.), each cluster's
-  keywords should stay within the theme — a "Spooky Ceramics" cluster should
-  still include halloween words, not just ceramic words.
 - Cluster names must be short and buyable — think about how a category
   manager would describe it in a range plan.
 - If the mood board doesn't have enough breadth for 5 clusters, produce
@@ -364,12 +364,35 @@ class MoodBoardAnalyser:
         else:
             exclusion_block = ""
 
+        # Theme lock — for thematic mood boards (Halloween, Christmas, …)
+        # the mood board itself carries filter_keywords. If a cluster's
+        # keywords don't intersect with those, the live "View all N products"
+        # query drifts off-theme (a "Candles & Wax Melts" cluster under a
+        # Halloween mood board matched every candle/wax product in the
+        # 156k catalogue). Force each cluster to include at least one theme
+        # word so downstream queries stay honest.
+        theme_keywords = [
+            k for k in (trend_data.get("filter_keywords") or []) if k
+        ]
+        if theme_keywords:
+            theme_lock_block = (
+                "THEME LOCK — the mood board is thematic. Every cluster's "
+                "filter_keywords MUST include at least ONE of the following "
+                "mood-board theme words (the buyer needs on-theme results, "
+                "not generic category matches):\n"
+                + ", ".join(theme_keywords)
+                + "\n\n"
+            )
+        else:
+            theme_lock_block = ""
+
         allowed_cats = "\n".join(f"- {c}" for c in sorted(ALLOWED_IDEA_CATEGORIES))
         prompt = CLUSTER_PROMPT_TEMPLATE.format(
             trend_json=json.dumps(trend_data, indent=2),
             products_summary=products_summary,
             product_count=len(similar_products),
             total_matched_products=total_matched,
+            theme_lock_block=theme_lock_block,
             exclusion_block=exclusion_block,
             allowed_categories=allowed_cats,
         )
@@ -401,7 +424,14 @@ class MoodBoardAnalyser:
 
         # Sanity-clean: drop clusters with no products / no keywords, dedupe
         # product_ids across clusters (first cluster wins), keep only real IDs.
+        # Also enforce the theme lock — a cluster's keywords must intersect
+        # with the mood board's theme keywords when the mood board is
+        # thematic. If Claude produced e.g. ['candle', 'wax', 'melt'] for a
+        # Halloween board, we auto-inject the theme keywords so the live
+        # product query stays on-theme instead of matching every candle in
+        # the catalogue.
         valid_ids = {p["id"] for p in similar_products}
+        theme_kw_set = {k.lower() for k in theme_keywords}
         used_ids: set[int] = set()
         cleaned: list[dict] = []
         for c in clusters:
@@ -423,6 +453,14 @@ class MoodBoardAnalyser:
                 log.info("cluster_dropped_empty", name=name,
                          pids=len(pids), keywords=len(kws))
                 continue
+            # Theme lock enforcement — if the mood board is thematic and this
+            # cluster's keywords don't include ANY theme word, auto-inject
+            # the theme keywords. Preserves Claude's intent (its keywords
+            # come first) but guarantees the live query stays on-theme.
+            if theme_kw_set and not (theme_kw_set & set(kws)):
+                log.info("cluster_theme_lock_injected", name=name,
+                         cluster_kws=kws, theme_kws=list(theme_kw_set))
+                kws = kws + [k for k in theme_keywords if k.lower() not in kws]
             used_ids.update(pids)
             cleaned.append({
                 "name": name[:500],
