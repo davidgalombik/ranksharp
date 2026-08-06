@@ -476,7 +476,13 @@ export const api = {
       apiFetch<FragranceTrendReport>("/api/fragrance-trends/latest", generation ? { generation: String(generation) } : undefined),
     listReports: () => apiFetch<FragranceTrendReport[]>("/api/fragrance-trends/"),
     getTrend: (id: number) => apiFetch<FragranceTrend>(`/api/fragrance-trends/trend/${id}`),
-    weeks: () => apiFetch<{ week: string; generation_count: number }[]>("/api/fragrance-trends/weeks/"),
+    // Fragrance is run-based since 2026-08-06. `week` is the run's ISO
+    // datetime string (misnamed for backward compat). `generations` is
+    // the actual set numbers in that run — frontend renders tabs from it.
+    weeks: () =>
+      apiFetch<{ week: string; generation_count: number; generations?: number[] }[]>(
+        "/api/fragrance-trends/weeks/"
+      ),
     generate: () =>
       fetch(`${API_BASE}/api/fragrance-trends/generate`, { method: "POST" }).then((r) => r.json()),
     regenerate: () =>

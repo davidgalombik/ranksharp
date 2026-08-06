@@ -217,14 +217,17 @@ async def _run_trend_analysis(task):
 
 @app.task(bind=True, queue="reports")
 def run_fragrance_trend_analysis_task(self):
-    """Run the fragrance trend clustering and report generation (manual trigger only)."""
-    asyncio.run(_run_fragrance_trend_analysis(self))
+    """Start a NEW fragrance analysis run on the current catalogue snapshot.
+    Each fresh run gets its own utcnow() timestamp. Manual trigger only —
+    fragrance is not scheduled, buyers kick it off after a scrape."""
+    asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=True))
 
 
 @app.task(bind=True, queue="reports")
 def regenerate_fragrance_trend_analysis_task(self):
-    """Re-run fragrance trend analysis adding a new generation (Try Again)."""
-    asyncio.run(_run_fragrance_trend_analysis(self))
+    """Try Again: append a new generation to the LATEST existing run so the
+    buyer gets Claude's second attempt against the same catalogue snapshot."""
+    asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=False))
 
 
 @app.task(bind=True, queue="reports")
@@ -406,7 +409,7 @@ async def _backfill_instore_recommendations():
         return {"trends": len(trends), "recommendations": total_recs}
 
 
-async def _run_fragrance_trend_analysis(task):
+async def _run_fragrance_trend_analysis(task, fresh_run: bool = False):
     from database.db import AsyncSessionLocal, async_engine
     from analysis.fragrance_trend_engine import FragranceTrendEngine
 
@@ -414,13 +417,14 @@ async def _run_fragrance_trend_analysis(task):
 
     async with AsyncSessionLocal() as session:
         engine_instance = FragranceTrendEngine(session, task=task)
-        report = await engine_instance.regenerate_analysis()
+        report = await engine_instance.regenerate_analysis(fresh_run=fresh_run)
         if report:
             log.info(
                 "fragrance_analysis_complete",
                 report_id=report.id,
                 generation_count=report.generation_count,
                 trends=len(report.trend_ids),
+                fresh_run=fresh_run,
             )
 
 

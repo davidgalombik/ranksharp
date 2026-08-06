@@ -134,13 +134,17 @@ export default async function FragranceTrendDetailPage({ params }: { params: { i
       {/* Hero mosaic */}
       <HeroMosaic examples={trend.examples.slice(0, 5)} />
 
-      {/* Title + badges */}
+      {/* Title + badges. Momentum removed 2026-08-06 — badge only shows
+          for legacy pre-refactor trends whose status is anything but
+          'new'. New runs get category-only badges. */}
       <div className="space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className={clsx("px-2.5 py-0.5 rounded-full text-sm font-medium", STATUS_STYLES[trend.status])}>
-            {trend.status.charAt(0).toUpperCase() + trend.status.slice(1)}
-            {trend.momentum_pct != null && ` (${trend.momentum_pct > 0 ? "+" : ""}${trend.momentum_pct}% vs last week)`}
-          </span>
+          {trend.status && trend.status !== "new" && (
+            <span className={clsx("px-2.5 py-0.5 rounded-full text-sm font-medium", STATUS_STYLES[trend.status])}>
+              {trend.status.charAt(0).toUpperCase() + trend.status.slice(1)}
+              {trend.momentum_pct != null && ` (${trend.momentum_pct > 0 ? "+" : ""}${trend.momentum_pct}% vs last week)`}
+            </span>
+          )}
           <span className={clsx("px-2.5 py-0.5 rounded-full text-sm font-medium", CATEGORY_COLOURS[trend.category] ?? "bg-stone-100 text-stone-600")}>
             {trend.category}
           </span>

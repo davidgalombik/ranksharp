@@ -4,6 +4,11 @@ import clsx from "clsx";
 import FragranceActionButton from "@/components/FragranceActionButton";
 import ClearSetsButton from "@/components/ClearSetsButton";
 
+// Fragrance is now run-based (sporadic scrapes → each analysis run
+// stands alone). Momentum was removed 2026-08-06 — the "+18% vs last
+// week" was fiction when runs happen at arbitrary intervals. Status
+// styles below are retained for backward-compat rendering of any
+// pre-refactor trends still stored with status=rising/plateau/etc.
 const STATUS_STYLES = {
   rising:   "bg-emerald-100 text-emerald-800",
   plateau:  "bg-amber-100 text-amber-800",
@@ -64,11 +69,16 @@ function FragranceTrendCard({ trend }: { trend: FragranceTrend }) {
       <article className="bg-white rounded-xl border border-stone-200 overflow-hidden hover:shadow-lg transition-shadow">
         <div className="relative">
           <ImageMosaic examples={trend.examples ?? []} />
-          <span className={clsx("absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-semibold shadow-sm", STATUS_STYLES[trend.status])}>
-            {STATUS_ICONS[trend.status]}{" "}
-            {trend.status.charAt(0).toUpperCase() + trend.status.slice(1)}
-            {trend.momentum_pct != null && ` ${trend.momentum_pct > 0 ? "+" : ""}${trend.momentum_pct}%`}
-          </span>
+          {/* Legacy status badge — only shown for pre-refactor trends
+              where status is anything other than 'new'. New trends drop
+              the badge entirely since momentum is gone. */}
+          {trend.status && trend.status !== "new" && (
+            <span className={clsx("absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-semibold shadow-sm", STATUS_STYLES[trend.status])}>
+              {STATUS_ICONS[trend.status]}{" "}
+              {trend.status.charAt(0).toUpperCase() + trend.status.slice(1)}
+              {trend.momentum_pct != null && ` ${trend.momentum_pct > 0 ? "+" : ""}${trend.momentum_pct}%`}
+            </span>
+          )}
           {trend.markets && trend.markets.length > 0 && (
             <div className="absolute bottom-2 left-2 flex gap-0.5">
               {trend.markets.slice(0, 3).map((m) => (
@@ -141,11 +151,18 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
   const activeGen = searchParams.generation ? parseInt(searchParams.generation) : undefined;
 
   const [weeks] = await Promise.all([
-    api.fragranceTrends.weeks().catch(() => [] as { week: string; generation_count: number }[]),
+    api.fragranceTrends.weeks().catch(() => [] as { week: string; generation_count: number; generations?: number[] }[]),
   ]);
 
-  const generationCount = weeks[0]?.generation_count ?? 1;
-  const effectiveGen = activeGen ?? generationCount;
+  // Fragrance is now run-based. `weeks[0]` is the LATEST run; its
+  // `generations` array is the actual list of set numbers in that run
+  // (e.g. [1, 3, 4] after Set 2 was deleted). Fall back to [1..count]
+  // for old server responses that don't ship the array yet.
+  const latestRun = weeks[0];
+  const generationList: number[] = latestRun?.generations
+    ?? (latestRun ? Array.from({ length: latestRun.generation_count }, (_, i) => i + 1) : []);
+  const latestGeneration = generationList.length ? generationList[generationList.length - 1] : 1;
+  const effectiveGen = activeGen ?? latestGeneration;
 
   let report = null;
   try {
@@ -158,7 +175,16 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
     return `?generation=${gen}`;
   }
 
-  const hasMultipleGenerations = generationCount > 1;
+  const hasMultipleGenerations = generationList.length > 1;
+
+  // Render the latest run's timestamp. The `week` field is misnamed but
+  // holds an ISO datetime string; parse and format for display.
+  const latestRunAt = latestRun ? new Date(latestRun.week) : null;
+  const latestRunLabel = latestRunAt
+    ? latestRunAt.toLocaleString(undefined, {
+        day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit",
+      })
+    : null;
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -167,17 +193,21 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
         <div>
           <h1 className="text-2xl font-bold text-stone-900">Fragrance Trends</h1>
           <p className="text-stone-500 text-sm mt-1">
-            Candle and home fragrance trend analysis across {report?.retailers_covered ?? "—"} retailers
+            {latestRunLabel
+              ? <>Latest analysis · <span className="text-stone-700 font-medium">{latestRunLabel}</span> · {report?.retailers_covered ?? "—"} retailers</>
+              : <>Candle and home fragrance trend analysis. Run an analysis after scraping to get started.</>}
           </p>
         </div>
         <FragranceActionButton initialHasAnalysis={weeks.length > 0} />
       </div>
 
-      {/* Generation tabs */}
+      {/* Generation tabs — one row per Set within the LATEST run.
+          Rendered from the actual generationList so a delete leaves a
+          clean gap rather than a phantom tab. */}
       {hasMultipleGenerations && (
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-stone-400 font-medium">Set:</span>
-          {Array.from({ length: generationCount }, (_, i) => i + 1).map((gen) => (
+          {generationList.map((gen) => (
             <Link
               key={gen}
               href={genTabHref(gen)}
@@ -188,7 +218,7 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
                   : "bg-white border-stone-200 text-stone-600 hover:border-stone-400"
               )}
             >
-              {gen === generationCount ? `Set ${gen} ✨` : `Set ${gen}`}
+              {gen === latestGeneration ? `Set ${gen} ✨` : `Set ${gen}`}
             </Link>
           ))}
           <ClearSetsButton target="fragrance" />
@@ -241,7 +271,7 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
         <>
           <p className="text-sm text-stone-500">
             {report.trend_count} trend{report.trend_count !== 1 ? "s" : ""} found
-            {hasMultipleGenerations && ` · Set ${effectiveGen} of ${generationCount}`}
+            {hasMultipleGenerations && ` · Set ${effectiveGen} of ${generationList.length}`}
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {report.trends.map((trend) => (

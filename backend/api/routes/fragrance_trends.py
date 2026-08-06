@@ -32,9 +32,16 @@ class FragranceTrendExampleOut(BaseModel):
         from_attributes = True
 
 
+# Historical name — kept for backward compat with the existing /weeks/
+# endpoint. Fragrance is now run-based, not weekly, so the semantics are:
+#   `week`   → the run's timestamp as an ISO datetime string.
+#   `generation_count` → count of sets in that run (max).
+#   `generations` → the actual list of set numbers in that run (e.g. [1, 3, 4]
+#                   after Set 2 was deleted). Frontend renders tabs from this.
 class WeekInfo(BaseModel):
     week: str
     generation_count: int
+    generations: list[int] = []
 
 
 class FragranceTrendOut(BaseModel):
@@ -82,15 +89,32 @@ class FragranceTrendReportOut(BaseModel):
 
 @router.get("/weeks/", response_model=list[WeekInfo])
 async def list_weeks(db: AsyncSession = Depends(get_db)):
-    """List all weeks with fragrance trend data, including generation count per week."""
+    """List every fragrance analysis run, newest first.
+
+    Endpoint kept at /weeks/ for backward compatibility. The `week` field
+    is now the run's full ISO datetime string (not a date), and each entry
+    includes the actual list of generation numbers in that run.
+    """
     result = await db.execute(
-        select(FragranceTrend.week_start, func.max(FragranceTrend.generation).label("gen_count"))
-        .group_by(FragranceTrend.week_start)
-        .order_by(desc(FragranceTrend.week_start))
+        select(FragranceTrend.week_start, FragranceTrend.generation)
+        .group_by(FragranceTrend.week_start, FragranceTrend.generation)
+        .order_by(desc(FragranceTrend.week_start), FragranceTrend.generation)
     )
+    by_run: dict = {}
+    order: list = []
+    for row in result.all():
+        w = row.week_start
+        if w not in by_run:
+            by_run[w] = []
+            order.append(w)
+        by_run[w].append(int(row.generation))
     return [
-        WeekInfo(week=str(row.week_start.date()), generation_count=row.gen_count)
-        for row in result.all()
+        WeekInfo(
+            week=w.isoformat(),
+            generation_count=max(by_run[w]),
+            generations=sorted(by_run[w]),
+        )
+        for w in order
     ]
 
 

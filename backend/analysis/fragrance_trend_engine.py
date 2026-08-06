@@ -161,26 +161,48 @@ class FragranceTrendEngine:
     #  Main entry point                                                    #
     # ------------------------------------------------------------------ #
 
-    async def regenerate_analysis(self) -> Optional[FragranceTrendReport]:
-        """Generate a new set of fragrance trends without deleting previous generations.
+    async def regenerate_analysis(self, fresh_run: bool = False) -> Optional[FragranceTrendReport]:
+        """Generate a new set of fragrance trends.
 
-        - Keeps all existing FragranceTrend/FragranceTrendExample rows intact.
-        - Passes every previously found trend name as an exclusion so Claude finds
-          genuinely different trends each time.
-        - Saves new trends with generation = max_existing + 1.
-        - Example products are never reused across generations.
-        - Updates FragranceTrendReport.generation_count.
+        Fragrance is run-based, not weekly. `run_at` is a timestamp identifying
+        one execution of the engine over a catalogue snapshot. Each call
+        either starts a NEW run (fresh_run=True) or appends a "Try Again" set
+        to the LATEST existing run (fresh_run=False, the Try Again path).
+
+        Column `week_start` is retained on the models for backward compat but
+        semantically it is now `run_at` — the timestamp when the analysis run
+        was started. We do NOT snap to Monday any more.
+
+        Momentum is gone. Buyers scrape sporadically, so "+18% since last week"
+        was fiction. All momentum_pct / prev_trend_id / status fields are set
+        to None / TrendStatus.NEW for consistency.
         """
-        today = datetime.utcnow().date()
-        week_start = datetime.combine(
-            today - timedelta(days=today.weekday()),
-            datetime.min.time()
-        )
+        # Resolve the run's timestamp.
+        # - fresh_run: brand-new timestamp (utcnow, full precision).
+        # - Try Again: attach to the LATEST existing run's timestamp so all
+        #   generations of one catalogue snapshot cluster together. Falls
+        #   back to utcnow if no prior run exists (first ever call).
+        if fresh_run:
+            run_at = datetime.utcnow()
+        else:
+            latest_row = await self.db.execute(
+                select(FragranceTrend.week_start)
+                .order_by(FragranceTrend.week_start.desc())
+                .limit(1)
+            )
+            latest_run = latest_row.scalar_one_or_none()
+            run_at = latest_run or datetime.utcnow()
 
-        log.info("fragrance_regenerate_start", week_start=week_start.isoformat())
+        log.info(
+            "fragrance_regenerate_start",
+            run_at=run_at.isoformat(),
+            fresh_run=fresh_run,
+        )
         self._progress(3, "Loading existing fragrance trends for exclusion…")
 
-        # Collect ALL trend names across ALL generations for this week as exclusions
+        # Collect trend names across ALL generations for THIS run as exclusions.
+        # Scoped to run_at (not the whole "week") so a fresh run always starts
+        # with zero exclusions — buyers get Claude's best first-pass output.
         prev_trends_result = await self.db.execute(
             select(
                 FragranceTrend.name,
@@ -189,7 +211,7 @@ class FragranceTrendEngine:
                 FragranceTrend.dominant_materials,
                 FragranceTrend.scent_families,
                 FragranceTrend.generation,
-            ).where(FragranceTrend.week_start == week_start)
+            ).where(FragranceTrend.week_start == run_at)
         )
         prev_rows = prev_trends_result.all()
         previously_found_trends: list[dict] = [
@@ -224,11 +246,14 @@ class FragranceTrendEngine:
         clusters = self._cluster(embeddings, product_ids, products)
         self._progress(30, f"Found {len(clusters)} clusters — sending to Claude…")
 
-        prior_trends = await self._load_prior_trends(week_start)
+        # Momentum is deliberately gone — pass an empty prior list so
+        # `_build_trend_record` never sets momentum_pct / prev_trend_id.
+        # `_holistic_analysis` gets [] too so its prompt no longer includes
+        # a "vs last week" section.
         self._progress(40, "Analysing with Claude (this takes ~60s)…")
 
         trend_dicts = await self._holistic_analysis(
-            clusters, items_by_id, week_start, prior_trends, previously_found_trends
+            clusters, items_by_id, run_at, [], previously_found_trends
         )
         if not trend_dicts:
             log.warning("no_fragrance_trends_returned_on_regeneration")
@@ -238,7 +263,7 @@ class FragranceTrendEngine:
 
         new_trends = []
         for td in trend_dicts:
-            trend = self._build_trend_record(td, week_start, prior_trends, items_by_id)
+            trend = self._build_trend_record(td, run_at, [], items_by_id)
             if trend:
                 trend.generation = next_generation
                 self.db.add(trend)
@@ -246,12 +271,13 @@ class FragranceTrendEngine:
 
         await self.db.flush()
 
-        # Pre-populate used_product_ids from ALL previous generations so no
-        # example product is reused across sets.
+        # Pre-populate used_product_ids from earlier generations OF THE SAME
+        # run so no example product is reused across sets within a run. A
+        # separate run gets its own zero baseline.
         prior_example_ids_result = await self.db.execute(
             select(FragranceTrendExample.product_id)
             .join(FragranceTrend, FragranceTrendExample.trend_id == FragranceTrend.id)
-            .where(FragranceTrend.week_start == week_start)
+            .where(FragranceTrend.week_start == run_at)
             .where(FragranceTrend.generation < next_generation)
         )
         used_product_ids: set[int] = set(prior_example_ids_result.scalars().all())
@@ -267,7 +293,7 @@ class FragranceTrendEngine:
         new_ids = [t.id for t in committed_trends]
 
         report_result = await self.db.execute(
-            select(FragranceTrendReport).where(FragranceTrendReport.week_start == week_start)
+            select(FragranceTrendReport).where(FragranceTrendReport.week_start == run_at)
         )
         report = report_result.scalar_one_or_none()
 
@@ -275,7 +301,7 @@ class FragranceTrendEngine:
             report.trend_ids = (report.trend_ids or []) + new_ids
             report.generation_count = next_generation
         else:
-            report_values = self._generate_report(week_start, committed_trends, len(products))
+            report_values = self._generate_report(run_at, committed_trends, len(products))
             report_values["generation_count"] = next_generation
             upsert_stmt = (
                 pg_insert(FragranceTrendReport)
@@ -290,7 +316,7 @@ class FragranceTrendEngine:
         await self.db.commit()
 
         report_result = await self.db.execute(
-            select(FragranceTrendReport).where(FragranceTrendReport.week_start == week_start)
+            select(FragranceTrendReport).where(FragranceTrendReport.week_start == run_at)
         )
         report = report_result.scalar_one_or_none()
 
@@ -298,7 +324,7 @@ class FragranceTrendEngine:
             "fragrance_regenerate_complete",
             new_trends=len(committed_trends),
             generation=next_generation,
-            week_start=week_start.isoformat(),
+            run_at=run_at.isoformat(),
         )
         return report
 
@@ -328,6 +354,8 @@ class FragranceTrendEngine:
         rows = result.all()
         return [{"product": p, "attrs": a, "retailer": r} for p, a, r in rows]
 
+    # Deprecated: momentum was removed 2026-08-06. Kept as a stub in case a
+    # future reintroduction wants an anchor; do not call from new code.
     async def _load_prior_trends(self, week_start: datetime) -> list[FragranceTrend]:
         prior_week = week_start - timedelta(days=7)
         result = await self.db.execute(
@@ -480,7 +508,8 @@ class FragranceTrendEngine:
 
         all_retailers = {item["retailer"].name for item in items_by_id.values()}
         all_countries = {item["retailer"].country for item in items_by_id.values()}
-        lines.append(f"ANALYSIS PERIOD: Week of {week_start.strftime('%d %b %Y')}")
+        # `week_start` is semantically `run_at` — timestamp of this analysis run.
+        lines.append(f"ANALYSIS RUN: {week_start.strftime('%d %b %Y %H:%M UTC')}")
         lines.append(f"TOTAL FRAGRANCE PRODUCTS: {len(items_by_id):,}")
         lines.append(f"RETAILERS: {len(all_retailers)} ({', '.join(sorted(all_retailers))})")
         lines.append(f"MARKETS: {', '.join(sorted(all_countries))}")
@@ -636,18 +665,15 @@ class FragranceTrendEngine:
             )
             return None
 
-        # Momentum vs prior week
+        # Momentum removed for Fragrance (2026-08-06). Buyers scrape
+        # sporadically so "% vs last week" was meaningless. Fields stay
+        # in the schema for backward compat but always None on new writes.
         status = TrendStatus.NEW
         momentum = None
         prev_id = None
-        for prior in prior_trends:
-            if prior.name.lower() == name.lower():
-                delta = len(example_ids) - prior.product_count
-                pct = (delta / prior.product_count * 100) if prior.product_count > 0 else 0
-                momentum = round(pct, 1)
-                prev_id = prior.id
-                status = TrendStatus.RISING if pct > 10 else (TrendStatus.DECLINING if pct < -10 else TrendStatus.PLATEAU)
-                break
+        # prior_trends is always [] now — kept in the signature so the
+        # caller shape doesn't change.
+        _ = prior_trends
 
         return FragranceTrend(
             week_start=week_start,
@@ -736,28 +762,26 @@ class FragranceTrendEngine:
 
     def _generate_report(
         self,
-        week_start: datetime,
+        run_at: datetime,
         trends: list[FragranceTrend],
         total_products: int,
     ) -> dict:
-        """Build the FragranceTrendReport column values as a plain dict (caller does the upsert)."""
+        """Build the FragranceTrendReport column values as a plain dict
+        (caller does the upsert). `run_at` is stored in the legacy
+        `week_start` column — the label is inaccurate but the migration
+        cost of renaming beats the payoff."""
         retailer_count = len({r for t in trends for r in (t.retailer_names or [])})
-        rising = [t for t in trends if t.status == TrendStatus.RISING]
-        new_trends = [t for t in trends if t.status == TrendStatus.NEW]
 
+        # No momentum → no rising / declining language. Report summary is
+        # now purely descriptive of what THIS run found.
         summary = (
             f"Fragrance trend analysis of {total_products:,} candle and fragrance products across "
-            f"{retailer_count} retailers identified {len(trends)} distinct trends. "
+            f"{retailer_count} retailers identified {len(trends)} distinct trends."
         )
-        if rising:
-            names = ", ".join(t.name for t in rising[:3])
-            summary += f"{len(rising)} trend{'s are' if len(rising) > 1 else ' is'} rising: {names}. "
-        if new_trends:
-            summary += f"{len(new_trends)} new trend{'s' if len(new_trends) > 1 else ''} identified."
 
         return {
-            "week_start": week_start,
-            "title": f"Candle & Fragrance Trend Report — Week of {week_start.strftime('%d %b %Y')}",
+            "week_start": run_at,
+            "title": f"Candle & Fragrance Trend Analysis — {run_at.strftime('%d %b %Y %H:%M UTC')}",
             "summary": summary,
             "trend_ids": [t.id for t in trends],
             "total_products_analysed": total_products,
