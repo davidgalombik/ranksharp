@@ -694,7 +694,13 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                     ideas = clusters
                 else:
                     sess_obj.status = AldiUploadStatus.FAILED
-                    sess_obj.error_message = "Clustering returned no results"
+                    sess_obj.error_message = (
+                        "Clustering returned no usable results. Common causes: "
+                        "Claude API error, invalid JSON response, or all clusters "
+                        "were dropped for missing product IDs / keywords. "
+                        "Check the worker logs (cluster_products_failed / "
+                        "cluster_products_all_dropped) for the raw response."
+                    )
                     ideas = None
 
         except Exception as exc:
@@ -814,7 +820,14 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
                     ideas = clusters
                 else:
                     sess_obj.status = AldiUploadStatus.FAILED
-                    sess_obj.error_message = "Cluster regeneration returned no results"
+                    sess_obj.error_message = (
+                        "Cluster regeneration returned no usable results. "
+                        "Common causes: Claude API error, invalid JSON response, "
+                        "or all clusters were dropped for missing product IDs / "
+                        "keywords. Check the worker logs "
+                        "(cluster_products_failed / cluster_products_all_dropped) "
+                        "for the raw response."
+                    )
                     ideas = None
 
         except Exception as exc:

@@ -374,17 +374,25 @@ class MoodBoardAnalyser:
             allowed_categories=allowed_cats,
         )
 
+        raw = ""
         try:
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                # Bumped 4000 -> 8000: with 5-8 clusters × ~30 IDs each,
+                # 4000 was tight enough that Claude occasionally truncated
+                # mid-cluster, breaking the JSON parse.
+                max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
             raw = _strip_fences(raw)
-            clusters = json.loads(raw)
+            # Prose-tolerant parse: if Claude prepends "Here are the
+            # clusters:" or similar, extract the first top-level [...] block.
+            payload = _extract_first_json_array(raw) or raw
+            clusters = json.loads(payload)
         except Exception as exc:
-            log.error("cluster_products_failed", error=str(exc))
+            log.error("cluster_products_failed", error=str(exc),
+                      raw_preview=raw[:500] if raw else None)
             return None
 
         if not isinstance(clusters, list):
@@ -402,8 +410,13 @@ class MoodBoardAnalyser:
             name = (c.get("name") or "").strip()
             if not name:
                 continue
-            pids = [pid for pid in (c.get("product_ids") or [])
-                    if isinstance(pid, int) and pid in valid_ids and pid not in used_ids]
+            # Coerce IDs — Claude occasionally emits them as strings
+            # ("123") instead of ints. Reject anything not-numeric.
+            pids: list[int] = []
+            for raw_pid in (c.get("product_ids") or []):
+                pid = _coerce_int(raw_pid)
+                if pid is not None and pid in valid_ids and pid not in used_ids:
+                    pids.append(pid)
             kws = [k.strip().lower() for k in (c.get("filter_keywords") or [])
                    if isinstance(k, str) and k.strip()]
             if not pids or not kws:
@@ -418,6 +431,11 @@ class MoodBoardAnalyser:
                 "product_ids": pids,
                 "filter_keywords": kws,
             })
+
+        if not cleaned:
+            log.warning("cluster_products_all_dropped",
+                        received=len(clusters),
+                        raw_preview=raw[:500] if raw else None)
 
         return cleaned
 
@@ -620,3 +638,59 @@ def _strip_fences(text: str) -> str:
         inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
         return "\n".join(inner)
     return text
+
+
+def _coerce_int(v) -> Optional[int]:
+    """Return an int for common Claude-quirks: 123, "123", " 123 ".
+    Returns None for anything that isn't cleanly numeric."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v) if float(int(v)) == v else None
+    if isinstance(v, str):
+        try:
+            return int(v.strip().strip("'\""))
+        except (ValueError, AttributeError):
+            return None
+    return None
+
+
+def _extract_first_json_array(text: str) -> Optional[str]:
+    """Pull out the first top-level [...] block from a mixed-prose response.
+
+    Claude sometimes prepends 'Here are the clusters:' or similar despite
+    the ONLY-JSON instruction. This scans for the first '[' at bracket
+    depth zero and matches through to its balanced closing ']' — string
+    literals (with escape handling) are treated as opaque so a `[` or `]`
+    inside a JSON string doesn't confuse the counter.
+
+    Returns None if no balanced array is found; caller falls back to the
+    raw text so json.loads() can still surface its own error.
+    """
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
