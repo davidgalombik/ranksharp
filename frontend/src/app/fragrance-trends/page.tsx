@@ -3,6 +3,7 @@ import Link from "next/link";
 import clsx from "clsx";
 import FragranceActionButton from "@/components/FragranceActionButton";
 import ClearSetsButton from "@/components/ClearSetsButton";
+import FragranceGenerationTabs from "@/components/FragranceGenerationTabs";
 
 // Fragrance is now run-based (sporadic scrapes → each analysis run
 // stands alone). Momentum was removed 2026-08-06 — the "+18% vs last
@@ -171,10 +172,6 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
     // No report yet
   }
 
-  function genTabHref(gen: number) {
-    return `?generation=${gen}`;
-  }
-
   const hasMultipleGenerations = generationList.length > 1;
 
   // Render the latest run's timestamp. The `week` field is misnamed but
@@ -201,26 +198,18 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
         <FragranceActionButton initialHasAnalysis={weeks.length > 0} />
       </div>
 
-      {/* Generation tabs — one row per Set within the LATEST run.
-          Rendered from the actual generationList so a delete leaves a
-          clean gap rather than a phantom tab. */}
-      {hasMultipleGenerations && (
+      {/* Generation tabs — client component so the × delete button
+          can call the API without a full page reload. Only rendered
+          when there's more than one set AND the report is loaded so we
+          have a runId to delete against. */}
+      {hasMultipleGenerations && report && (
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-stone-400 font-medium">Set:</span>
-          {generationList.map((gen) => (
-            <Link
-              key={gen}
-              href={genTabHref(gen)}
-              className={clsx(
-                "px-3 py-1 rounded-lg text-xs font-medium transition-colors border",
-                effectiveGen === gen
-                  ? "bg-stone-900 border-stone-900 text-white"
-                  : "bg-white border-stone-200 text-stone-600 hover:border-stone-400"
-              )}
-            >
-              {gen === latestGeneration ? `Set ${gen} ✨` : `Set ${gen}`}
-            </Link>
-          ))}
+          <FragranceGenerationTabs
+            runId={report.id}
+            generationList={generationList}
+            activeGen={effectiveGen}
+            latestGeneration={latestGeneration}
+          />
           <ClearSetsButton target="fragrance" />
         </div>
       )}

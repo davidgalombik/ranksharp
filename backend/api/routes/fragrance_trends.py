@@ -176,6 +176,130 @@ async def regenerate_report():
     return {"task_id": task.id, "status": "queued"}
 
 
+@router.delete("/runs/{run_id}/generations/{generation}")
+async def delete_run_generation(
+    run_id: int,
+    generation: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete a single Set N for the given fragrance analysis run.
+
+    Order matters here (Fragrance has one extra step vs Product Trends —
+    the report row's JSONB trend_ids list has to be pruned too):
+
+      1. Resolve the run's timestamp from the report id.
+      2. Count what's here and what would remain.
+      3. Null any prev_trend_id from other trends that references rows
+         we are about to delete (the FK has no ON DELETE clause).
+      4. Delete the FragranceTrendExample rows for the affected trends.
+      5. Delete the FragranceTrend rows.
+      6. Prune the deleted IDs out of report.trend_ids, and recompute
+         report.generation_count from what remains.
+
+    Guardrails:
+      - 404 if the run doesn't exist, or the generation has no trends.
+      - 409 if this would leave the whole run with zero trends — the
+        caller should delete the whole run via /clear or a per-run
+        delete instead.
+
+    Numbering is not compacted. Sets 1/2/3 minus 2 → Sets 1/3; the next
+    Try Again produces Set 4.
+    """
+    from sqlalchemy import delete as sa_delete, update as sa_update
+
+    report = await db.get(FragranceTrendReport, run_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    run_at = report.week_start  # legacy column name; semantically run_at
+
+    # Count what's in this generation for this run
+    count_row = await db.execute(
+        select(func.count(FragranceTrend.id)).where(
+            FragranceTrend.week_start == run_at,
+            FragranceTrend.generation == generation,
+        )
+    )
+    to_delete = count_row.scalar_one() or 0
+    if to_delete == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No fragrance trends found for run {run_id} generation {generation}",
+        )
+
+    # Count what would remain
+    remaining_row = await db.execute(
+        select(func.count(FragranceTrend.id)).where(
+            FragranceTrend.week_start == run_at,
+            FragranceTrend.generation != generation,
+        )
+    )
+    remaining = remaining_row.scalar_one() or 0
+    if remaining == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing to delete — this is the only remaining generation for "
+                f"run {run_id}. Delete the whole run via /clear if you want a "
+                f"clean slate."
+            ),
+        )
+
+    # Collect trend IDs we're about to delete
+    id_rows = await db.execute(
+        select(FragranceTrend.id).where(
+            FragranceTrend.week_start == run_at,
+            FragranceTrend.generation == generation,
+        )
+    )
+    trend_ids = [tid for (tid,) in id_rows.all()]
+    trend_id_set = set(trend_ids)
+
+    # 3. Null downstream backlinks (any FragranceTrend anywhere pointing at
+    # rows we are deleting). Momentum is gone for new rows, but legacy
+    # pre-refactor rows may still hold prev_trend_id values.
+    unlinked_result = await db.execute(
+        sa_update(FragranceTrend)
+        .where(FragranceTrend.prev_trend_id.in_(trend_ids))
+        .values(prev_trend_id=None)
+    )
+    unlinked = unlinked_result.rowcount or 0
+
+    # 4. Delete the FragranceTrendExample rows
+    examples_result = await db.execute(
+        sa_delete(FragranceTrendExample).where(
+            FragranceTrendExample.trend_id.in_(trend_ids)
+        )
+    )
+    examples_deleted = examples_result.rowcount or 0
+
+    # 5. Delete the FragranceTrend rows
+    await db.execute(
+        sa_delete(FragranceTrend).where(FragranceTrend.id.in_(trend_ids))
+    )
+
+    # 6. Prune report.trend_ids and recompute generation_count. Both are
+    # stored fields on FragranceTrendReport that would drift otherwise.
+    report.trend_ids = [tid for tid in (report.trend_ids or []) if tid not in trend_id_set]
+    gen_rows = await db.execute(
+        select(FragranceTrend.generation)
+        .where(FragranceTrend.week_start == run_at)
+        .distinct()
+    )
+    remaining_gens = sorted({int(g) for (g,) in gen_rows.all()})
+    report.generation_count = max(remaining_gens) if remaining_gens else 1
+
+    await db.commit()
+
+    return {
+        "run_id": run_id,
+        "generation": generation,
+        "deleted_trends": to_delete,
+        "deleted_examples": examples_deleted,
+        "unlinked_backlinks": unlinked,
+        "remaining_generations": remaining_gens,
+    }
+
+
 @router.get("/task/{task_id}")
 async def get_task_status(task_id: str):
     """Poll the status of a fragrance trend analysis task."""

@@ -489,6 +489,28 @@ export const api = {
       fetch(`${API_BASE}/api/fragrance-trends/regenerate`, { method: "POST" }).then((r) => r.json()),
     clear: () =>
       fetch(`${API_BASE}/api/fragrance-trends/clear`, { method: "DELETE" }).then((r) => r.json()),
+    // Hard-delete one Set within a specific run. runId is the
+    // FragranceTrendReport.id (there is exactly one report per run).
+    // 409 if it would leave the run with zero trends.
+    deleteGeneration: async (runId: number, generation: number) => {
+      const res = await fetch(
+        `${API_BASE}/api/fragrance-trends/runs/${runId}/generations/${generation}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<{
+        run_id: number;
+        generation: number;
+        deleted_trends: number;
+        deleted_examples: number;
+        unlinked_backlinks: number;
+        remaining_generations: number[];
+      }>;
+    },
     taskStatus: (taskId: string) =>
       apiFetch<{ task_id: string; state: string; pct: number; step: string }>(
         `/api/fragrance-trends/task/${taskId}`
