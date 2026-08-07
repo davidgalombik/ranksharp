@@ -184,6 +184,13 @@ class InStoreTrendEngine:
         for trend, td in new_trends:
             await self._create_examples(trend, td, clusters, items_by_id, used_ids)
 
+        # Commit trends + examples BEFORE the slow recommendations phase.
+        # If a pgvector query in _create_recommendations fails and
+        # rollback() fires to unbreak the session, the already-committed
+        # trends + examples survive. Buyer sees trends without recs
+        # rather than losing the whole run.
+        await self.db.commit()
+
         self._progress(90, "Finding matching online products…")
         # Per-trend progress log AND progress update. The pgvector query
         # takes ~55s per trend without the HNSW index — bar sitting at
@@ -482,13 +489,17 @@ class InStoreTrendEngine:
         vec_literal = "[" + ",".join(f"{x:.6f}" for x in search_vec.tolist()) + "]"
         from sqlalchemy import text as sa_text
 
-        # Per-query timeout — pgvector without HNSW index means this is
-        # a sequential scan of ~156k products; a pathological trend
-        # embedding can push it past a minute. Cap at 60s so one bad
-        # query drops that trend's recs instead of hanging the run.
-        # SET LOCAL scopes the timeout to this transaction only.
+        # No SET LOCAL statement_timeout here — it was scoping to the
+        # session's outer transaction, so when a query timed out the
+        # transaction entered aborted state and every subsequent query
+        # (including the next trend's) failed with InFailedSqlTransaction,
+        # poisoning the whole run.
+        #
+        # On failure we rollback the session (clearing the aborted
+        # transaction) so subsequent trends can continue. This is safe
+        # because the caller commits AFTER _create_examples runs, so
+        # already-persisted trends + examples aren't lost.
         try:
-            await self.db.execute(sa_text("SET LOCAL statement_timeout = '60s'"))
             result = await self.db.execute(
                 sa_text(
                     "SELECT p.id, (pa.embedding <=> CAST(:vec AS vector)) AS distance "
@@ -508,6 +519,10 @@ class InStoreTrendEngine:
             log.warning("instore_recommendations_query_failed",
                         trend_id=trend.id, trend_name=trend.name,
                         error=str(exc), error_type=type(exc).__name__)
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
             return
         log.info(
             "instore_recommendations_query",
