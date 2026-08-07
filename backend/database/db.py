@@ -222,6 +222,8 @@ async def init_db():
             # FragranceTrendExample rows.
             ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS filter_keywords JSONB DEFAULT '[]'",
              _col("fragrance_trends", "filter_keywords")),
+            ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS matching_product_count INTEGER",
+             _col("fragrance_trends", "matching_product_count")),
             # In-store catalogue images: country tag (AU/US). Default 'US'
             # so existing rows backfill automatically.
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "

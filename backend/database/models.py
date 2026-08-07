@@ -412,6 +412,13 @@ class FragranceTrend(Base):
     # a "Vanilla Bourbon" trend actually returns vanilla-bourbon-adjacent
     # products, not every candle in the catalogue. Empty on legacy rows.
     filter_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    # Cached count of every fragrance product matching this trend's
+    # filter_keywords + the fragrance keyword scope + image gate.
+    # Populated once at trend creation; API reads this rather than
+    # running the live word-boundary regex on every page load (that
+    # was a ~3-5s per-trend query against the 156k-product catalogue,
+    # multiplied by ~9 trends per set → 30s+ tab switches).
+    matching_product_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     generation: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

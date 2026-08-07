@@ -534,13 +534,19 @@ async def _build_trend_out(
             is_best_seller=bool(product.is_best_seller),
         ))
 
-    # Live count of every fragrance product matching this trend's keywords
-    # — powers the "View all N products" button label on the card. Only
-    # queried when the trend has filter_keywords (new-shape); legacy
-    # trends leave matching_product_count = None and the button is hidden.
-    matching_count: Optional[int] = None
+    # Read cached count from the trend row rather than running the
+    # live regex COUNT — the live version was a full-table scan against
+    # 156k products with two `~*` predicates, ~3-5s per call, multiplied
+    # by every trend on a page (30s+ tab switches).
+    #
+    # Backfill: for new-shape trends persisted BEFORE the count column
+    # existed, cached_count is NULL but filter_keywords is populated.
+    # Compute lazily and persist here so subsequent loads are instant.
+    # Legacy trends (filter_keywords == []) stay NULL forever — the
+    # frontend hides the "View all" button when count is null.
     tr_kws = [k for k in (trend.filter_keywords or []) if k]
-    if tr_kws:
+    matching_count = trend.matching_product_count
+    if tr_kws and matching_count is None:
         import re as _re
         from analysis.image_filter import image_ok_sql
         trend_pattern = r"\y(?:" + "|".join(_re.escape(k) for k in tr_kws) + r")\y"
@@ -555,6 +561,8 @@ async def _build_trend_out(
             "trend_pattern": trend_pattern,
         })
         matching_count = count_row.scalar() or 0
+        trend.matching_product_count = matching_count
+        await db.commit()  # persist so we don't recompute on next page load
 
     return FragranceTrendOut(
         id=trend.id,

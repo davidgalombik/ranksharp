@@ -293,6 +293,12 @@ class FragranceTrendEngine:
         for trend, td in new_trends:
             await self._create_examples(trend, td, items_by_id, used_product_ids, used_image_urls)
 
+        # Precompute matching_product_count for every new trend so the
+        # frontend never has to run the ~3-5s live regex COUNT on page
+        # load. Each trend's count only depends on filter_keywords +
+        # fragrance scope + image gate — all stable after commit.
+        await self._precompute_matching_counts(new_trends)
+
         self._progress(95, "Updating fragrance report…")
 
         committed_trends = [t for t, _ in new_trends]
@@ -383,6 +389,41 @@ class FragranceTrendEngine:
         )
         rows = result.all()
         return [{"product": p, "attrs": a, "retailer": r} for p, a, r in rows]
+
+    async def _precompute_matching_counts(self, new_trends: list) -> None:
+        """Populate FragranceTrend.matching_product_count for every trend
+        in `new_trends`. Fires N regex-count queries (one per trend) at
+        generation time so the frontend never has to run them on page
+        load. Skipped for trends without filter_keywords.
+
+        `new_trends` is the list of (FragranceTrend, td_dict) tuples the
+        engine has already added + flushed. We update in place and rely
+        on the caller's commit.
+        """
+        from sqlalchemy import text as sa_text
+        from analysis.fragrance_keywords import fragrance_regex_pattern
+        from analysis.image_filter import image_ok_sql
+        import re as _re
+
+        frag_pattern = fragrance_regex_pattern()
+        for trend, _td in new_trends:
+            tr_kws = [k for k in (trend.filter_keywords or []) if k]
+            if not tr_kws:
+                continue
+            trend_pattern = r"\y(?:" + "|".join(_re.escape(k) for k in tr_kws) + r")\y"
+            count = (await self.db.execute(sa_text(f"""
+                SELECT COUNT(*) FROM products p
+                WHERE p.is_active = TRUE
+                  AND p.name ~* :frag_pattern
+                  AND p.name ~* :trend_pattern
+                  AND {image_ok_sql()}
+            """), {
+                "frag_pattern": frag_pattern,
+                "trend_pattern": trend_pattern,
+            })).scalar() or 0
+            trend.matching_product_count = int(count)
+        log.info("fragrance_matching_counts_precomputed",
+                 trend_count=len(new_trends))
 
     # Deprecated: momentum was removed 2026-08-06. Kept as a stub in case a
     # future reintroduction wants an anchor; do not call from new code.
