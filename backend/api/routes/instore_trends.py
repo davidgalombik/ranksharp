@@ -37,11 +37,13 @@ class InStoreTrendRecommendationOut(BaseModel):
     product_id: int
     name: str
     retailer_name: Optional[str] = None
+    retailer_slug: Optional[str] = None
     url: str
     price: Optional[float] = None
     currency: str = "USD"
     primary_image_url: Optional[str] = None
     similarity: float
+    is_best_seller: bool = False
 
 
 class InStoreTrendOut(BaseModel):
@@ -60,6 +62,9 @@ class InStoreTrendOut(BaseModel):
     dominant_taxonomy: list[str]
     examples: list[InStoreTrendExampleItemOut] = []
     recommendations: list[InStoreTrendRecommendationOut] = []
+    # Count of image-qualified recommendations stored for this trend.
+    # Populates the "View all N recommended products" button label.
+    total_recommendation_count: int = 0
 
 
 class InStoreReportOut(BaseModel):
@@ -154,6 +159,87 @@ async def get_task_status(task_id: str):
         return {"task_id": task_id, "state": state, "pct": 2, "step": "Queued…"}
 
 
+class InStoreTrendRecommendationsPage(BaseModel):
+    total: int
+    items: list[InStoreTrendRecommendationOut]
+
+
+@router.get(
+    "/trend/{trend_id}/recommendations",
+    response_model=InStoreTrendRecommendationsPage,
+)
+async def get_trend_recommendations(
+    trend_id: int,
+    limit: int = 48,
+    offset: int = 0,
+    only_best_sellers: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated recommendations for an in-store trend.
+
+    Powers the 'View all N recommended products' modal on the trend card.
+    Reads the stored InStoreTrendRecommendation rows (matched by the
+    engine via embedding similarity) rather than a live regex query —
+    the recommendations are already carefully selected, and in-store's
+    scale (dozens to hundreds per trend) doesn't need the live-catalogue
+    approach we use for Online / Fragrance.
+
+    Filters:
+      - Image-quality gate (never surface a broken tile)
+      - Optional best-sellers-only toggle
+    Sort: best-sellers first, then original engine rank.
+    """
+    from sqlalchemy import func as sa_func
+    from analysis.image_filter import image_ok_orm
+
+    trend = await db.get(InStoreTrend, trend_id)
+    if not trend:
+        raise HTTPException(status_code=404, detail="In-store trend not found")
+
+    base = (
+        select(InStoreTrendRecommendation, Product, Retailer)
+        .join(Product, InStoreTrendRecommendation.product_id == Product.id)
+        .join(Retailer, Product.retailer_id == Retailer.id)
+        .where(InStoreTrendRecommendation.trend_id == trend_id)
+        .where(image_ok_orm())
+    )
+    if only_best_sellers:
+        base = base.where(Product.is_best_seller == True)
+
+    # Total count under the same filters
+    total_row = await db.execute(
+        select(sa_func.count()).select_from(base.subquery())
+    )
+    total = total_row.scalar_one() or 0
+
+    page = (
+        base.order_by(
+            desc(Product.is_best_seller),
+            InStoreTrendRecommendation.rank,
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = (await db.execute(page)).all()
+
+    items = [
+        InStoreTrendRecommendationOut(
+            product_id=prod.id,
+            name=prod.name,
+            retailer_name=ret.name,
+            retailer_slug=ret.slug,
+            url=prod.url,
+            price=prod.price,
+            currency=prod.currency or "USD",
+            primary_image_url=prod.primary_image_url,
+            similarity=rec.similarity,
+            is_best_seller=bool(prod.is_best_seller),
+        )
+        for rec, prod, ret in rows
+    ]
+    return InStoreTrendRecommendationsPage(total=total, items=items)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InStoreReportOut:
@@ -173,11 +259,33 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
     trend_ids = [t.id for t in trends]
 
     # Bulk-fetch examples + their items + parent images for retailer/image_id.
+    # "Is-a-product" gate — filter to items that Claude Vision actually
+    # classified as physical products, not signage / section headers /
+    # background shelf edges:
+    #   - cropped_file_path IS NOT NULL: Claude successfully cropped a region
+    #   - prominence != 'background': item was foreground on the shelf
+    #   - has at least one classification tag: colours OR materials OR patterns
+    #     OR style_tags is non-empty (Claude classified it as a real product)
+    from sqlalchemy import or_ as sa_or
     ex_result = await db.execute(
         select(InStoreTrendExample, InStoreCatalogueItem, InStoreCatalogueImage)
         .join(InStoreCatalogueItem, InStoreTrendExample.item_id == InStoreCatalogueItem.id)
         .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
         .where(InStoreTrendExample.trend_id.in_(trend_ids))
+        .where(InStoreCatalogueItem.cropped_file_path.isnot(None))
+        .where(sa_or(
+            InStoreCatalogueItem.prominence.is_(None),
+            InStoreCatalogueItem.prominence != "background",
+        ))
+        # At least one classification tag populated — Claude Vision only
+        # writes these when it identified a real product. Signage /
+        # section headers / blank crops leave them null.
+        .where(sa_or(
+            InStoreCatalogueItem.colours.isnot(None),
+            InStoreCatalogueItem.materials.isnot(None),
+            InStoreCatalogueItem.patterns.isnot(None),
+            InStoreCatalogueItem.style_tags.isnot(None),
+        ))
         .order_by(desc(InStoreTrendExample.relevance_score))
     )
     examples_by_trend: dict[int, list[InStoreTrendExampleItemOut]] = {}
@@ -195,13 +303,21 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
             )
         )
 
-    # Bulk-fetch recommendations + their products + retailer name, sorted by rank.
+    # Bulk-fetch recommendations + their products + retailer name.
+    # Image gate — never surface a broken tile. Best-sellers first, then
+    # the engine's original rank (embedding similarity ordering).
+    from analysis.image_filter import image_ok_orm
     rec_result = await db.execute(
         select(InStoreTrendRecommendation, Product, Retailer)
         .join(Product, InStoreTrendRecommendation.product_id == Product.id)
         .join(Retailer, Product.retailer_id == Retailer.id)
         .where(InStoreTrendRecommendation.trend_id.in_(trend_ids))
-        .order_by(InStoreTrendRecommendation.trend_id, InStoreTrendRecommendation.rank)
+        .where(image_ok_orm())
+        .order_by(
+            InStoreTrendRecommendation.trend_id,
+            desc(Product.is_best_seller),
+            InStoreTrendRecommendation.rank,
+        )
     )
     recs_by_trend: dict[int, list[InStoreTrendRecommendationOut]] = {}
     for rec, prod, ret in rec_result.all():
@@ -210,15 +326,18 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
                 product_id=prod.id,
                 name=prod.name,
                 retailer_name=ret.name,
+                retailer_slug=ret.slug,
                 url=prod.url,
                 price=prod.price,
                 currency=prod.currency or "USD",
                 primary_image_url=prod.primary_image_url,
                 similarity=rec.similarity,
+                is_best_seller=bool(prod.is_best_seller),
             )
         )
 
     def to_out(t: InStoreTrend) -> InStoreTrendOut:
+        recs = recs_by_trend.get(t.id, [])
         return InStoreTrendOut(
             id=t.id, name=t.name, description=t.description, rationale=t.rationale,
             category=t.category, status=t.status.value,
@@ -229,7 +348,12 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
             dominant_styles=t.dominant_styles or [],
             dominant_taxonomy=t.dominant_taxonomy or [],
             examples=examples_by_trend.get(t.id, []),
-            recommendations=recs_by_trend.get(t.id, []),
+            # Trim the recommendations list embedded in the report — the
+            # card only needs the first ~6 for hero images. The rest are
+            # fetched paginated via /trend/{id}/recommendations when the
+            # user opens the "View all N" modal.
+            recommendations=recs[:6],
+            total_recommendation_count=len(recs),
         )
 
     rising = [to_out(t) for t in trends if t.status == TrendStatus.RISING]

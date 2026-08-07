@@ -2,6 +2,31 @@
 
 import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
+import InStoreRecommendationsModal from "@/components/InStoreRecommendationsModal";
+
+/** Small client button — opens the paginated recommendations modal. */
+function InStoreViewAllButton({ trend }: { trend: InStoreTrend }) {
+  const [open, setOpen] = useState(false);
+  const count = trend.total_recommendation_count ?? trend.recommendations.length;
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-2 w-full text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg px-3 py-1.5 transition-colors"
+      >
+        View all {count.toLocaleString()} recommended products →
+      </button>
+      {open && (
+        <InStoreRecommendationsModal
+          trendId={trend.id}
+          trendName={trend.name}
+          trendCategory={trend.category}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -22,11 +47,13 @@ interface InStoreTrendRecommendation {
   product_id: number;
   name: string;
   retailer_name: string | null;
+  retailer_slug?: string | null;
   url: string;
   price: number | null;
   currency: string;
   primary_image_url: string | null;
   similarity: number;
+  is_best_seller?: boolean;
 }
 
 interface InStoreTrend {
@@ -45,6 +72,9 @@ interface InStoreTrend {
   dominant_taxonomy: string[];
   examples: InStoreTrendExample[];
   recommendations: InStoreTrendRecommendation[];
+  // Total stored recommendation count (post image gate). Powers the
+  // "View all N recommended products" button label. 0 hides the button.
+  total_recommendation_count?: number;
 }
 
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
@@ -177,7 +207,7 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
         {trend.recommendations && trend.recommendations.length > 0 && (
           <div className="mt-auto pt-3 border-t border-stone-100">
             <p className="text-[11px] font-medium text-stone-500 uppercase tracking-wider mb-2">
-              Matching online products · {trend.recommendations.length}
+              Matching online products · {trend.total_recommendation_count ?? trend.recommendations.length}
             </p>
             <div className="grid grid-cols-3 gap-1.5">
               {trend.recommendations.slice(0, 6).map((r) => {
@@ -202,6 +232,11 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
                       ) : (
                         <div className="w-full h-full flex items-center justify-center text-stone-300 text-xl">⌂</div>
                       )}
+                      {r.is_best_seller && (
+                        <span className="absolute top-0.5 left-0.5 px-1 py-0 rounded-full text-[9px] font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+                          ★
+                        </span>
+                      )}
                       <span className="absolute bottom-0.5 right-0.5 text-[9px] font-semibold bg-white/85 text-stone-700 px-1 rounded">
                         {(r.similarity * 100).toFixed(0)}%
                       </span>
@@ -219,6 +254,11 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
                 );
               })}
             </div>
+            {/* View all N recommended products — only when more exist
+                than what fits in the 6-tile preview. */}
+            {(trend.total_recommendation_count ?? 0) > 6 && (
+              <InStoreViewAllButton trend={trend} />
+            )}
           </div>
         )}
       </div>

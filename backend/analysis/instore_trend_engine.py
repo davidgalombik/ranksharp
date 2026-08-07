@@ -48,7 +48,12 @@ from database.models import (
 # embedding scheme is upgraded to a real semantic encoder, raise this to 0.5+.
 RECOMMENDATION_THRESHOLD = 0.02
 # Max number of online product recommendations stored per trend.
-RECOMMENDATIONS_PER_TREND = 10
+# Bumped 10 → 150 (2026-08-06) so the new "View all N recommended
+# products" paginated modal has meaningful depth. Storage cost is
+# negligible (one row per rec, no embeddings duplicated) and the
+# embedding-similarity query is bounded by RECOMMENDATION_THRESHOLD
+# so we don't scale into every irrelevant product in the catalogue.
+RECOMMENDATIONS_PER_TREND = 150
 
 log = structlog.get_logger()
 
