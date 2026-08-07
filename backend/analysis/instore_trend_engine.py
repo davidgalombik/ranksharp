@@ -48,13 +48,13 @@ from database.models import (
 # embedding scheme is upgraded to a real semantic encoder, raise this to 0.5+.
 RECOMMENDATION_THRESHOLD = 0.02
 # Max number of online product recommendations stored per trend.
-# Tuned 10 -> 50 (2026-08-06). Initially bumped to 150 for the new
-# paginated modal but the pgvector HNSW index was rolled back earlier
-# (DiskFullError), so every recommendation query is a sequential scan
-# of ~156k products. 150 * ~30 trends made analysis runs feel stuck.
-# 50 gives the modal one full page + more to scroll while keeping the
-# recommendation phase under ~2 minutes per run.
-RECOMMENDATIONS_PER_TREND = 50
+# Tuned 10 -> 50 -> 25 (2026-08-07). Field data: even at 50, each
+# pgvector query without the HNSW index takes ~55s (sequential scan
+# of ~156k products). 12 trends × 55s = 11 min recommendation phase.
+# 25 halves the per-query TOPN sort cost and cuts the total phase
+# to ~5-6 min. Real fix is restoring the HNSW index — bump this back
+# up once disk headroom is sorted.
+RECOMMENDATIONS_PER_TREND = 25
 
 log = structlog.get_logger()
 
@@ -185,11 +185,17 @@ class InStoreTrendEngine:
             await self._create_examples(trend, td, clusters, items_by_id, used_ids)
 
         self._progress(90, "Finding matching online products…")
-        # Per-trend progress log so a hung run is diagnosable — reveals
-        # which trend the pgvector scan is stuck on.
+        # Per-trend progress log AND progress update. The pgvector query
+        # takes ~55s per trend without the HNSW index — bar sitting at
+        # 90% for 6+ minutes reads as "stuck" to buyers even though the
+        # run is advancing. Ticking the bar per trend makes the reality
+        # obvious. 90 -> 95 evenly divided across trends.
+        total = len(new_trends)
         for i, (trend, td) in enumerate(new_trends, 1):
+            pct = 90 + int(round((i / max(total, 1)) * 5))
+            self._progress(pct, f"Finding matching products… trend {i} of {total}")
             log.info("instore_recommendations_step",
-                     trend_index=i, total=len(new_trends),
+                     trend_index=i, total=total,
                      trend_id=trend.id, trend_name=trend.name)
             await self._create_recommendations(trend, td, clusters)
 
