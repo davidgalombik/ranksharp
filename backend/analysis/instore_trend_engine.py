@@ -48,12 +48,13 @@ from database.models import (
 # embedding scheme is upgraded to a real semantic encoder, raise this to 0.5+.
 RECOMMENDATION_THRESHOLD = 0.02
 # Max number of online product recommendations stored per trend.
-# Bumped 10 → 150 (2026-08-06) so the new "View all N recommended
-# products" paginated modal has meaningful depth. Storage cost is
-# negligible (one row per rec, no embeddings duplicated) and the
-# embedding-similarity query is bounded by RECOMMENDATION_THRESHOLD
-# so we don't scale into every irrelevant product in the catalogue.
-RECOMMENDATIONS_PER_TREND = 150
+# Tuned 10 -> 50 (2026-08-06). Initially bumped to 150 for the new
+# paginated modal but the pgvector HNSW index was rolled back earlier
+# (DiskFullError), so every recommendation query is a sequential scan
+# of ~156k products. 150 * ~30 trends made analysis runs feel stuck.
+# 50 gives the modal one full page + more to scroll while keeping the
+# recommendation phase under ~2 minutes per run.
+RECOMMENDATIONS_PER_TREND = 50
 
 log = structlog.get_logger()
 
@@ -184,7 +185,12 @@ class InStoreTrendEngine:
             await self._create_examples(trend, td, clusters, items_by_id, used_ids)
 
         self._progress(90, "Finding matching online products…")
-        for trend, td in new_trends:
+        # Per-trend progress log so a hung run is diagnosable — reveals
+        # which trend the pgvector scan is stuck on.
+        for i, (trend, td) in enumerate(new_trends, 1):
+            log.info("instore_recommendations_step",
+                     trend_index=i, total=len(new_trends),
+                     trend_id=trend.id, trend_name=trend.name)
             await self._create_recommendations(trend, td, clusters)
 
         self._progress(95, "Writing report…")
@@ -469,21 +475,34 @@ class InStoreTrendEngine:
         max_distance = 1.0 - RECOMMENDATION_THRESHOLD
         vec_literal = "[" + ",".join(f"{x:.6f}" for x in search_vec.tolist()) + "]"
         from sqlalchemy import text as sa_text
-        result = await self.db.execute(
-            sa_text(
-                "SELECT p.id, (pa.embedding <=> CAST(:vec AS vector)) AS distance "
-                "FROM products p "
-                "JOIN product_attributes pa ON pa.product_id = p.id "
-                "WHERE p.is_active = TRUE "
-                "  AND pa.embedding IS NOT NULL "
-                "  AND (pa.embedding <=> CAST(:vec AS vector)) <= :max_dist "
-                "ORDER BY distance ASC "
-                "LIMIT :limit"
-            ),
-            {"vec": vec_literal, "max_dist": max_distance,
-             "limit": RECOMMENDATIONS_PER_TREND},
-        )
-        rows = result.all()
+
+        # Per-query timeout — pgvector without HNSW index means this is
+        # a sequential scan of ~156k products; a pathological trend
+        # embedding can push it past a minute. Cap at 60s so one bad
+        # query drops that trend's recs instead of hanging the run.
+        # SET LOCAL scopes the timeout to this transaction only.
+        try:
+            await self.db.execute(sa_text("SET LOCAL statement_timeout = '60s'"))
+            result = await self.db.execute(
+                sa_text(
+                    "SELECT p.id, (pa.embedding <=> CAST(:vec AS vector)) AS distance "
+                    "FROM products p "
+                    "JOIN product_attributes pa ON pa.product_id = p.id "
+                    "WHERE p.is_active = TRUE "
+                    "  AND pa.embedding IS NOT NULL "
+                    "  AND (pa.embedding <=> CAST(:vec AS vector)) <= :max_dist "
+                    "ORDER BY distance ASC "
+                    "LIMIT :limit"
+                ),
+                {"vec": vec_literal, "max_dist": max_distance,
+                 "limit": RECOMMENDATIONS_PER_TREND},
+            )
+            rows = result.all()
+        except Exception as exc:
+            log.warning("instore_recommendations_query_failed",
+                        trend_id=trend.id, trend_name=trend.name,
+                        error=str(exc), error_type=type(exc).__name__)
+            return
         log.info(
             "instore_recommendations_query",
             trend_id=trend.id,
