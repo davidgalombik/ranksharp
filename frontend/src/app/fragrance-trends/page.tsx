@@ -4,6 +4,8 @@ import clsx from "clsx";
 import FragranceActionButton from "@/components/FragranceActionButton";
 import ClearSetsButton from "@/components/ClearSetsButton";
 import FragranceGenerationTabs from "@/components/FragranceGenerationTabs";
+import FragranceTrendViewAllButton from "@/components/FragranceTrendViewAllButton";
+import FragranceTrendFilters from "@/components/FragranceTrendFilters";
 
 // Fragrance is now run-based (sporadic scrapes → each analysis run
 // stands alone). Momentum was removed 2026-08-06 — the "+18% vs last
@@ -65,11 +67,25 @@ function ImageMosaic({ examples }: { examples: FragranceTrendExample[] }) {
 }
 
 function FragranceTrendCard({ trend }: { trend: FragranceTrend }) {
+  // Best-seller pill on the mosaic — matches the Product Trends style
+  // the buyer approved. Any example being a best-seller flags the whole
+  // card (like a section badge).
+  const hasBestSeller = (trend.examples ?? []).some((e) => e.is_best_seller);
   return (
     <Link href={`/fragrance-trends/${trend.id}`} className="group block">
-      <article className="bg-white rounded-xl border border-stone-200 overflow-hidden hover:shadow-lg transition-shadow">
+      <article className="bg-white rounded-xl border border-stone-200 overflow-hidden hover:shadow-lg transition-shadow flex flex-col">
         <div className="relative">
           <ImageMosaic examples={trend.examples ?? []} />
+          {hasBestSeller && (
+            <span
+              className={clsx(
+                "absolute top-2 left-2 px-1.5 py-0.5 rounded-full",
+                "text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200",
+              )}
+            >
+              ★ Best Seller
+            </span>
+          )}
           {/* Legacy status badge — only shown for pre-refactor trends
               where status is anything other than 'new'. New trends drop
               the badge entirely since momentum is gone. */}
@@ -138,6 +154,11 @@ function FragranceTrendCard({ trend }: { trend: FragranceTrend }) {
             <span>{trend.retailer_names.length} retailers</span>
             {trend.avg_price != null && <span>${trend.avg_price.toFixed(0)} avg</span>}
           </div>
+
+          {/* View all N products — new-shape trends only. Legacy trends
+              hide the button (their filter_keywords are empty, so the
+              live query has no meaningful total to show). */}
+          <FragranceTrendViewAllButton trend={trend} />
         </div>
       </article>
     </Link>
@@ -145,7 +166,7 @@ function FragranceTrendCard({ trend }: { trend: FragranceTrend }) {
 }
 
 interface Props {
-  searchParams: { generation?: string };
+  searchParams: { generation?: string; category?: string; value?: string };
 }
 
 export default async function FragranceTrendsPage({ searchParams }: Props) {
@@ -253,20 +274,44 @@ export default async function FragranceTrendsPage({ searchParams }: Props) {
         </div>
       )}
 
-      {/* Trend grid */}
-      {report && report.trends.length > 0 && (
-        <>
-          <p className="text-sm text-stone-500">
-            {report.trend_count} trend{report.trend_count !== 1 ? "s" : ""} found
-            {generationList.length > 1 && ` · Set ${effectiveGen} of ${generationList.length}`}
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {report.trends.map((trend) => (
-              <FragranceTrendCard key={trend.id} trend={trend} />
-            ))}
-          </div>
-        </>
-      )}
+      {/* Trend grid — filtered by URL params (?category / ?value).
+          Server-side filter, client component owns the dropdowns. */}
+      {report && report.trends.length > 0 && (() => {
+        const catFilter = searchParams.category || "";
+        const valFilter = searchParams.value || "";
+        // Value options for the currently selected category — full set of
+        // trend names within that category, in whichever order they came.
+        const valuesInCategory = catFilter
+          ? Array.from(new Set(
+              report.trends
+                .filter((t) => t.category === catFilter)
+                .map((t) => t.name),
+            ))
+          : [];
+        const filtered = report.trends.filter((t) => {
+          if (catFilter && t.category !== catFilter) return false;
+          if (valFilter && t.name !== valFilter) return false;
+          return true;
+        });
+        return (
+          <>
+            <FragranceTrendFilters valuesInCategory={valuesInCategory} />
+            <p className="text-sm text-stone-500">
+              {filtered.length} trend{filtered.length !== 1 ? "s" : ""} found
+              {generationList.length > 1 && ` · Set ${effectiveGen} of ${generationList.length}`}
+            </p>
+            {filtered.length === 0 ? (
+              <p className="text-center py-16 text-stone-400">No trends match your filters.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                {filtered.map((trend) => (
+                  <FragranceTrendCard key={trend.id} trend={trend} />
+                ))}
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

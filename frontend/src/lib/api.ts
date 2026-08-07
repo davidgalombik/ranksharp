@@ -95,6 +95,7 @@ export interface FragranceTrendExample {
   colours: string[];
   materials: string[];
   is_hero: boolean;
+  is_best_seller?: boolean;
 }
 
 export interface FragranceTrend {
@@ -119,6 +120,12 @@ export interface FragranceTrend {
   markets: string[];
   price_tier: string | null;
   examples: FragranceTrendExample[];
+  // New (2026-08-06): keyword list backing the "View all N products"
+  // modal. Empty on legacy trends → modal falls back to stored examples.
+  filter_keywords?: string[];
+  // Live count of every fragrance product matching this trend's
+  // keywords. Populates the button label. Null on legacy trends.
+  matching_product_count?: number | null;
 }
 
 export interface FragranceTrendReport {
@@ -476,6 +483,28 @@ export const api = {
       apiFetch<FragranceTrendReport>("/api/fragrance-trends/latest", generation ? { generation: String(generation) } : undefined),
     listReports: () => apiFetch<FragranceTrendReport[]>("/api/fragrance-trends/"),
     getTrend: (id: number) => apiFetch<FragranceTrend>(`/api/fragrance-trends/trend/${id}`),
+    // Live paginated query of every fragrance product matching a trend's
+    // keywords. Powers the "View all N products" modal. Legacy trends
+    // (empty filter_keywords) fall back to the stored examples server-side.
+    trendProducts: (
+      id: number,
+      params?: { limit?: number; offset?: number; only_best_sellers?: boolean },
+    ) =>
+      apiFetch<{
+        total: number;
+        items: Array<{
+          id: number; name: string; url: string; price: number | null;
+          currency: string; primary_image_url: string | null;
+          retailer_name: string; retailer_slug: string; is_best_seller: boolean;
+        }>;
+      }>(
+        `/api/fragrance-trends/trend/${id}/products`,
+        {
+          limit: String(params?.limit ?? 48),
+          offset: String(params?.offset ?? 0),
+          ...(params?.only_best_sellers ? { only_best_sellers: "true" } : {}),
+        },
+      ),
     // Fragrance is run-based since 2026-08-06. `week` is the run's ISO
     // datetime string (misnamed for backward compat). `generations` is
     // the actual set numbers in that run — frontend renders tabs from it.

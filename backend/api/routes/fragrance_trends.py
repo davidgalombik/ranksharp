@@ -27,6 +27,7 @@ class FragranceTrendExampleOut(BaseModel):
     colours: list[str]
     materials: list[str]
     is_hero: bool
+    is_best_seller: bool = False
 
     class Config:
         from_attributes = True
@@ -66,6 +67,14 @@ class FragranceTrendOut(BaseModel):
     markets: list[str]
     price_tier: Optional[str]
     examples: list[FragranceTrendExampleOut] = []
+    # New (2026-08-06): keyword list used by the "View all N products"
+    # modal to run a live query against the whole fragrance catalogue.
+    # Empty on legacy trends → modal falls back to stored examples.
+    filter_keywords: list[str] = []
+    # Full-catalogue match count under this trend's keywords + fragrance
+    # keywords + image gate. Powers the "View all N products" button label.
+    # Server sets this at read time (live count). Null on legacy trends.
+    matching_product_count: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -148,6 +157,135 @@ async def get_trend(trend_id: int, db: AsyncSession = Depends(get_db)):
     if not trend:
         raise HTTPException(status_code=404, detail="Fragrance trend not found")
     return await _build_trend_out(trend, db, max_examples=20)
+
+
+class FragranceTrendProductOut(BaseModel):
+    id: int
+    name: str
+    url: str
+    price: Optional[float] = None
+    currency: str = "USD"
+    primary_image_url: Optional[str] = None
+    retailer_name: str
+    retailer_slug: str
+    is_best_seller: bool = False
+
+
+class FragranceTrendProductsPage(BaseModel):
+    total: int
+    items: list[FragranceTrendProductOut]
+
+
+@router.get("/trend/{trend_id}/products", response_model=FragranceTrendProductsPage)
+async def get_trend_products(
+    trend_id: int,
+    limit: int = 48,
+    offset: int = 0,
+    only_best_sellers: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Live paginated query of every fragrance product matching this
+    trend's keywords. Powers the 'View all N products' modal — buyers
+    see thousands of matches instead of just the ~20 stored examples.
+
+    Filters:
+      - Product is active
+      - Product NAME matches the fragrance scope keyword set (candle,
+        wax melt, diffuser, ...) via word-boundary regex
+      - Product NAME also matches this trend's filter_keywords
+      - Image-quality gate
+      - Optional best-sellers-only toggle
+
+    Sort: best-sellers first, then name. Same shape as Product Trends.
+
+    Legacy trends (filter_keywords = []) fall back to the stored
+    FragranceTrendExample rows so nothing looks broken.
+    """
+    from sqlalchemy import text as sa_text
+    from analysis.fragrance_keywords import fragrance_regex_pattern
+    from analysis.image_filter import image_ok_sql
+    import re as _re
+
+    trend = await db.get(FragranceTrend, trend_id)
+    if not trend:
+        raise HTTPException(status_code=404, detail="Fragrance trend not found")
+
+    tr_kws = [k for k in (trend.filter_keywords or []) if k]
+
+    # Legacy fallback — no keywords → surface the stored examples.
+    if not tr_kws:
+        examples_result = await db.execute(
+            select(FragranceTrendExample, Product, Retailer)
+            .join(Product, FragranceTrendExample.product_id == Product.id)
+            .join(Retailer, Product.retailer_id == Retailer.id)
+            .where(FragranceTrendExample.trend_id == trend_id)
+            .order_by(desc(Product.is_best_seller), desc(FragranceTrendExample.relevance_score))
+        )
+        rows = list(examples_result.all())
+        if only_best_sellers:
+            rows = [r for r in rows if r[1].is_best_seller]
+        items = [
+            FragranceTrendProductOut(
+                id=p.id, name=p.name, url=p.url, price=p.price,
+                currency=p.currency or "USD",
+                primary_image_url=p.primary_image_url,
+                retailer_name=r.name, retailer_slug=r.slug,
+                is_best_seller=bool(p.is_best_seller),
+            )
+            for _, p, r in rows
+        ]
+        return FragranceTrendProductsPage(
+            total=len(items),
+            items=items[offset:offset + limit],
+        )
+
+    trend_pattern = r"\y(?:" + "|".join(_re.escape(k) for k in tr_kws) + r")\y"
+    best_seller_clause = "AND p.is_best_seller = TRUE" if only_best_sellers else ""
+
+    count_sql = sa_text(f"""
+        SELECT COUNT(*) FROM products p
+        WHERE p.is_active = TRUE
+          AND p.name ~* :frag_pattern
+          AND p.name ~* :trend_pattern
+          {best_seller_clause}
+          AND {image_ok_sql()}
+    """)
+    total = (await db.execute(count_sql, {
+        "frag_pattern": fragrance_regex_pattern(),
+        "trend_pattern": trend_pattern,
+    })).scalar() or 0
+
+    page_sql = sa_text(f"""
+        SELECT p.id, p.name, p.url, p.price, p.currency, p.primary_image_url,
+               p.is_best_seller, r.name AS retailer_name, r.slug AS retailer_slug
+        FROM products p
+        JOIN retailers r ON r.id = p.retailer_id
+        WHERE p.is_active = TRUE
+          AND p.name ~* :frag_pattern
+          AND p.name ~* :trend_pattern
+          {best_seller_clause}
+          AND {image_ok_sql()}
+        ORDER BY p.is_best_seller DESC, p.name ASC
+        LIMIT :lim OFFSET :off
+    """)
+    rows = (await db.execute(page_sql, {
+        "frag_pattern": fragrance_regex_pattern(),
+        "trend_pattern": trend_pattern,
+        "lim": limit,
+        "off": offset,
+    })).all()
+
+    items = [
+        FragranceTrendProductOut(
+            id=row.id, name=row.name, url=row.url, price=row.price,
+            currency=row.currency or "USD",
+            primary_image_url=row.primary_image_url,
+            retailer_name=row.retailer_name, retailer_slug=row.retailer_slug,
+            is_best_seller=bool(row.is_best_seller),
+        )
+        for row in rows
+    ]
+    return FragranceTrendProductsPage(total=total, items=items)
 
 
 @router.post("/generate")
@@ -356,13 +494,25 @@ async def _build_report_out(
 async def _build_trend_out(
     trend: FragranceTrend, db: AsyncSession, max_examples: int = 6
 ) -> FragranceTrendOut:
+    from analysis.image_filter import image_ok_orm
+    from analysis.fragrance_keywords import fragrance_regex_pattern
+    from sqlalchemy import text as sa_text
+
+    # Best-sellers first (matches Product Trends default sort). Image
+    # gate applied at read time so historical trends that stored
+    # examples pointing at placeholder URLs don't surface broken tiles.
     examples_result = await db.execute(
         select(FragranceTrendExample, Product, ProductAttributes, Retailer)
         .join(Product, FragranceTrendExample.product_id == Product.id)
         .outerjoin(ProductAttributes, Product.id == ProductAttributes.product_id)
         .join(Retailer, Product.retailer_id == Retailer.id)
         .where(FragranceTrendExample.trend_id == trend.id)
-        .order_by(desc(FragranceTrendExample.is_hero), desc(FragranceTrendExample.relevance_score))
+        .where(image_ok_orm())
+        .order_by(
+            desc(Product.is_best_seller),
+            desc(FragranceTrendExample.is_hero),
+            desc(FragranceTrendExample.relevance_score),
+        )
         .limit(max_examples)
     )
 
@@ -381,7 +531,30 @@ async def _build_trend_out(
             colours=attrs.colours if attrs else [],
             materials=attrs.materials if attrs else [],
             is_hero=ex.is_hero,
+            is_best_seller=bool(product.is_best_seller),
         ))
+
+    # Live count of every fragrance product matching this trend's keywords
+    # — powers the "View all N products" button label on the card. Only
+    # queried when the trend has filter_keywords (new-shape); legacy
+    # trends leave matching_product_count = None and the button is hidden.
+    matching_count: Optional[int] = None
+    tr_kws = [k for k in (trend.filter_keywords or []) if k]
+    if tr_kws:
+        import re as _re
+        from analysis.image_filter import image_ok_sql
+        trend_pattern = r"\y(?:" + "|".join(_re.escape(k) for k in tr_kws) + r")\y"
+        count_row = await db.execute(sa_text(f"""
+            SELECT COUNT(*) FROM products p
+            WHERE p.is_active = TRUE
+              AND p.name ~* :frag_pattern
+              AND p.name ~* :trend_pattern
+              AND {image_ok_sql()}
+        """), {
+            "frag_pattern": fragrance_regex_pattern(),
+            "trend_pattern": trend_pattern,
+        })
+        matching_count = count_row.scalar() or 0
 
     return FragranceTrendOut(
         id=trend.id,
@@ -405,4 +578,6 @@ async def _build_trend_out(
         markets=trend.markets or [],
         price_tier=trend.price_tier,
         examples=examples,
+        filter_keywords=tr_kws,
+        matching_product_count=matching_count,
     )

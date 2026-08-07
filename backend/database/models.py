@@ -406,6 +406,12 @@ class FragranceTrend(Base):
     sustainability_signals: Mapped[list] = mapped_column(JSON, default=list)
     markets: Mapped[list] = mapped_column(JSON, default=list)
     price_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # New (2026-08-06): 5-15 lowercase words a matching product NAME
+    # would contain. Powers the live "View all N products" modal — the
+    # cluster's keyword list intersects the mood-board / theme words so
+    # a "Vanilla Bourbon" trend actually returns vanilla-bourbon-adjacent
+    # products, not every candle in the catalogue. Empty on legacy rows.
+    filter_keywords: Mapped[list] = mapped_column(JSON, default=list)
     generation: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

@@ -216,6 +216,12 @@ async def init_db():
              _col("aldi_product_ideas", "filter_keywords")),
             ("ALTER TABLE aldi_product_ideas ADD COLUMN IF NOT EXISTS kind VARCHAR(20)",
              _col("aldi_product_ideas", "kind")),
+            # Fragrance Trends parity with Product Trends (2026-08-06).
+            # filter_keywords powers the live "View all N products" modal.
+            # Legacy rows default to [] → frontend falls back to stored
+            # FragranceTrendExample rows.
+            ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS filter_keywords JSONB DEFAULT '[]'",
+             _col("fragrance_trends", "filter_keywords")),
             # In-store catalogue images: country tag (AU/US). Default 'US'
             # so existing rows backfill automatically.
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "

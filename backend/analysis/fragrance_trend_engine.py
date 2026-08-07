@@ -84,7 +84,15 @@ and retailers. Be specific, not generic.>",
       "sustainability_signals": ["<soy wax|eco packaging|refillable|non-toxic|etc>", ...],
       "markets": ["US", "AU"],
       "price_tier": "<budget|mid|premium|luxury>",
-      "example_product_ids": [<integer product IDs from the data>]
+      "example_product_ids": [<integer product IDs from the data>],
+      "filter_keywords": ["<5-15 lowercase words that a matching product NAME \
+would contain — e.g. ['vanilla', 'bourbon', 'amber', 'oak', 'whisky', 'tobacco']. \
+Used downstream to run a LIVE query over the whole fragrance catalogue for \
+buyers browsing 'View all N products' on this trend, so they see thousands \
+of matches — not just the sample below. Avoid generic pollutant words like \
+'candle', 'wax', 'diffuser', 'melt', 'holder', 'jar' — those match every \
+fragrance product in the catalogue and dilute the trend. Include synonyms \
+and adjacent scent notes so the pool stays broad-but-honest.>"]
     }
   ]
 }"""
@@ -135,12 +143,10 @@ FRAGRANCE_LENSES = [
 class FragranceTrendEngine:
     MIN_CLUSTER_SIZE = 3
 
-    # Keywords used to identify fragrance/candle products
-    _FRAGRANCE_KEYWORDS = [
-        "candle", "diffuser", "fragrance", "scent", "wax melt", "reed",
-        "incense", "aromatherapy", "room spray", "wax", "wick", "votive",
-        "taper", "pillar candle", "soy", "beeswax", "home fragrance",
-    ]
+    # Fragrance product identification is now word-boundary + expanded
+    # vocabulary (see analysis/fragrance_keywords.py). Kept the old class
+    # attribute name as an alias for any external callers.
+    from analysis.fragrance_keywords import FRAGRANCE_KEYWORDS as _FRAGRANCE_KEYWORDS  # noqa: PLR0402
 
     def __init__(self, db: AsyncSession, task=None):
         self.db = db
@@ -333,23 +339,47 @@ class FragranceTrendEngine:
     # ------------------------------------------------------------------ #
 
     async def _load_fragrance_products(self) -> list[dict]:
-        """Load all active analysed candle/fragrance products with embeddings."""
-        kw_conditions = []
-        for kw in self._FRAGRANCE_KEYWORDS:
-            kw_conditions.append(Product.name.ilike(f"%{kw}%"))
-            kw_conditions.append(Product.category.ilike(f"%{kw}%"))
+        """Load all active fragrance products with embeddings AND proper
+        product images.
 
+        Word-boundary regex over both name and category (not substring)
+        so we no longer pull in "wax paper" (kitchen), "waxed wood"
+        (furniture), etc.
+
+        Image-quality gate skips products with placeholder or broken
+        image URLs — buyers must never see a broken tile.
+        """
+        from sqlalchemy import text as sa_text
+        from analysis.fragrance_keywords import fragrance_regex_pattern
+        from analysis.image_filter import image_ok_sql
+
+        pattern = fragrance_regex_pattern()
+        result = await self.db.execute(sa_text(f"""
+            SELECT p.id AS product_id, r.id AS retailer_id
+            FROM products p
+            JOIN product_attributes pa ON pa.product_id = p.id
+            JOIN retailers r ON r.id = p.retailer_id
+            WHERE p.is_active = TRUE
+              AND pa.embedding IS NOT NULL
+              AND (p.name ~* :frag_pattern
+                   OR COALESCE(p.category, '') ~* :frag_pattern)
+              AND {image_ok_sql()}
+        """), {"frag_pattern": pattern})
+
+        ids = [(row.product_id, row.retailer_id) for row in result.all()]
+        if not ids:
+            return []
+
+        # Hydrate ORM rows for the matched product IDs — the raw SQL
+        # scoped the set correctly, and we let the ORM shape the objects
+        # so downstream engine code (which reads .attrs.embedding, etc.)
+        # keeps working unchanged.
+        product_ids = [pid for pid, _ in ids]
         result = await self.db.execute(
             select(Product, ProductAttributes, Retailer)
             .join(ProductAttributes, Product.id == ProductAttributes.product_id)
             .join(Retailer, Product.retailer_id == Retailer.id)
-            .where(
-                and_(
-                    Product.is_active == True,
-                    ProductAttributes.embedding.isnot(None),
-                    or_(*kw_conditions),
-                )
-            )
+            .where(Product.id.in_(product_ids))
         )
         rows = result.all()
         return [{"product": p, "attrs": a, "retailer": r} for p, a, r in rows]
@@ -675,6 +705,23 @@ class FragranceTrendEngine:
         # caller shape doesn't change.
         _ = prior_trends
 
+        # filter_keywords cleanup — drop obvious pollutants and normalise
+        # to lowercase. Even with the prompt instruction to avoid 'candle'
+        # / 'wax' / 'diffuser' / etc, Claude occasionally sneaks one in and
+        # a single generic keyword would collapse the live query to "every
+        # candle in the catalogue". Second line of defence here.
+        _pollutants = {
+            "candle", "candles", "wax", "melt", "melts", "diffuser",
+            "diffusers", "holder", "holders", "jar", "jars", "fragrance",
+            "fragrances", "scented", "scent", "home", "decor", "décor",
+        }
+        raw_kws = td.get("filter_keywords") or []
+        filter_keywords = [
+            k.strip().lower() for k in raw_kws
+            if isinstance(k, str) and k.strip()
+            and k.strip().lower() not in _pollutants
+        ]
+
         return FragranceTrend(
             week_start=week_start,
             name=name,
@@ -695,6 +742,7 @@ class FragranceTrendEngine:
             sustainability_signals=td.get("sustainability_signals") or [],
             markets=td.get("markets") or [],
             price_tier=td.get("price_tier"),
+            filter_keywords=filter_keywords,
         )
 
     async def _create_examples(
