@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
+import ZoomableImage from "@/components/ZoomableImage";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -1085,23 +1086,25 @@ function ImageDetailModal({
         className="bg-white rounded-xl shadow-xl max-w-7xl w-full max-h-[92vh] overflow-hidden flex flex-col md:flex-row"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Left: image */}
-        <div className="md:w-1/2 bg-stone-900 flex items-center justify-center p-4 md:p-6 relative">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
+        {/* Left: zoomable image — Google Maps-style wheel/pinch zoom
+            + drag pan + double-click reset. See ZoomableImage. */}
+        <div className="md:w-1/2 bg-stone-900 flex items-center justify-center p-4 md:p-6 relative overflow-hidden">
+          <ZoomableImage
+            key={imageId}
             src={api.instoreCatalogue.imageUrl(imageId)}
             alt={detail?.filename || ""}
-            className="max-w-full max-h-[85vh] object-contain rounded-lg"
           />
 
           {/* Prev / next navigation — appears when there are neighbouring
-              images in the currently-visible list. Keyboard: ← / →. */}
+              images in the currently-visible list. Keyboard: ← / →.
+              Positioned above the zoom layer via z-30 so they stay
+              clickable even when the image is zoomed and panned. */}
           {prevId !== null && (
             <button
               onClick={() => onNavigate(prevId)}
               title="Previous image (←)"
               aria-label="Previous image"
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-stone-900 text-xl leading-none flex items-center justify-center shadow-lg transition-colors"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-stone-900 text-xl leading-none flex items-center justify-center shadow-lg transition-colors z-30"
             >
               ‹
             </button>
@@ -1111,13 +1114,13 @@ function ImageDetailModal({
               onClick={() => onNavigate(nextId)}
               title="Next image (→)"
               aria-label="Next image"
-              className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-stone-900 text-xl leading-none flex items-center justify-center shadow-lg transition-colors"
+              className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-white/90 hover:bg-white text-stone-900 text-xl leading-none flex items-center justify-center shadow-lg transition-colors z-30"
             >
               ›
             </button>
           )}
           {imageIds.length > 1 && currentIndex >= 0 && (
-            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-white/85 text-xs text-stone-700 font-medium">
+            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-white/85 text-xs text-stone-700 font-medium z-30">
               {currentIndex + 1} / {imageIds.length}
             </span>
           )}
