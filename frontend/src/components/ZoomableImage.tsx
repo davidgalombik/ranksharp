@@ -68,7 +68,11 @@ export default function ZoomableImage({
       <TransformWrapper
         initialScale={1}
         minScale={1}
-        maxScale={8}
+        // Capped at 5x — beyond that, source-photo pixelation dominates
+        // the frame and buyers can't get useful information from the
+        // extra magnification. 5x is enough to read a typical price
+        // sticker on a phone-camera shelf shot.
+        maxScale={5}
         centerOnInit
         limitToBounds={false}
         doubleClick={{ mode: "reset" }}
@@ -101,6 +105,12 @@ export default function ZoomableImage({
                 src={src}
                 alt={alt}
                 draggable={false}
+                // image-rendering hints the browser to use a higher-
+                // quality resampling algorithm when we scale via CSS
+                // transform. Softens the pixelation on wheel-zoom
+                // meaningfully, especially for text on price stickers.
+                // No support = falls back to browser default; no harm.
+                style={{ imageRendering: "high-quality" as const }}
                 className="w-full h-full object-contain rounded-lg select-none"
               />
             </TransformComponent>
@@ -113,10 +123,18 @@ export default function ZoomableImage({
               <ZoomButton onClick={() => resetTransform()} label="Reset" symbol="⤢" />
             </div>
 
-            {/* Live zoom-level readout — confirms scrolling IS working. */}
+            {/* Live zoom-level readout — confirms scrolling IS working.
+                Switches to an amber 'Max zoom' pill when the buyer hits
+                the 5x cap so they know why the wheel isn't advancing. */}
             {zoomed && (
-              <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-white/85 text-xs text-stone-700 font-medium z-30 tabular-nums">
-                {Math.round(scale * 100)}%
+              <span
+                className={
+                  scale >= 4.95
+                    ? "absolute top-3 right-3 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 text-xs font-semibold z-30 tabular-nums"
+                    : "absolute top-3 right-3 px-2 py-0.5 rounded-full bg-white/85 text-xs text-stone-700 font-medium z-30 tabular-nums"
+                }
+              >
+                {scale >= 4.95 ? "Max zoom · 500%" : `${Math.round(scale * 100)}%`}
               </span>
             )}
 

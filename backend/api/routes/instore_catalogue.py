@@ -777,7 +777,13 @@ async def get_image_file(image_id: int, db: AsyncSession = Depends(get_db)):
         data = path.read_bytes()
         img = Image.open(io.BytesIO(data))
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=88)
+        # Quality bumped 88 -> 92 (2026-08-07). Buyers zoom into these
+        # shelf photos to read price stickers — the JPEG artifacting at
+        # 88 was visibly softening small text. 92 keeps text crisp at
+        # ~30% file-size cost. Progressive=True lets the browser start
+        # rendering the low-frequency layers before the full download,
+        # so first-open of a large photo feels snappier.
+        img.convert("RGB").save(buf, format="JPEG", quality=92, progressive=True, optimize=True)
         return Response(content=buf.getvalue(), media_type="image/jpeg",
                         headers={"Content-Disposition": "inline",
                                  "Cache-Control": "public, max-age=86400"})
