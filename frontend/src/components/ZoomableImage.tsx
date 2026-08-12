@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { TransformWrapper, TransformComponent, ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
+import { useEffect, useState } from "react";
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 
 /**
  * Google Maps-style zoom + pan for a single image.
@@ -28,7 +28,6 @@ export default function ZoomableImage({
   src: string;
   alt: string;
 }) {
-  const wrapperRef = useRef<ReactZoomPanPinchRef | null>(null);
   const [scale, setScale] = useState(1);
   const [panning, setPanning] = useState(false);
   const [showHint, setShowHint] = useState(false);
@@ -63,36 +62,46 @@ export default function ZoomableImage({
       : "cursor-zoom-in";
 
   return (
-    <div className="relative w-full h-full flex items-center justify-center">
+    // Fixed-size positioning container. TransformWrapper needs a bounded
+    // parent to compute pan bounds correctly.
+    <div className="relative w-full h-full">
       <TransformWrapper
-        ref={wrapperRef}
         initialScale={1}
         minScale={1}
         maxScale={8}
         centerOnInit
+        limitToBounds={false}
         doubleClick={{ mode: "reset" }}
         wheel={{ step: 0.15 }}
         pinch={{ step: 5 }}
-        panning={{
-          disabled: !zoomed,          // only pan once zoomed in
-          velocityDisabled: true,
-        }}
-        onZoom={(ref) => setScale(ref.state.scale)}
+        // Panning enabled unconditionally. When scale === 1 the image
+        // already fits, so dragging has no visible effect (limitToBounds
+        // is off but the initial center means there's nowhere to drift).
+        // Previously we gated on `disabled: !zoomed` which locked the
+        // library's initial state and prevented drag from ever activating
+        // after wheel-zoom.
+        panning={{ velocityDisabled: true }}
+        onTransformed={(_, state) => setScale(state.scale)}
         onPanningStart={() => setPanning(true)}
         onPanningStop={() => setPanning(false)}
       >
         {({ zoomIn, zoomOut, resetTransform }) => (
           <>
+            {/* TransformComponent renders its own wrapper + content divs.
+                We size both explicitly (no flex-centering inside content —
+                that fights the CSS transform the library applies) and let
+                the img size itself via object-contain. */}
             <TransformComponent
-              wrapperClass={`!w-full !h-full ${cursorClass}`}
-              contentClass="!w-full !h-full flex items-center justify-center"
+              wrapperStyle={{ width: "100%", height: "100%" }}
+              contentStyle={{ width: "100%", height: "100%" }}
+              wrapperClass={cursorClass}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={src}
                 alt={alt}
                 draggable={false}
-                className="max-w-full max-h-[85vh] object-contain rounded-lg select-none"
+                className="w-full h-full object-contain rounded-lg select-none"
               />
             </TransformComponent>
 
@@ -112,7 +121,8 @@ export default function ZoomableImage({
             )}
 
             {/* First-open discovery hint — fades after 3s. Text swaps
-                for touch devices where pinch is the primary gesture. */}
+                for touch devices where pinch is the primary gesture.
+                pointer-events-none so it doesn't intercept drag. */}
             {showHint && (
               <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-30 px-3 py-1.5 rounded-full bg-stone-900/90 text-white text-xs whitespace-nowrap animate-pulse pointer-events-none">
                 {isTouch
