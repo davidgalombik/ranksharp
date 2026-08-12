@@ -110,7 +110,14 @@ export default function ZoomableImage({
                 // transform. Softens the pixelation on wheel-zoom
                 // meaningfully, especially for text on price stickers.
                 // No support = falls back to browser default; no harm.
-                style={{ imageRendering: "high-quality" as const }}
+                //
+                // Cast via `as unknown as ...` — 'high-quality' is a
+                // valid CSS value in Chrome/Safari but not yet listed
+                // in React's CSSProperties['imageRendering'] union.
+                style={{
+                  imageRendering:
+                    "high-quality" as unknown as React.CSSProperties["imageRendering"],
+                }}
                 className="w-full h-full object-contain rounded-lg select-none"
               />
             </TransformComponent>
