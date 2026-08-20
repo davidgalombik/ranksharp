@@ -133,6 +133,19 @@ export default function Navigation() {
             Scrape
           </Link>
 
+          {/* Ranksharp Catalogue — products Ranksharp has sold to ALDI. */}
+          <Link
+            href="/catalogue"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/catalogue" || path.startsWith("/catalogue/")
+                ? "bg-stone-900 text-white"
+                : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            Catalogue
+          </Link>
+
           {/* Historical Products */}
           <Link
             href="/products/historical"

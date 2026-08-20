@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import init_db, seed_retailers
-from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, instore, instore_catalogue, instore_trends, fragrance_trends, csv_upload, admin
+from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, instore, instore_catalogue, instore_trends, fragrance_trends, csv_upload, admin, ranksharp
 from config import settings
 import structlog
 
@@ -53,6 +53,7 @@ app.include_router(instore_catalogue.router, prefix="/api/instore-catalogue", ta
 app.include_router(instore_trends.router, prefix="/api/instore-trends", tags=["In-store Trends"])
 app.include_router(fragrance_trends.router, prefix="/api/fragrance-trends", tags=["Fragrance Trends"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+app.include_router(ranksharp.router, prefix="/api/ranksharp", tags=["Ranksharp Catalogue"])
 
 
 @app.get("/health")

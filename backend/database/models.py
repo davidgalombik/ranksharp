@@ -661,3 +661,66 @@ class InStoreTrendRecommendation(Base):
         UniqueConstraint("trend_id", "product_id"),
         Index("ix_instore_trend_rec_trend", "trend_id"),
     )
+
+
+# ── Ranksharp Catalogue (products Ranksharp has sold to ALDI) ─────────────────
+# Phase 1: browse + search + match to trends. Phase 3 (later): gap analysis
+# against other retailers' catalogues.
+
+class RanksharpProduct(Base):
+    """A product Ranksharp has sold. Uniquely identified by SKU. One row
+    per distinct product; sale events (each PO) live on RanksharpProductSale.
+
+    CSV uploads are APPEND-ONLY on this table — an existing SKU is never
+    overwritten by a re-upload. Corrections happen via a separate edit UI
+    (Phase 2)."""
+    __tablename__ = "ranksharp_products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sku: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # On-disk path to the uploaded product image (JPEG/PNG/WEBP or the
+    # first-page render of a PDF upload). Nullable — a product can be
+    # created via CSV before its image is uploaded.
+    image_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    # File extension of the stored image (jpg/png/webp) so the serving
+    # endpoint sets the right content-type without sniffing.
+    image_format: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, index=True)
+    subcategory: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    sales: Mapped[list["RanksharpProductSale"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan", lazy="select",
+    )
+
+
+class RanksharpProductSale(Base):
+    """A single PO / sale event for a Ranksharp product. One product can
+    have many sale rows (multiple launches, multiple customers)."""
+    __tablename__ = "ranksharp_product_sales"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("ranksharp_products.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # Free-text customer name. Defaults to 'ALDI' today; the column stays
+    # generic so Costco / Trader Joe's / etc. slot in later without a
+    # schema migration.
+    customer: Mapped[str] = mapped_column(String(200), nullable=False, default="ALDI")
+    # Price Ranksharp charged the customer (wholesale). Currency below.
+    price_wholesale: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Price the customer sold the product to their consumer.
+    price_retail: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    # Units the customer purchased FROM Ranksharp (PO quantity — proxy
+    # for demand; Ranksharp usually doesn't see sell-through).
+    units_purchased: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    on_sale_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    product: Mapped["RanksharpProduct"] = relationship(back_populates="sales")

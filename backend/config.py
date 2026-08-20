@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     aldi_upload_dir: str = "/app/raw_data/aldi_uploads"
     instore_upload_dir: str = "/app/raw_data/instore_uploads"
     instore_catalogue_dir: str = "/app/raw_data/instore_catalogue"
+    ranksharp_image_dir: str = "/app/raw_data/ranksharp_images"
     aws_s3_bucket: str = ""
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

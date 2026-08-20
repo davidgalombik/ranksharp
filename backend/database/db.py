@@ -224,6 +224,42 @@ async def init_db():
              _col("fragrance_trends", "filter_keywords")),
             ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS matching_product_count INTEGER",
              _col("fragrance_trends", "matching_product_count")),
+            # Ranksharp Catalogue (2026-08-08) — products Ranksharp has
+            # sold to ALDI (and, later, other customers). Sold as one
+            # product row + many sale rows so a SKU can carry multiple
+            # PO events across years and customers without duplication.
+            "CREATE TABLE IF NOT EXISTS ranksharp_products ("
+            "id SERIAL PRIMARY KEY, "
+            "sku VARCHAR(200) NOT NULL UNIQUE, "
+            "name VARCHAR(500) NOT NULL, "
+            "description TEXT, "
+            "image_path VARCHAR(1000), "
+            "image_format VARCHAR(10), "
+            "category VARCHAR(500), "
+            "subcategory VARCHAR(500), "
+            "created_at TIMESTAMP DEFAULT NOW(), "
+            "updated_at TIMESTAMP DEFAULT NOW())",
+            ("CREATE INDEX IF NOT EXISTS ix_ranksharp_products_sku ON ranksharp_products (sku)",
+             _idx("ix_ranksharp_products_sku")),
+            ("CREATE INDEX IF NOT EXISTS ix_ranksharp_products_category ON ranksharp_products (category)",
+             _idx("ix_ranksharp_products_category")),
+            ("CREATE INDEX IF NOT EXISTS ix_ranksharp_products_subcategory ON ranksharp_products (subcategory)",
+             _idx("ix_ranksharp_products_subcategory")),
+            "CREATE TABLE IF NOT EXISTS ranksharp_product_sales ("
+            "id SERIAL PRIMARY KEY, "
+            "product_id INTEGER NOT NULL REFERENCES ranksharp_products(id) ON DELETE CASCADE, "
+            "customer VARCHAR(200) NOT NULL DEFAULT 'ALDI', "
+            "price_wholesale FLOAT, "
+            "price_retail FLOAT, "
+            "currency VARCHAR(5), "
+            "units_purchased INTEGER, "
+            "on_sale_date TIMESTAMP, "
+            "notes TEXT, "
+            "created_at TIMESTAMP DEFAULT NOW())",
+            ("CREATE INDEX IF NOT EXISTS ix_ranksharp_sales_product ON ranksharp_product_sales (product_id)",
+             _idx("ix_ranksharp_sales_product")),
+            ("CREATE INDEX IF NOT EXISTS ix_ranksharp_sales_date ON ranksharp_product_sales (on_sale_date)",
+             _idx("ix_ranksharp_sales_date")),
             # In-store catalogue images: country tag (AU/US). Default 'US'
             # so existing rows backfill automatically.
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "

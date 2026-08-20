@@ -582,4 +582,147 @@ export const api = {
       return res.json() as Promise<CsvCommitResult>;
     },
   },
+
+  // ── Ranksharp Catalogue ──────────────────────────────────────────────────
+  ranksharp: {
+    listProducts: (params: { q?: string; category?: string; limit?: number; offset?: number } = {}) => {
+      const qs: Record<string, string> = {
+        limit: String(params.limit ?? 48),
+        offset: String(params.offset ?? 0),
+      };
+      if (params.q) qs.q = params.q;
+      if (params.category) qs.category = params.category;
+      return apiFetch<RanksharpProductListPage>("/api/ranksharp/products", qs);
+    },
+    getProduct: (id: number) =>
+      apiFetch<RanksharpProductDetail>(`/api/ranksharp/products/${id}`),
+    listCategories: () =>
+      apiFetch<{ categories: string[] }>("/api/ranksharp/categories"),
+    imageUrl: (productId: number) =>
+      `${API_BASE}/api/ranksharp/products/${productId}/image`,
+    csvPreview: async (file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`${API_BASE}/api/ranksharp/csv/preview`, {
+        method: "POST", body: fd,
+      });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<RanksharpCsvSummary>;
+    },
+    csvCommit: async (file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`${API_BASE}/api/ranksharp/csv/commit`, {
+        method: "POST", body: fd,
+      });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<RanksharpCsvCommitSummary>;
+    },
+    uploadImages: async (file: File, sku?: string) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      if (sku) fd.append("sku", sku);
+      const res = await fetch(`${API_BASE}/api/ranksharp/images/upload`, {
+        method: "POST", body: fd,
+      });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<RanksharpImageUploadSummary>;
+    },
+    deleteProduct: async (id: number) => {
+      const res = await fetch(`${API_BASE}/api/ranksharp/products/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Delete failed (${res.status})`);
+      return res.json();
+    },
+    deleteSale: async (id: number) => {
+      const res = await fetch(`${API_BASE}/api/ranksharp/sales/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Delete failed (${res.status})`);
+      return res.json();
+    },
+  },
 };
+
+// ── Ranksharp types ─────────────────────────────────────────────────────────
+
+export interface RanksharpProductListItem {
+  id: number;
+  sku: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+  subcategory: string | null;
+  has_image: boolean;
+  sale_count: number;
+  total_units: number;
+  latest_sale_date: string | null;
+  latest_currency: string | null;
+  latest_price_wholesale: number | null;
+  latest_price_retail: number | null;
+}
+
+export interface RanksharpProductListPage {
+  total: number;
+  items: RanksharpProductListItem[];
+}
+
+export interface RanksharpSale {
+  id: number;
+  customer: string;
+  price_wholesale: number | null;
+  price_retail: number | null;
+  currency: string | null;
+  units_purchased: number | null;
+  on_sale_date: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface RanksharpProductDetail {
+  id: number;
+  sku: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+  subcategory: string | null;
+  has_image: boolean;
+  created_at: string;
+  updated_at: string;
+  sales: RanksharpSale[];
+}
+
+export interface RanksharpCsvReject {
+  row_number: number;
+  sku: string | null;
+  reason: string;
+}
+
+export interface RanksharpCsvSummary {
+  total_rows: number;
+  valid_rows: number;
+  new_products: number;
+  existing_products: number;
+  sale_records: number;
+  rejects: RanksharpCsvReject[];
+}
+
+export interface RanksharpCsvCommitSummary extends RanksharpCsvSummary {
+  products_created: number;
+  sales_created: number;
+}
+
+export interface RanksharpImageUploadSummary {
+  uploaded: number;
+  skipped_no_matching_sku: string[];
+  failed: { filename: string; sku: string | null; reason: string }[];
+}
