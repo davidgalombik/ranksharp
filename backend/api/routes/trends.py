@@ -195,11 +195,15 @@ async def latest_trends(
     return [await _build_trend_out(t, db) for t in trends]
 
 
-@router.get("/{trend_id}", response_model=TrendOut)
+@router.get("/{trend_id:int}", response_model=TrendOut)
 async def get_trend(trend_id: int, db: AsyncSession = Depends(get_db)):
     """Get a single trend with all examples (up to 100 — used by the
     "View all N products" modal on the frontend). List/latest endpoints
-    stay at ~10 examples for card previews to keep payload small."""
+    stay at ~10 examples for card previews to keep payload small.
+
+    Path uses the `:int` converter so static-path siblings (`/compare`,
+    `/weeks/`, etc.) don't route through here and 500 on int parsing.
+    Previously `/compare` was being caught as `trend_id='compare'`."""
     result = await db.execute(select(Trend).where(Trend.id == trend_id))
     trend = result.scalar_one_or_none()
     if not trend:
@@ -212,7 +216,7 @@ class TrendProductsPage(BaseModel):
     items: list[TrendExampleOut]
 
 
-@router.get("/{trend_id}/products", response_model=TrendProductsPage)
+@router.get("/{trend_id:int}/products", response_model=TrendProductsPage)
 async def get_trend_products(
     trend_id: int,
     limit: int = Query(default=48, le=200),
