@@ -1,6 +1,7 @@
 """API routes for the In-store Products catalogue (standalone — no sessions)."""
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
@@ -10,6 +11,27 @@ from sqlalchemy import select, desc, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from database.db import AsyncSessionLocal
+
+
+def _month_range(month: Optional[str]) -> Optional[tuple[datetime, datetime]]:
+    """Parse a 'YYYY-MM' string into a half-open (start, next_month) range
+    suitable for `created_at >= start AND created_at < next_month`.
+    Returns None if `month` is empty or malformed — caller should skip the
+    filter in that case. Buyers upload once per month, so month-precision
+    filtering matches their workflow."""
+    if not month:
+        return None
+    try:
+        year_s, month_s = month.split("-", 1)
+        year = int(year_s)
+        m = int(month_s)
+        if not (1 <= m <= 12):
+            return None
+    except (ValueError, AttributeError):
+        return None
+    start = datetime(year, m, 1)
+    next_month = datetime(year + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+    return (start, next_month)
 from database.models import InStoreCatalogueImage, InStoreCatalogueItem
 from config import settings
 import structlog
@@ -233,6 +255,7 @@ async def list_items(
     prominence: Optional[str] = None,   # e.g. "hero" or "hero,main" — overrides default
     show_all: bool = False,             # convenience: include peripheral/background too
     status: Optional[str] = None,       # 'failed' | 'pending' | 'analysing' | 'done'
+    month: Optional[str] = None,        # 'YYYY-MM' — filter on parent image's created_at
     limit: int = Query(default=60, le=200),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
@@ -278,6 +301,16 @@ async def list_items(
         else:
             stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
             count_stmt = count_stmt.where(InStoreCatalogueImage.retailer == retailer)
+    mr = _month_range(month)
+    if mr:
+        stmt = stmt.where(
+            InStoreCatalogueImage.created_at >= mr[0],
+            InStoreCatalogueImage.created_at < mr[1],
+        )
+        count_stmt = count_stmt.where(
+            InStoreCatalogueImage.created_at >= mr[0],
+            InStoreCatalogueImage.created_at < mr[1],
+        )
 
     # Prominence filtering — explicit override wins, else show_all toggle, else defaults
     if prominence:
@@ -332,6 +365,37 @@ async def list_items(
     return {"total": total, "items": items}
 
 
+# ── Months — distinct upload months for the Month filter dropdown ────────────
+
+@router.get("/months")
+async def list_months(db: AsyncSession = Depends(get_db)):
+    """Distinct upload months (YYYY-MM) that have at least one image.
+    Powers the Month filter dropdown so buyers see only months with data.
+    Sorted newest first."""
+    # date_trunc('month', created_at) returns the first-of-month for each
+    # image; grouping collapses duplicates. Postgres-native, no per-row
+    # Python work.
+    result = await db.execute(
+        select(
+            func.date_trunc("month", InStoreCatalogueImage.created_at).label("month"),
+            func.count(InStoreCatalogueImage.id).label("count"),
+        )
+        .group_by(func.date_trunc("month", InStoreCatalogueImage.created_at))
+        .order_by(desc(func.date_trunc("month", InStoreCatalogueImage.created_at)))
+    )
+    return {
+        "months": [
+            {
+                # Serialise as 'YYYY-MM' — the shape the frontend passes back
+                # as the `month` query param on the list endpoints.
+                "month": row.month.strftime("%Y-%m") if row.month else None,
+                "count": int(row.count),
+            }
+            for row in result.all() if row.month
+        ]
+    }
+
+
 # ── Facets — count per category given current filters ────────────────────────
 
 @router.get("/facets")
@@ -344,6 +408,7 @@ async def get_facets(
     country: Optional[str] = None,
     retailer: Optional[str] = None,
     show_all: bool = False,
+    month: Optional[str] = None,        # 'YYYY-MM' — filter on parent image's created_at
     db: AsyncSession = Depends(get_db),
 ):
     """Count of items per (category, subcategory, product_segment) given
@@ -369,6 +434,12 @@ async def get_facets(
                 stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
             else:
                 stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
+        mr = _month_range(month)
+        if mr:
+            stmt = stmt.where(
+                InStoreCatalogueImage.created_at >= mr[0],
+                InStoreCatalogueImage.created_at < mr[1],
+            )
         if not show_all:
             stmt = stmt.where(or_(
                 InStoreCatalogueItem.prominence.in_(DEFAULT_PROMINENCE),
@@ -585,6 +656,7 @@ async def list_images(
     prominence: Optional[str] = None,
     show_all: bool = False,
     status: Optional[str] = None,
+    month: Optional[str] = None,        # 'YYYY-MM' — filter on created_at
     limit: int = Query(default=60, le=200),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
@@ -620,6 +692,17 @@ async def list_images(
     if status:
         img_stmt = img_stmt.where(InStoreCatalogueImage.status == status)
         count_stmt = count_stmt.where(InStoreCatalogueImage.status == status)
+
+    mr = _month_range(month)
+    if mr:
+        img_stmt = img_stmt.where(
+            InStoreCatalogueImage.created_at >= mr[0],
+            InStoreCatalogueImage.created_at < mr[1],
+        )
+        count_stmt = count_stmt.where(
+            InStoreCatalogueImage.created_at >= mr[0],
+            InStoreCatalogueImage.created_at < mr[1],
+        )
 
     if product_filter_active:
         sub = select(InStoreCatalogueItem.image_id).where(*item_conds).distinct()

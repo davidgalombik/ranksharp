@@ -1142,13 +1142,28 @@ function ImageDetailModal({
                 </p>
               </div>
             </div>
-            <button
-              onClick={onClose}
-              className="text-2xl text-stone-400 hover:text-stone-900 leading-none"
-              title="Close (Esc)"
-            >
-              ×
-            </button>
+            <div className="flex items-start gap-3 flex-shrink-0">
+              {/* Upload date — top-right pill so buyers can eyeball
+                  when the shelf shot was taken without scanning the
+                  filename. Hidden if the detail hasn't loaded yet. */}
+              {detail?.created_at && (
+                <span
+                  className="px-2 py-1 rounded-full text-[11px] font-medium bg-stone-100 text-stone-600 border border-stone-200 whitespace-nowrap"
+                  title={`Uploaded ${new Date(detail.created_at).toLocaleString()}`}
+                >
+                  📅 {new Date(detail.created_at).toLocaleDateString(undefined, {
+                    day: "numeric", month: "short", year: "numeric",
+                  })}
+                </span>
+              )}
+              <button
+                onClick={onClose}
+                className="text-2xl text-stone-400 hover:text-stone-900 leading-none"
+                title="Close (Esc)"
+              >
+                ×
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -1233,6 +1248,9 @@ export default function InStoreProductsPage() {
   const [uncategorisedOnly, setUncategorisedOnly] = useState(false);
   const [retailerFilter, setRetailerFilter] = useState("");   // "" = all, "__none__" = untagged
   const [countryFilter, setCountryFilter] = useState("");     // "" = all, "AU" | "US"
+  // 'YYYY-MM' — filters images/items by upload month. "" = all months.
+  const [monthFilter, setMonthFilter] = useState("");
+  const [months, setMonths] = useState<{ month: string; count: number }[]>([]);
   const [showAll, setShowAll] = useState(false);   // include peripheral/background
   const [mode, setMode] = useState<"catalogue" | "failed">("catalogue");
 
@@ -1315,6 +1333,7 @@ export default function InStoreProductsPage() {
         uncategorised_only: uncategorisedOnly || undefined,
         country: countryFilter || undefined,
         retailer: retailerFilter || undefined,
+        month: monthFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
@@ -1327,7 +1346,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, monthFilter, showAll, page]);
 
   // Load products (flat item list)
   const loadProducts = useCallback(async () => {
@@ -1341,6 +1360,7 @@ export default function InStoreProductsPage() {
         uncategorised_only: uncategorisedOnly || undefined,
         country: countryFilter || undefined,
         retailer: retailerFilter || undefined,
+        month: monthFilter || undefined,
         show_all: showAll,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
@@ -1353,7 +1373,7 @@ export default function InStoreProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll, page]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, monthFilter, showAll, page]);
 
   // Refresh both the current view and stats
   const reloadCurrentView = useCallback(async () => {
@@ -1393,11 +1413,20 @@ export default function InStoreProductsPage() {
       product_segment: productSegment || undefined,
       uncategorised_only: uncategorisedOnly || undefined,
       retailer: retailerFilter || undefined,
+      month: monthFilter || undefined,
       show_all: showAll,
     })
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, showAll]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, monthFilter, showAll]);
+
+  // Load the distinct upload months once at mount + whenever an upload
+  // completes (via bump on `retailers` load — good enough proxy).
+  useEffect(() => {
+    api.instoreCatalogue.listMonths()
+      .then((r) => setMonths(r.months || []))
+      .catch(() => setMonths([]));
+  }, [retailers.length]);
 
   // Fetch the shared 3-level taxonomy tree once at mount.
   useEffect(() => {
@@ -1748,6 +1777,29 @@ export default function InStoreProductsPage() {
                   <option value={RETAILER_NONE}>(no retailer) ({untaggedCount})</option>
                 )}
               </select>
+              {/* Month filter — buyers upload once per month so month-precision
+                  slicing matches their workflow. Options populated from
+                  actual upload data; hidden entirely if no uploads exist. */}
+              {months.length > 0 && (
+                <select
+                  value={monthFilter}
+                  onChange={(e) => setMonthFilter(e.target.value)}
+                  className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                  title="Filter by upload month"
+                >
+                  <option value="">All months</option>
+                  {months.map((m) => {
+                    // 'YYYY-MM' → 'Aug 2026'. Parse-and-format so locale
+                    // doesn't drift the label.
+                    const [y, mo] = m.month.split("-").map(Number);
+                    const label = new Date(y, mo - 1, 1)
+                      .toLocaleString(undefined, { month: "short", year: "numeric" });
+                    return (
+                      <option key={m.month} value={m.month}>{label}</option>
+                    );
+                  })}
+                </select>
+              )}
               {/* Category + Subcategory + Product Segment — cascading. Uses
                   the shared taxonomy tree (not retailer-gated, unlike Online). */}
               <select

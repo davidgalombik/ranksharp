@@ -349,7 +349,7 @@ export const api = {
         image_ids: number[];
       }>;
     },
-    listItems: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; country?: string; retailer?: string; show_all?: boolean; prominence?: string; limit?: number; offset?: number } = {}) => {
+    listItems: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; country?: string; retailer?: string; show_all?: boolean; prominence?: string; month?: string; limit?: number; offset?: number } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
@@ -360,11 +360,18 @@ export const api = {
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
       if (params.prominence) qs.set("prominence", params.prominence);
+      if (params.month) qs.set("month", params.month);
       qs.set("limit", String(params.limit ?? 60));
       qs.set("offset", String(params.offset ?? 0));
       const res = await fetch(`${API_BASE}/api/instore-catalogue/?${qs}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
+    },
+    // Distinct upload months for the Month filter dropdown.
+    listMonths: async () => {
+      const res = await fetch(`${API_BASE}/api/instore-catalogue/months`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ months: { month: string; count: number }[] }>;
     },
     listRetailers: async () => {
       const res = await fetch(`${API_BASE}/api/instore-catalogue/retailers`, { cache: "no-store" });
@@ -382,6 +389,7 @@ export const api = {
       prominence?: string;
       show_all?: boolean;
       status?: string;
+      month?: string;
       limit?: number;
       offset?: number;
     } = {}) => {
@@ -396,6 +404,7 @@ export const api = {
       if (params.prominence) qs.set("prominence", params.prominence);
       if (params.show_all) qs.set("show_all", "true");
       if (params.status) qs.set("status", params.status);
+      if (params.month) qs.set("month", params.month);
       qs.set("limit", String(params.limit ?? 60));
       qs.set("offset", String(params.offset ?? 0));
       const res = await fetch(`${API_BASE}/api/instore-catalogue/images?${qs}`, { cache: "no-store" });
@@ -421,7 +430,7 @@ export const api = {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
-    facets: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; retailer?: string; show_all?: boolean } = {}) => {
+    facets: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; retailer?: string; show_all?: boolean; month?: string } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
@@ -430,6 +439,7 @@ export const api = {
       if (params.uncategorised_only) qs.set("uncategorised_only", "true");
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
+      if (params.month) qs.set("month", params.month);
       const res = await fetch(`${API_BASE}/api/instore-catalogue/facets?${qs}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
       return res.json() as Promise<{
