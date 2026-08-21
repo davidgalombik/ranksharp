@@ -582,6 +582,7 @@ async def classify_retailer_segments() -> dict:
     made through the admin UI. Returns a summary dict for logging.
     """
     from database.models import Retailer
+    from sqlalchemy import select  # imported locally, matching seed_retailers pattern
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Retailer))
