@@ -1778,28 +1778,27 @@ export default function InStoreProductsPage() {
                 )}
               </select>
               {/* Month filter — buyers upload once per month so month-precision
-                  slicing matches their workflow. Options populated from
-                  actual upload data; hidden entirely if no uploads exist. */}
-              {months.length > 0 && (
-                <select
-                  value={monthFilter}
-                  onChange={(e) => setMonthFilter(e.target.value)}
-                  className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
-                  title="Filter by upload month"
-                >
-                  <option value="">All months</option>
-                  {months.map((m) => {
-                    // 'YYYY-MM' → 'Aug 2026'. Parse-and-format so locale
-                    // doesn't drift the label.
-                    const [y, mo] = m.month.split("-").map(Number);
-                    const label = new Date(y, mo - 1, 1)
-                      .toLocaleString(undefined, { month: "short", year: "numeric" });
-                    return (
-                      <option key={m.month} value={m.month}>{label}</option>
-                    );
-                  })}
-                </select>
-              )}
+                  slicing matches their workflow. Always rendered (even when
+                  the /months endpoint returns nothing) so the control isn't
+                  gated on backend availability during a rolling deploy. */}
+              <select
+                value={monthFilter}
+                onChange={(e) => setMonthFilter(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+                title="Filter by upload month"
+              >
+                <option value="">All months</option>
+                {months.map((m) => {
+                  // 'YYYY-MM' → 'Aug 2026'. Parse-and-format so locale
+                  // doesn't drift the label.
+                  const [y, mo] = m.month.split("-").map(Number);
+                  const label = new Date(y, mo - 1, 1)
+                    .toLocaleString(undefined, { month: "short", year: "numeric" });
+                  return (
+                    <option key={m.month} value={m.month}>{label}</option>
+                  );
+                })}
+              </select>
               {/* Category + Subcategory + Product Segment — cascading. Uses
                   the shared taxonomy tree (not retailer-gated, unlike Online). */}
               <select
