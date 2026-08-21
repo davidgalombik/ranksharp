@@ -561,12 +561,34 @@ export const api = {
     },
     clear: () =>
       fetch(`${API_BASE}/api/fragrance-trends/clear`, { method: "DELETE" }).then((r) => r.json()),
+    // Diffusion matrix — same-name trends aligned across Luxury / Middle
+    // / Mass. Each cell is {trend_id, product_count, retailer_count,
+    // momentum_pct} or null.
+    compare: () =>
+      apiFetch<{
+        week: string | null;
+        rows: Array<{
+          name: string;
+          category: string;
+          luxury: null | { trend_id: number; product_count: number; retailer_count: number; momentum_pct: number | null };
+          middle: null | { trend_id: number; product_count: number; retailer_count: number; momentum_pct: number | null };
+          mass:   null | { trend_id: number; product_count: number; retailer_count: number; momentum_pct: number | null };
+        }>;
+      }>("/api/fragrance-trends/compare"),
     // Hard-delete one Set within a specific run. runId is the
     // FragranceTrendReport.id (there is exactly one report per run).
-    // 409 if it would leave the run with zero trends.
-    deleteGeneration: async (runId: number, generation: number) => {
+    // Segment-scoped (2026-08-22) — the same (run, generation) can
+    // exist in Luxury/Middle/Mass and we want to delete only one.
+    // 409 if it would leave the whole run with zero trends across
+    // every segment.
+    deleteGeneration: async (
+      runId: number,
+      generation: number,
+      market_segment?: string,
+    ) => {
+      const qs = market_segment ? `?market_segment=${market_segment}` : "";
       const res = await fetch(
-        `${API_BASE}/api/fragrance-trends/runs/${runId}/generations/${generation}`,
+        `${API_BASE}/api/fragrance-trends/runs/${runId}/generations/${generation}${qs}`,
         { method: "DELETE" }
       );
       if (!res.ok) {

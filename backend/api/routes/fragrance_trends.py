@@ -375,27 +375,36 @@ async def regenerate_report(
 async def delete_run_generation(
     run_id: int,
     generation: int,
+    market_segment: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Hard-delete a single Set N for the given fragrance analysis run.
+
+    Segment-scoped (2026-08-22): when `market_segment` is provided,
+    only rows belonging to that tier are deleted; the same (run,
+    generation) may exist in siblings and must be left intact. Omit
+    the param to target legacy unsegmented rows.
 
     Order matters here (Fragrance has one extra step vs Product Trends —
     the report row's JSONB trend_ids list has to be pruned too):
 
       1. Resolve the run's timestamp from the report id.
-      2. Count what's here and what would remain.
+      2. Count what's here (in this segment) and what would remain in
+         the whole run across segments.
       3. Null any prev_trend_id from other trends that references rows
          we are about to delete (the FK has no ON DELETE clause).
       4. Delete the FragranceTrendExample rows for the affected trends.
       5. Delete the FragranceTrend rows.
       6. Prune the deleted IDs out of report.trend_ids, and recompute
-         report.generation_count from what remains.
+         report.generation_count from what remains (across all segments,
+         since the counter is engine-wide).
 
     Guardrails:
-      - 404 if the run doesn't exist, or the generation has no trends.
-      - 409 if this would leave the whole run with zero trends — the
-        caller should delete the whole run via /clear or a per-run
-        delete instead.
+      - 404 if the run doesn't exist, or the (generation, segment) has
+        no trends.
+      - 409 if this would leave the whole run with zero trends (across
+        every segment) — the caller should delete the whole run via
+        /clear if that's the intent.
 
     Numbering is not compacted. Sets 1/2/3 minus 2 → Sets 1/3; the next
     Try Again produces Set 4.
@@ -407,45 +416,55 @@ async def delete_run_generation(
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     run_at = report.week_start  # legacy column name; semantically run_at
 
-    # Count what's in this generation for this run
-    count_row = await db.execute(
-        select(func.count(FragranceTrend.id)).where(
-            FragranceTrend.week_start == run_at,
-            FragranceTrend.generation == generation,
-        )
+    def _segment_filter(query):
+        if market_segment is not None:
+            return query.where(FragranceTrend.market_segment == market_segment)
+        return query.where(FragranceTrend.market_segment.is_(None))
+
+    # Count what's in this (segment, generation) for this run
+    count_q = select(func.count(FragranceTrend.id)).where(
+        FragranceTrend.week_start == run_at,
+        FragranceTrend.generation == generation,
     )
+    count_row = await db.execute(_segment_filter(count_q))
     to_delete = count_row.scalar_one() or 0
     if to_delete == 0:
         raise HTTPException(
             status_code=404,
-            detail=f"No fragrance trends found for run {run_id} generation {generation}",
+            detail=(
+                f"No fragrance trends found for run {run_id} generation "
+                f"{generation}"
+                + (f" in segment {market_segment}" if market_segment else "")
+            ),
         )
 
-    # Count what would remain
+    # Count what would remain in the whole run (across every segment).
+    # Fragrance reports are engine-wide, so "empty" only makes sense
+    # against the whole cross-segment footprint.
     remaining_row = await db.execute(
         select(func.count(FragranceTrend.id)).where(
             FragranceTrend.week_start == run_at,
-            FragranceTrend.generation != generation,
+            # Not: generation != gen AND same segment. A remaining Middle
+            # Set 1 must still block deletion of Luxury Set 1.
         )
     )
-    remaining = remaining_row.scalar_one() or 0
-    if remaining == 0:
+    total_in_run = remaining_row.scalar_one() or 0
+    if total_in_run - to_delete <= 0:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Refusing to delete — this is the only remaining generation for "
+                f"Refusing to delete — this is the last remaining data for "
                 f"run {run_id}. Delete the whole run via /clear if you want a "
                 f"clean slate."
             ),
         )
 
-    # Collect trend IDs we're about to delete
-    id_rows = await db.execute(
-        select(FragranceTrend.id).where(
-            FragranceTrend.week_start == run_at,
-            FragranceTrend.generation == generation,
-        )
+    # Collect trend IDs we're about to delete (segment-scoped)
+    id_q = select(FragranceTrend.id).where(
+        FragranceTrend.week_start == run_at,
+        FragranceTrend.generation == generation,
     )
+    id_rows = await db.execute(_segment_filter(id_q))
     trend_ids = [tid for (tid,) in id_rows.all()]
     trend_id_set = set(trend_ids)
 
@@ -493,6 +512,98 @@ async def delete_run_generation(
         "unlinked_backlinks": unlinked,
         "remaining_generations": remaining_gens,
     }
+
+
+class FragranceComparisonRow(BaseModel):
+    name: str
+    category: str
+    luxury: Optional[dict] = None
+    middle: Optional[dict] = None
+    mass: Optional[dict] = None
+
+
+class FragranceComparisonOut(BaseModel):
+    week: Optional[str]
+    rows: list[FragranceComparisonRow]
+
+
+@router.get("/compare", response_model=FragranceComparisonOut)
+async def compare_tiers(db: AsyncSession = Depends(get_db)):
+    """Diffusion view — same-name fragrance trends across Luxury /
+    Middle / Mass.
+
+    Fragrance runs aren't week-aligned across tiers (each tier finishes
+    at its own timestamp), so unlike Product Trends we don't pin one
+    week and diff. Instead we take the LATEST generation in each tier
+    from its own most-recent run, then merge by (name.lower(), category).
+    Buyers use this to spot early signals (Luxury only) and diffused
+    trends (all three tiers).
+    """
+    async def _latest_run_at(segment: str):
+        return (await db.execute(
+            select(func.max(FragranceTrend.week_start))
+            .where(FragranceTrend.market_segment == segment)
+        )).scalar_one_or_none()
+
+    async def _rows_for(segment: str) -> list[FragranceTrend]:
+        run_at = await _latest_run_at(segment)
+        if run_at is None:
+            return []
+        gen = (await db.execute(
+            select(func.max(FragranceTrend.generation))
+            .where(FragranceTrend.week_start == run_at)
+            .where(FragranceTrend.market_segment == segment)
+        )).scalar_one_or_none()
+        if gen is None:
+            return []
+        result = await db.execute(
+            select(FragranceTrend)
+            .where(FragranceTrend.week_start == run_at)
+            .where(FragranceTrend.market_segment == segment)
+            .where(FragranceTrend.generation == gen)
+        )
+        return list(result.scalars().all())
+
+    lux = await _rows_for("luxury")
+    mid = await _rows_for("middle")
+    mss = await _rows_for("mass")
+
+    # Display week — the most recent run across any tier.
+    latest_any = max(
+        (t.week_start for t in (*lux, *mid, *mss)),
+        default=None,
+    )
+
+    merged: dict[tuple[str, str], FragranceComparisonRow] = {}
+
+    def _put(trends: list[FragranceTrend], key: str) -> None:
+        for t in trends:
+            k = (t.name.strip().lower(), t.category)
+            row = merged.get(k)
+            if row is None:
+                row = FragranceComparisonRow(name=t.name.strip(), category=t.category)
+                merged[k] = row
+            setattr(row, key, {
+                "trend_id": t.id,
+                "product_count": t.product_count,
+                "retailer_count": t.retailer_count,
+                "momentum_pct": t.momentum_pct,
+            })
+    _put(lux, "luxury")
+    _put(mid, "middle")
+    _put(mss, "mass")
+
+    def _rank(row: FragranceComparisonRow) -> tuple:
+        present = sum(1 for x in (row.luxury, row.middle, row.mass) if x)
+        total = sum((x or {}).get("product_count", 0)
+                    for x in (row.luxury, row.middle, row.mass))
+        return (-present, -total, row.name.lower())
+
+    rows = sorted(merged.values(), key=_rank)
+    return FragranceComparisonOut(
+        week=str(latest_any.date()) if latest_any else None,
+        rows=rows,
+    )
 
 
 @router.get("/task/{task_id}")

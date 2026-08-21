@@ -6,7 +6,14 @@ import clsx from "clsx";
 
 type Phase = "idle" | "running" | "done" | "error";
 
-export default function RunFragranceAnalysisButton({ onSuccess }: { onSuccess?: () => void } = {}) {
+export default function RunFragranceAnalysisButton({
+  onSuccess,
+  segment,
+}: {
+  onSuccess?: () => void;
+  /** 'luxury' | 'middle' | 'mass' — pins the fresh run to a tier. Omit for legacy unsegmented. */
+  segment?: string;
+} = {}) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("idle");
   const [pct, setPct] = useState(0);
@@ -31,7 +38,7 @@ export default function RunFragranceAnalysisButton({ onSuccess }: { onSuccess?: 
 
     let taskId: string;
     try {
-      const res = await api.fragranceTrends.generate();
+      const res = await api.fragranceTrends.generate(segment);
       taskId = res.task_id;
     } catch {
       setPhase("error");
@@ -51,7 +58,13 @@ export default function RunFragranceAnalysisButton({ onSuccess }: { onSuccess?: 
           setStep("Complete! Refreshing…");
           setPhase("done");
           onSuccess?.();
-          setTimeout(() => router.refresh(), 1_500);
+          setTimeout(() => {
+            router.refresh();
+            // The page is client-driven now; poke it to re-fetch.
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("fragrance-refresh"));
+            }
+          }, 1_500);
         } else if (status.state === "FAILURE") {
           stopPolling();
           setPhase("error");
