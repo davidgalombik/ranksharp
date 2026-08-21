@@ -99,6 +99,8 @@ async def list_trends(
     category: Optional[str] = None,
     status: Optional[TrendStatus] = None,
     generation: Optional[int] = None,
+    market_segment: Optional[str] = Query(default=None,
+        description="luxury / middle / mass. Omit to see legacy (unsegmented) trends."),
     # Default bumped 20 -> 300 so the frontend receives the full set of
     # trends for a generation (a run typically emits ~60-100 trends across
     # 5 categories; the old default silently truncated to style+material,
@@ -107,23 +109,35 @@ async def list_trends(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    """List trends, optionally filtered by week, category, status, or generation.
+    """List trends, optionally filtered by week / category / status /
+    generation / market_segment.
 
-    If generation is not supplied the latest generation for each week is returned.
+    Market segmentation (2026-08-08): when `market_segment` is supplied,
+    scopes results to that tier's trends. When OMITTED, only legacy
+    unsegmented trends (market_segment IS NULL) are returned — buyers
+    explicitly opted out of an 'All' combined view.
+
+    If generation is not supplied the latest generation for the resolved
+    (week, segment) is returned.
     """
     effective_week: Optional[datetime] = None
     if week_start:
         effective_week = datetime.combine(week_start, datetime.min.time())
 
+    # Segment filter — applied to every query below.
+    def _apply_segment(q):
+        if market_segment is not None:
+            return q.where(Trend.market_segment == market_segment)
+        return q.where(Trend.market_segment.is_(None))
+
     # Resolve which generation to show
     if generation is None:
-        # Find the max generation for the target week (or the most-recent week overall)
-        gen_q = select(func.max(Trend.generation))
+        gen_q = _apply_segment(select(func.max(Trend.generation)))
         if effective_week:
             gen_q = gen_q.where(Trend.week_start == effective_week)
         else:
-            # Most recent week
-            latest_week_q = select(func.max(Trend.week_start))
+            # Most recent week within THIS segment
+            latest_week_q = _apply_segment(select(func.max(Trend.week_start)))
             latest_week_result = await db.execute(latest_week_q)
             latest_week = latest_week_result.scalar_one_or_none()
             if latest_week:
@@ -132,7 +146,9 @@ async def list_trends(
         gen_result = await db.execute(gen_q)
         generation = gen_result.scalar_one_or_none() or 1
 
-    q = select(Trend).order_by(desc(Trend.week_start), desc(Trend.product_count))
+    q = _apply_segment(
+        select(Trend).order_by(desc(Trend.week_start), desc(Trend.product_count))
+    )
     q = q.where(Trend.generation == generation)
 
     if effective_week:
@@ -299,14 +315,22 @@ class WeekInfo(BaseModel):
 
 
 @router.get("/weeks/", response_model=list[WeekInfo])
-async def list_weeks(db: AsyncSession = Depends(get_db)):
-    """List all weeks with trend data, including generation count per week."""
-    result = await db.execute(
+async def list_weeks(
+    market_segment: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List weeks with trend data, scoped to the requested market segment.
+    Omit `market_segment` for legacy unsegmented weeks."""
+    q = (
         select(Trend.week_start, Trend.generation)
         .group_by(Trend.week_start, Trend.generation)
         .order_by(desc(Trend.week_start), Trend.generation)
     )
-    # Group into {week: [gens]} preserving week ordering (desc)
+    if market_segment is not None:
+        q = q.where(Trend.market_segment == market_segment)
+    else:
+        q = q.where(Trend.market_segment.is_(None))
+    result = await db.execute(q)
     by_week: dict = {}
     order: list = []
     for row in result.all():
@@ -325,10 +349,111 @@ async def list_weeks(db: AsyncSession = Depends(get_db)):
     ]
 
 
+# ── Compare tiers (diffusion) ────────────────────────────────────────────────
+
+class ComparisonRow(BaseModel):
+    """One trend name compared across all three market tiers for a given
+    week. Rows are the union of trend names present in any tier so the
+    frontend can highlight 'Luxury-only' (early signal) vs 'in all three'
+    (fully diffused)."""
+    name: str
+    category: str
+    luxury: Optional[dict] = None   # {trend_id, product_count, retailer_count}
+    middle: Optional[dict] = None
+    mass: Optional[dict] = None
+
+
+class ComparisonOut(BaseModel):
+    week: Optional[str] = None
+    rows: list[ComparisonRow]
+
+
+@router.get("/compare", response_model=ComparisonOut)
+async def compare_tiers(
+    week_start: Optional[date] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Diffusion view — same-name trends across Luxury / Middle / Mass.
+
+    Groups by trend name + category so 'Sage Green' in colour shows as
+    one row with 3 tier columns. Buyers use this to spot early signals
+    (Luxury only) and diffused trends (present in all three tiers).
+    """
+    # Resolve week — default to most recent week with any segmented data
+    effective_week: Optional[datetime] = None
+    if week_start:
+        effective_week = datetime.combine(week_start, datetime.min.time())
+    else:
+        latest = (await db.execute(
+            select(func.max(Trend.week_start))
+            .where(Trend.market_segment.isnot(None))
+        )).scalar_one_or_none()
+        effective_week = latest
+
+    if effective_week is None:
+        return ComparisonOut(week=None, rows=[])
+
+    # For each segment, pull its latest generation for the week
+    async def _rows_for(segment: str) -> list[Trend]:
+        gen = (await db.execute(
+            select(func.max(Trend.generation))
+            .where(Trend.week_start == effective_week)
+            .where(Trend.market_segment == segment)
+        )).scalar_one_or_none()
+        if gen is None:
+            return []
+        result = await db.execute(
+            select(Trend)
+            .where(Trend.week_start == effective_week)
+            .where(Trend.market_segment == segment)
+            .where(Trend.generation == gen)
+        )
+        return list(result.scalars().all())
+
+    lux = await _rows_for("luxury")
+    mid = await _rows_for("middle")
+    mss = await _rows_for("mass")
+
+    # Merge by (name.lower(), category) — trends with the same name in
+    # the same category are treated as the same underlying trend across
+    # tiers.
+    merged: dict[tuple[str, str], ComparisonRow] = {}
+
+    def _put(trends: list[Trend], key: str) -> None:
+        for t in trends:
+            k = (t.name.strip().lower(), t.category)
+            row = merged.get(k)
+            if row is None:
+                row = ComparisonRow(name=t.name.strip(), category=t.category)
+                merged[k] = row
+            setattr(row, key, {
+                "trend_id": t.id,
+                "product_count": t.product_count,
+                "retailer_count": t.retailer_count,
+                "momentum_pct": t.momentum_pct,
+            })
+    _put(lux, "luxury")
+    _put(mid, "middle")
+    _put(mss, "mass")
+
+    # Sort: rows present in more tiers rank higher; break ties by total
+    # product count across tiers so the biggest signals surface first.
+    def _rank(row: ComparisonRow) -> tuple:
+        present = sum(1 for x in (row.luxury, row.middle, row.mass) if x)
+        total = sum((x or {}).get("product_count", 0)
+                    for x in (row.luxury, row.middle, row.mass))
+        return (-present, -total, row.name.lower())
+
+    rows = sorted(merged.values(), key=_rank)
+    return ComparisonOut(week=str(effective_week.date()), rows=rows)
+
+
 @router.delete("/week/{week_start}/generations/{generation}")
 async def delete_trend_generation(
     week_start: date,
     generation: int,
+    market_segment: Optional[str] = Query(default=None,
+        description="Segment scope for the delete. Omit to target legacy (unsegmented) trends."),
     db: AsyncSession = Depends(get_db),
 ):
     """Hard-delete a single Set N for a given week.
@@ -360,27 +485,34 @@ async def delete_trend_generation(
     # week_start values (which are stored as DateTime at 00:00:00).
     week_dt = datetime.combine(week_start, datetime.min.time())
 
-    # Count what's in this generation for this week
-    count_row = await db.execute(
+    # Segment scope helper — same pattern as list_trends.
+    def _segment_where(query):
+        if market_segment is not None:
+            return query.where(Trend.market_segment == market_segment)
+        return query.where(Trend.market_segment.is_(None))
+
+    # Count what's in this generation for this week + segment
+    count_row = await db.execute(_segment_where(
         select(func.count(Trend.id)).where(
             Trend.week_start == week_dt,
             Trend.generation == generation,
         )
-    )
+    ))
     to_delete = count_row.scalar_one() or 0
     if to_delete == 0:
         raise HTTPException(
             status_code=404,
-            detail=f"No trends found for week {week_start} generation {generation}",
+            detail=f"No trends found for week {week_start} generation {generation}"
+                   + (f" in segment {market_segment}" if market_segment else ""),
         )
 
-    # Count what would remain for this week if we did the delete
-    remaining_row = await db.execute(
+    # Count what would remain for this week + segment if we did the delete
+    remaining_row = await db.execute(_segment_where(
         select(func.count(Trend.id)).where(
             Trend.week_start == week_dt,
             Trend.generation != generation,
         )
-    )
+    ))
     remaining = remaining_row.scalar_one() or 0
     if remaining == 0:
         raise HTTPException(
@@ -394,12 +526,12 @@ async def delete_trend_generation(
 
     # Collect the trend IDs we're about to delete — needed to sever any
     # downstream prev_trend_id references and to scope the TrendExample delete.
-    id_rows = await db.execute(
+    id_rows = await db.execute(_segment_where(
         select(Trend.id).where(
             Trend.week_start == week_dt,
             Trend.generation == generation,
         )
-    )
+    ))
     trend_ids = [tid for (tid,) in id_rows.all()]
 
     # 2. Null downstream backlinks (any Trend anywhere pointing at rows we
@@ -425,16 +557,17 @@ async def delete_trend_generation(
     )
     await db.commit()
 
-    # Return what's left for the frontend to update its tabs
-    remaining_gens_rows = await db.execute(
+    # Return what's left for the frontend to update its tabs (scoped)
+    remaining_gens_rows = await db.execute(_segment_where(
         select(Trend.generation)
         .where(Trend.week_start == week_dt)
         .distinct()
-    )
+    ))
     remaining_gens = sorted({int(g) for (g,) in remaining_gens_rows.all()})
 
     return {
         "week": str(week_start),
+        "market_segment": market_segment,
         "generation": generation,
         "deleted_trends": to_delete,
         "deleted_examples": examples_deleted,

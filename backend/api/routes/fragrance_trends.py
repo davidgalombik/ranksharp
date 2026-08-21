@@ -97,18 +97,22 @@ class FragranceTrendReportOut(BaseModel):
 
 
 @router.get("/weeks/", response_model=list[WeekInfo])
-async def list_weeks(db: AsyncSession = Depends(get_db)):
-    """List every fragrance analysis run, newest first.
-
-    Endpoint kept at /weeks/ for backward compatibility. The `week` field
-    is now the run's full ISO datetime string (not a date), and each entry
-    includes the actual list of generation numbers in that run.
-    """
-    result = await db.execute(
+async def list_weeks(
+    market_segment: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List every fragrance analysis run, newest first. Scoped by segment
+    (or unsegmented when the param is omitted)."""
+    q = (
         select(FragranceTrend.week_start, FragranceTrend.generation)
         .group_by(FragranceTrend.week_start, FragranceTrend.generation)
         .order_by(desc(FragranceTrend.week_start), FragranceTrend.generation)
     )
+    if market_segment is not None:
+        q = q.where(FragranceTrend.market_segment == market_segment)
+    else:
+        q = q.where(FragranceTrend.market_segment.is_(None))
+    result = await db.execute(q)
     by_run: dict = {}
     order: list = []
     for row in result.all():
@@ -130,15 +134,38 @@ async def list_weeks(db: AsyncSession = Depends(get_db)):
 @router.get("/latest", response_model=FragranceTrendReportOut)
 async def get_latest_report(
     generation: Optional[int] = None,
+    market_segment: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(FragranceTrendReport).order_by(desc(FragranceTrendReport.week_start)).limit(1)
-    )
-    report = result.scalar_one_or_none()
+    """Latest fragrance run + its trends.
+
+    When market_segment is provided, returns the latest run whose trends
+    belong to THAT tier — so segmented Luxury / Middle / Mass views each
+    land on their own latest report."""
+    if market_segment is not None:
+        # Find the most recent week_start with trends in this segment.
+        latest = (await db.execute(
+            select(func.max(FragranceTrend.week_start))
+            .where(FragranceTrend.market_segment == market_segment)
+        )).scalar_one_or_none()
+        if latest is None:
+            raise HTTPException(status_code=404,
+                                detail=f"No fragrance analysis for segment {market_segment}")
+        report = (await db.execute(
+            select(FragranceTrendReport)
+            .where(FragranceTrendReport.week_start == latest)
+        )).scalar_one_or_none()
+    else:
+        report = (await db.execute(
+            select(FragranceTrendReport)
+            .order_by(desc(FragranceTrendReport.week_start))
+            .limit(1)
+        )).scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="No fragrance trend reports yet")
-    return await _build_report_out(report, db, generation=generation)
+    return await _build_report_out(
+        report, db, generation=generation, market_segment=market_segment,
+    )
 
 
 @router.get("/", response_model=list[FragranceTrendReportOut])
@@ -289,11 +316,28 @@ async def get_trend_products(
 
 
 @router.post("/generate")
-async def generate_report():
-    """Trigger fragrance trend analysis."""
-    from tasks.analysis_tasks import run_fragrance_trend_analysis_task
-    task = run_fragrance_trend_analysis_task.apply_async(queue="reports")
-    return {"task_id": task.id, "status": "queued"}
+async def generate_report(
+    market_segment: Optional[str] = None,
+):
+    """Trigger fragrance trend analysis. Segment routing:
+      * `?market_segment=all` → sequential Luxury → Middle → Mass
+      * `?market_segment=luxury` (or middle/mass) → single tier
+      * omitted → legacy unsegmented run
+    """
+    from tasks.analysis_tasks import (
+        run_fragrance_trend_analysis_task,
+        run_fragrance_trend_analysis_all_segments_task,
+    )
+    if market_segment == "all":
+        task = run_fragrance_trend_analysis_all_segments_task.apply_async(queue="reports")
+    elif market_segment in ("luxury", "middle", "mass"):
+        task = run_fragrance_trend_analysis_task.apply_async(queue="reports", args=[market_segment])
+    elif market_segment is None:
+        task = run_fragrance_trend_analysis_task.apply_async(queue="reports")
+    else:
+        raise HTTPException(status_code=400,
+                            detail="market_segment must be 'luxury','middle','mass','all', or omitted")
+    return {"task_id": task.id, "status": "queued", "market_segment": market_segment}
 
 
 @router.delete("/clear")
@@ -307,11 +351,24 @@ async def clear_all(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/regenerate")
-async def regenerate_report():
-    """Generate a fresh set of fragrance trends without deleting the previous generation (Try Again)."""
-    from tasks.analysis_tasks import regenerate_fragrance_trend_analysis_task
-    task = regenerate_fragrance_trend_analysis_task.apply_async(queue="reports")
-    return {"task_id": task.id, "status": "queued"}
+async def regenerate_report(
+    market_segment: Optional[str] = None,
+):
+    """Try Again — same segment routing as /generate."""
+    from tasks.analysis_tasks import (
+        regenerate_fragrance_trend_analysis_task,
+        regenerate_fragrance_trend_analysis_all_segments_task,
+    )
+    if market_segment == "all":
+        task = regenerate_fragrance_trend_analysis_all_segments_task.apply_async(queue="reports")
+    elif market_segment in ("luxury", "middle", "mass"):
+        task = regenerate_fragrance_trend_analysis_task.apply_async(queue="reports", args=[market_segment])
+    elif market_segment is None:
+        task = regenerate_fragrance_trend_analysis_task.apply_async(queue="reports")
+    else:
+        raise HTTPException(status_code=400,
+                            detail="market_segment must be 'luxury','middle','mass','all', or omitted")
+    return {"task_id": task.id, "status": "queued", "market_segment": market_segment}
 
 
 @router.delete("/runs/{run_id}/generations/{generation}")
@@ -462,8 +519,21 @@ async def _build_report_out(
     report: FragranceTrendReport,
     db: AsyncSession,
     generation: Optional[int] = None,
+    market_segment: Optional[str] = None,
 ) -> FragranceTrendReportOut:
-    generation_count = report.generation_count or 1
+    # `generation_count` on the report row is engine-wide (all segments).
+    # For segmented views we compute the real per-segment generation
+    # count from the FragranceTrend table so buyers see the right Set
+    # tabs. Legacy views (no segment) keep using the stored counter.
+    if market_segment is not None:
+        seg_max = (await db.execute(
+            select(func.max(FragranceTrend.generation))
+            .where(FragranceTrend.week_start == report.week_start)
+            .where(FragranceTrend.market_segment == market_segment)
+        )).scalar_one_or_none() or 1
+        generation_count = int(seg_max)
+    else:
+        generation_count = report.generation_count or 1
     effective_gen = generation if generation is not None else generation_count
 
     if not report.trend_ids:
@@ -474,12 +544,17 @@ async def _build_report_out(
             generation_count=generation_count, trends=[], created_at=report.created_at,
         )
 
-    result = await db.execute(
+    q = (
         select(FragranceTrend)
         .where(FragranceTrend.id.in_(report.trend_ids))
         .where(FragranceTrend.generation == effective_gen)
         .order_by(desc(FragranceTrend.product_count))
     )
+    if market_segment is not None:
+        q = q.where(FragranceTrend.market_segment == market_segment)
+    else:
+        q = q.where(FragranceTrend.market_segment.is_(None))
+    result = await db.execute(q)
     trends = result.scalars().all()
     trend_outs = [await _build_trend_out(t, db) for t in trends]
 

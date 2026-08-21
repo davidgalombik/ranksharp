@@ -229,7 +229,11 @@ class DesignTrendEngine:
 
     # -- Public entry point ---------------------------------------------------
 
-    async def regenerate_analysis(self, week_start: Optional[datetime] = None) -> Optional[TrendReport]:
+    async def regenerate_analysis(
+        self,
+        week_start: Optional[datetime] = None,
+        market_segment: Optional[str] = None,
+    ) -> Optional[TrendReport]:
         """Generate a fresh set of design-shape trends for `week_start`.
         Appends a new generation if one already exists for the same week
         (mirrors TrendEngine so the "Try Again" button in the UI still works).
@@ -241,18 +245,31 @@ class DesignTrendEngine:
                 datetime.min.time(),
             )
 
-        log.info("design_trend_run_start", week_start=week_start.isoformat())
+        log.info("design_trend_run_start",
+                 week_start=week_start.isoformat(),
+                 market_segment=market_segment or "unsegmented")
         self._progress(3, "Loading prior generations for exclusion…")
 
-        prev_rows = (await self.db.execute(
-            select(Trend.name, Trend.generation).where(Trend.week_start == week_start)
-        )).all()
+        # Scope prior-generation exclusion and generation numbering to
+        # THIS segment. Segments run independently — Luxury Set 3 is
+        # unrelated to Mass Set 1.
+        prev_query = select(Trend.name, Trend.generation).where(
+            Trend.week_start == week_start
+        )
+        if market_segment is not None:
+            prev_query = prev_query.where(Trend.market_segment == market_segment)
+        else:
+            # Unsegmented (legacy) run — only look at legacy (null-segment)
+            # prior rows so a segmented Set N doesn't influence unsegmented
+            # numbering.
+            prev_query = prev_query.where(Trend.market_segment.is_(None))
+        prev_rows = (await self.db.execute(prev_query)).all()
         excluded_names = {r[0].strip().lower() for r in prev_rows}
         max_generation = max((r[1] for r in prev_rows), default=0)
         next_generation = max_generation + 1
 
         self._progress(10, "Loading products with attributes…")
-        products = await self._load_products()
+        products = await self._load_products(market_segment=market_segment)
         if len(products) < 30:
             log.warning("design_trend_insufficient_products", count=len(products))
             return None
@@ -313,7 +330,9 @@ class DesignTrendEngine:
             return None
 
         self._progress(75, "Momentum vs last week…")
-        prior_by_name = await self._load_prior_trends_map(week_start)
+        # Scope momentum lookup to the same segment — Luxury Sage Green
+        # vs last week's Luxury Sage Green, not vs Mass Sage Green.
+        prior_by_name = await self._load_prior_trends_map(week_start, market_segment)
 
         self._progress(85, f"Persisting {len(raw_trends)} trends…")
         committed: list[Trend] = []
@@ -322,6 +341,7 @@ class DesignTrendEngine:
             if trend is None:
                 continue
             trend.generation = next_generation
+            trend.market_segment = market_segment  # None for unsegmented (legacy) runs
             self.db.add(trend)
             committed.append((trend, rt))
 
@@ -373,28 +393,43 @@ class DesignTrendEngine:
 
     # -- Data loading ---------------------------------------------------------
 
-    async def _load_products(self) -> list[dict]:
+    async def _load_products(self, market_segment: Optional[str] = None) -> list[dict]:
+        """Load active products (+ attrs + retailer) for the trend engine.
+        When market_segment is provided, only include products from
+        retailers in that tier. Retailers with market_segment IS NULL
+        are excluded entirely from segmented runs — buyer must classify
+        via the admin UI before their products enter the analysis."""
         fragrance_match = or_(*[
             cond
             for kw in FRAGRANCE_EXCLUSION_KEYWORDS
             for cond in (Product.name.ilike(f"%{kw}%"), Product.category.ilike(f"%{kw}%"))
         ])
+        conditions = [
+            Product.is_active == True,
+            ~fragrance_match,
+        ]
+        if market_segment is not None:
+            conditions.append(Retailer.market_segment == market_segment)
         result = await self.db.execute(
             select(Product, ProductAttributes, Retailer)
             .join(ProductAttributes, Product.id == ProductAttributes.product_id)
             .join(Retailer, Product.retailer_id == Retailer.id)
-            .where(and_(
-                Product.is_active == True,
-                ~fragrance_match,
-            ))
+            .where(and_(*conditions))
         )
         return [{"product": p, "attrs": a, "retailer": r} for p, a, r in result.all()]
 
-    async def _load_prior_trends_map(self, week_start: datetime) -> dict[str, Trend]:
+    async def _load_prior_trends_map(
+        self,
+        week_start: datetime,
+        market_segment: Optional[str] = None,
+    ) -> dict[str, Trend]:
         prior_week = week_start - timedelta(days=7)
-        rows = (await self.db.execute(
-            select(Trend).where(Trend.week_start == prior_week)
-        )).scalars().all()
+        q = select(Trend).where(Trend.week_start == prior_week)
+        if market_segment is not None:
+            q = q.where(Trend.market_segment == market_segment)
+        else:
+            q = q.where(Trend.market_segment.is_(None))
+        rows = (await self.db.execute(q)).scalars().all()
         # Case-insensitive key so momentum matches "Sage Green" -> "sage green"
         return {t.name.strip().lower(): t for t in rows}
 

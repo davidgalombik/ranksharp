@@ -188,16 +188,32 @@ def run_trend_analysis_task(self):
 
 
 @app.task(bind=True, queue="reports")
-def regenerate_trend_analysis_task(self):
-    """Re-run trend analysis adding a new generation (Try Again)."""
-    asyncio.run(_run_trend_analysis(self))
+def regenerate_trend_analysis_task(self, market_segment: str = None):
+    """Re-run trend analysis adding a new generation (Try Again).
+    If market_segment is provided ('luxury' / 'middle' / 'mass'), scopes
+    the run to that tier. Otherwise runs legacy unsegmented mode."""
+    asyncio.run(_run_trend_analysis(self, market_segment=market_segment))
 
 
-async def _run_trend_analysis(task):
+@app.task(bind=True, queue="reports")
+def regenerate_trend_analysis_all_segments_task(self):
+    """Run Luxury → Middle → Mass sequentially. Each tier is a separate
+    Claude analysis (~5 min each). Sequential (not parallel) to keep
+    the progress bar honest and avoid concurrent-Claude rate limiting."""
+    for i, segment in enumerate(("luxury", "middle", "mass"), 1):
+        try:
+            self.update_state(state="PROGRESS",
+                              meta={"pct": (i - 1) * 33,
+                                    "step": f"Running {segment.title()} tier ({i}/3)…"})
+        except Exception:
+            pass
+        asyncio.run(_run_trend_analysis(self, market_segment=segment))
+
+
+async def _run_trend_analysis(task, market_segment: str = None):
     """Run the design-first trend engine that produces single-dimension
     trends (specific colour / material / pattern / style / seasonal
-    signals). The legacy TrendEngine in analysis/trend_engine.py is kept
-    on disk for potential rollback but is no longer wired to any task."""
+    signals). market_segment scopes to a tier when provided."""
     from database.db import AsyncSessionLocal, async_engine
     from analysis.design_trend_engine import DesignTrendEngine
 
@@ -205,29 +221,57 @@ async def _run_trend_analysis(task):
 
     async with AsyncSessionLocal() as session:
         engine_instance = DesignTrendEngine(session, task=task)
-        report = await engine_instance.regenerate_analysis()
+        report = await engine_instance.regenerate_analysis(market_segment=market_segment)
         if report:
             log.info(
                 "trend_analysis_complete",
                 report_id=report.id,
                 generation_count=report.generation_count,
                 trends=len(report.trend_ids),
+                market_segment=market_segment or "unsegmented",
             )
 
 
 @app.task(bind=True, queue="reports")
-def run_fragrance_trend_analysis_task(self):
+def run_fragrance_trend_analysis_task(self, market_segment: str = None):
     """Start a NEW fragrance analysis run on the current catalogue snapshot.
     Each fresh run gets its own utcnow() timestamp. Manual trigger only —
-    fragrance is not scheduled, buyers kick it off after a scrape."""
-    asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=True))
+    fragrance is not scheduled, buyers kick it off after a scrape.
+    market_segment scopes to a tier when provided."""
+    asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=True, market_segment=market_segment))
 
 
 @app.task(bind=True, queue="reports")
-def regenerate_fragrance_trend_analysis_task(self):
+def regenerate_fragrance_trend_analysis_task(self, market_segment: str = None):
     """Try Again: append a new generation to the LATEST existing run so the
     buyer gets Claude's second attempt against the same catalogue snapshot."""
-    asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=False))
+    asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=False, market_segment=market_segment))
+
+
+@app.task(bind=True, queue="reports")
+def run_fragrance_trend_analysis_all_segments_task(self):
+    """Fresh run across all 3 tiers, sequential."""
+    for i, segment in enumerate(("luxury", "middle", "mass"), 1):
+        try:
+            self.update_state(state="PROGRESS",
+                              meta={"pct": (i - 1) * 33,
+                                    "step": f"Running {segment.title()} tier ({i}/3)…"})
+        except Exception:
+            pass
+        asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=True, market_segment=segment))
+
+
+@app.task(bind=True, queue="reports")
+def regenerate_fragrance_trend_analysis_all_segments_task(self):
+    """Try Again across all 3 tiers, sequential."""
+    for i, segment in enumerate(("luxury", "middle", "mass"), 1):
+        try:
+            self.update_state(state="PROGRESS",
+                              meta={"pct": (i - 1) * 33,
+                                    "step": f"Running {segment.title()} tier ({i}/3)…"})
+        except Exception:
+            pass
+        asyncio.run(_run_fragrance_trend_analysis(self, fresh_run=False, market_segment=segment))
 
 
 @app.task(bind=True, queue="reports")
@@ -409,7 +453,7 @@ async def _backfill_instore_recommendations():
         return {"trends": len(trends), "recommendations": total_recs}
 
 
-async def _run_fragrance_trend_analysis(task, fresh_run: bool = False):
+async def _run_fragrance_trend_analysis(task, fresh_run: bool = False, market_segment: str = None):
     from database.db import AsyncSessionLocal, async_engine
     from analysis.fragrance_trend_engine import FragranceTrendEngine
 
@@ -417,7 +461,9 @@ async def _run_fragrance_trend_analysis(task, fresh_run: bool = False):
 
     async with AsyncSessionLocal() as session:
         engine_instance = FragranceTrendEngine(session, task=task)
-        report = await engine_instance.regenerate_analysis(fresh_run=fresh_run)
+        report = await engine_instance.regenerate_analysis(
+            fresh_run=fresh_run, market_segment=market_segment,
+        )
         if report:
             log.info(
                 "fragrance_analysis_complete",
@@ -425,6 +471,7 @@ async def _run_fragrance_trend_analysis(task, fresh_run: bool = False):
                 generation_count=report.generation_count,
                 trends=len(report.trend_ids),
                 fresh_run=fresh_run,
+                market_segment=market_segment or "unsegmented",
             )
 
 

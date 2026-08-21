@@ -191,6 +191,7 @@ export interface Retailer {
   name: string;
   base_url: string;
   country: string;
+  market_segment?: "luxury" | "middle" | "mass" | null;
   tier: string;
   adapter_class: string;
   is_active: boolean;
@@ -204,17 +205,33 @@ export interface Retailer {
 
 export const api = {
   trends: {
-    list: (params?: { week_start?: string; category?: string; status?: string; generation?: string }) =>
+    list: (params?: { week_start?: string; category?: string; status?: string; generation?: string; market_segment?: string }) =>
       apiFetch<Trend[]>("/api/trends/", params as Record<string, string>),
     latest: () => apiFetch<Trend[]>("/api/trends/latest"),
     get: (id: number) => apiFetch<Trend>(`/api/trends/${id}`),
     // `generations` is the actual list of set numbers present that week
     // (e.g. [1, 3, 4] after Set 2 was deleted). Frontend renders tabs
     // from this list rather than assuming 1..generation_count.
-    weeks: () =>
+    // Segment (2026-08-08): omit for legacy unsegmented weeks; pass
+    // 'luxury'/'middle'/'mass' for the segmented view.
+    weeks: (market_segment?: string) =>
       apiFetch<{ week: string; generation_count: number; generations?: number[] }[]>(
-        "/api/trends/weeks/"
+        "/api/trends/weeks/",
+        market_segment ? { market_segment } : undefined,
       ),
+    // Cross-tier diffusion — rows are trend names merged across
+    // Luxury / Middle / Mass so buyers see where a trend has spread.
+    compare: (week_start?: string) =>
+      apiFetch<{
+        week: string | null;
+        rows: Array<{
+          name: string;
+          category: string;
+          luxury: { trend_id: number; product_count: number; retailer_count: number; momentum_pct: number | null } | null;
+          middle: { trend_id: number; product_count: number; retailer_count: number; momentum_pct: number | null } | null;
+          mass:   { trend_id: number; product_count: number; retailer_count: number; momentum_pct: number | null } | null;
+        }>;
+      }>("/api/trends/compare", week_start ? { week_start } : undefined),
     // Paginated live query of every product matching a trend — used by
     // the "View all N products" modal so the buyer can browse the full
     // set, not just the ~100 stored TrendExample rows.
@@ -227,11 +244,13 @@ export const api = {
           ...(params?.only_best_sellers ? { only_best_sellers: "true" } : {}),
         }
       ),
-    // Hard-delete a single Set N for the given week. Server returns
+    // Hard-delete a single Set N for the given week + segment. Server returns
     // {deleted_trends, deleted_examples, unlinked_backlinks, remaining_generations}.
-    deleteGeneration: async (week: string, generation: number) => {
+    // Omit market_segment for legacy unsegmented weeks.
+    deleteGeneration: async (week: string, generation: number, market_segment?: string) => {
+      const qs = market_segment ? `?market_segment=${market_segment}` : "";
       const res = await fetch(
-        `${API_BASE}/api/trends/week/${week}/generations/${generation}`,
+        `${API_BASE}/api/trends/week/${week}/generations/${generation}${qs}`,
         { method: "DELETE" }
       );
       if (!res.ok) {
@@ -255,8 +274,11 @@ export const api = {
     get: (id: number) => apiFetch<Report>(`/api/reports/${id}`),
     generate: () =>
       fetch(`${API_BASE}/api/reports/generate`, { method: "POST" }).then((r) => r.json()),
-    regenerate: () =>
-      fetch(`${API_BASE}/api/reports/regenerate`, { method: "POST" }).then((r) => r.json()),
+    // market_segment: 'luxury'|'middle'|'mass'|'all' or omit for legacy unsegmented.
+    regenerate: (market_segment?: string) => {
+      const qs = market_segment ? `?market_segment=${market_segment}` : "";
+      return fetch(`${API_BASE}/api/reports/regenerate${qs}`, { method: "POST" }).then((r) => r.json());
+    },
     clear: () =>
       fetch(`${API_BASE}/api/reports/clear`, { method: "DELETE" }).then((r) => r.json()),
     taskStatus: (taskId: string) =>
@@ -479,8 +501,12 @@ export const api = {
     itemImageUrl: (itemId: number) => `${API_BASE}/api/instore-catalogue/items/${itemId}/image`,
   },
   fragranceTrends: {
-    latestReport: (generation?: number) =>
-      apiFetch<FragranceTrendReport>("/api/fragrance-trends/latest", generation ? { generation: String(generation) } : undefined),
+    latestReport: (generation?: number, market_segment?: string) => {
+      const qs: Record<string, string> = {};
+      if (generation !== undefined) qs.generation = String(generation);
+      if (market_segment) qs.market_segment = market_segment;
+      return apiFetch<FragranceTrendReport>("/api/fragrance-trends/latest", Object.keys(qs).length ? qs : undefined);
+    },
     listReports: () => apiFetch<FragranceTrendReport[]>("/api/fragrance-trends/"),
     getTrend: (id: number) => apiFetch<FragranceTrend>(`/api/fragrance-trends/trend/${id}`),
     // Live paginated query of every fragrance product matching a trend's
@@ -506,16 +532,21 @@ export const api = {
         },
       ),
     // Fragrance is run-based since 2026-08-06. `week` is the run's ISO
-    // datetime string (misnamed for backward compat). `generations` is
-    // the actual set numbers in that run — frontend renders tabs from it.
-    weeks: () =>
+    // datetime string (misnamed for backward compat). Now segment-scoped
+    // (2026-08-08) — pass 'luxury'/'middle'/'mass' or omit for legacy.
+    weeks: (market_segment?: string) =>
       apiFetch<{ week: string; generation_count: number; generations?: number[] }[]>(
-        "/api/fragrance-trends/weeks/"
+        "/api/fragrance-trends/weeks/",
+        market_segment ? { market_segment } : undefined,
       ),
-    generate: () =>
-      fetch(`${API_BASE}/api/fragrance-trends/generate`, { method: "POST" }).then((r) => r.json()),
-    regenerate: () =>
-      fetch(`${API_BASE}/api/fragrance-trends/regenerate`, { method: "POST" }).then((r) => r.json()),
+    generate: (market_segment?: string) => {
+      const qs = market_segment ? `?market_segment=${market_segment}` : "";
+      return fetch(`${API_BASE}/api/fragrance-trends/generate${qs}`, { method: "POST" }).then((r) => r.json());
+    },
+    regenerate: (market_segment?: string) => {
+      const qs = market_segment ? `?market_segment=${market_segment}` : "";
+      return fetch(`${API_BASE}/api/fragrance-trends/regenerate${qs}`, { method: "POST" }).then((r) => r.json());
+    },
     clear: () =>
       fetch(`${API_BASE}/api/fragrance-trends/clear`, { method: "DELETE" }).then((r) => r.json()),
     // Hard-delete one Set within a specific run. runId is the
@@ -547,6 +578,20 @@ export const api = {
   },
   retailers: {
     list: () => apiFetch<Retailer[]>("/api/retailers/"),
+    // Market segmentation (2026-08-08). Pass null to un-classify.
+    setSegment: async (retailerId: number, market_segment: "luxury" | "middle" | "mass" | null) => {
+      const res = await fetch(`${API_BASE}/api/retailers/${retailerId}/segment`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ market_segment }),
+      });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<{ id: number; market_segment: string | null }>;
+    },
     scrapeAll: (skipAnalysis = false) =>
       fetch(`${API_BASE}/api/retailers/scrape-all?skip_analysis=${skipAnalysis}`, { method: "POST" }).then((r) => r.json()),
     scrape: (id: number, skipAnalysis = false) =>

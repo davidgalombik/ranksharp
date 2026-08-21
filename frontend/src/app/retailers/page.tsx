@@ -37,7 +37,7 @@ const COUNTRY_LABEL: Record<string, string> = {
   GB: "🇬🇧 United Kingdom",
 };
 
-type Tab = "retailers" | "progress";
+type Tab = "retailers" | "progress" | "segments";
 
 export default function RetailersPage() {
   const [tab, setTab] = useState<Tab>("retailers");
@@ -110,7 +110,7 @@ export default function RetailersPage() {
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-bold text-stone-900">Retailers</h1>
           <div className="flex rounded-lg border border-stone-200 overflow-hidden text-sm font-medium">
-            {(["retailers", "progress"] as Tab[]).map((t) => (
+            {(["retailers", "progress", "segments"] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -121,7 +121,9 @@ export default function RetailersPage() {
                     : "bg-white text-stone-600 hover:bg-stone-50"
                 )}
               >
-                {t === "retailers" ? "Overview" : "Scrape Progress"}
+                {t === "retailers" ? "Overview"
+                  : t === "progress" ? "Scrape Progress"
+                  : "Market Segments"}
               </button>
             ))}
           </div>
@@ -160,6 +162,17 @@ export default function RetailersPage() {
 
       {/* Scrape Progress tab */}
       {tab === "progress" && <ScrapeProgressPanel />}
+
+      {/* Market Segments tab — classify each retailer into Luxury / Middle /
+          Mass. Unclassified retailers are surfaced on top so operators can
+          resolve them one click. Segmented trend runs exclude retailers
+          with market_segment=null. */}
+      {tab === "segments" && (
+        <SegmentsPanel
+          retailers={retailers}
+          onUpdated={() => api.retailers.list().then(setRetailers)}
+        />
+      )}
 
       {/* Tables per country — Retailers tab only */}
       {tab === "retailers" && sortedCountries.map((country) => (
@@ -262,6 +275,162 @@ export default function RetailersPage() {
           </div>
         </section>
       ))}
+    </div>
+  );
+}
+
+
+// ── Market Segments panel ────────────────────────────────────────────────────
+//
+// Classify each retailer into Luxury / Middle / Mass. Unclassified retailers
+// are excluded from segmented trend runs, so we surface them at the top with
+// an amber banner so operators can resolve them one click.
+
+const _SEG_STYLES: Record<string, string> = {
+  luxury: "bg-amber-100 text-amber-800 border-amber-200",
+  middle: "bg-stone-100 text-stone-800 border-stone-200",
+  mass:   "bg-sky-100 text-sky-800 border-sky-200",
+};
+
+function SegmentsPanel({
+  retailers,
+  onUpdated,
+}: {
+  retailers: Retailer[];
+  onUpdated: () => void;
+}) {
+  const [saving, setSaving] = useState<number | null>(null);
+  const [error, setError] = useState<string>("");
+
+  async function setSegment(retailerId: number, value: string) {
+    setSaving(retailerId); setError("");
+    try {
+      await api.retailers.setSegment(
+        retailerId,
+        (value || null) as "luxury" | "middle" | "mass" | null,
+      );
+      onUpdated();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to update");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const unclassified = retailers.filter((r) => !r.market_segment);
+  const byTier: Record<string, Retailer[]> = { luxury: [], middle: [], mass: [] };
+  for (const r of retailers) {
+    if (r.market_segment && r.market_segment in byTier) {
+      byTier[r.market_segment].push(r);
+    }
+  }
+  const totals = {
+    luxury: byTier.luxury.length,
+    middle: byTier.middle.length,
+    mass: byTier.mass.length,
+    unclassified: unclassified.length,
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Summary */}
+      <div className="grid grid-cols-4 gap-3">
+        {[
+          { key: "luxury", label: "Luxury", value: totals.luxury },
+          { key: "middle", label: "Middle", value: totals.middle },
+          { key: "mass",   label: "Mass",   value: totals.mass   },
+          { key: "unclassified", label: "Unclassified", value: totals.unclassified },
+        ].map((s) => (
+          <div key={s.key} className={clsx(
+            "rounded-lg border p-3 text-center",
+            s.key === "unclassified" && s.value > 0
+              ? "bg-amber-50 border-amber-200"
+              : "bg-stone-50 border-stone-200",
+          )}>
+            <p className="text-[10px] uppercase tracking-wide text-stone-500">{s.label}</p>
+            <p className={clsx(
+              "text-2xl font-bold",
+              s.key === "unclassified" && s.value > 0 ? "text-amber-700" : "text-stone-800",
+            )}>{s.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {unclassified.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <p className="text-sm font-semibold text-amber-900">
+            ⚠️ {unclassified.length} retailer{unclassified.length !== 1 ? "s" : ""} unclassified
+          </p>
+          <p className="text-xs text-amber-700 mt-1">
+            Their products are excluded from segmented trend runs. Assign a tier below.
+          </p>
+        </div>
+      )}
+
+      {error && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          {error}
+        </p>
+      )}
+
+      {/* Full table */}
+      <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-stone-50 text-xs uppercase text-stone-500">
+            <tr>
+              <th className="text-left px-4 py-2">Retailer</th>
+              <th className="text-left px-4 py-2">Country</th>
+              <th className="text-right px-4 py-2">Products</th>
+              <th className="text-left px-4 py-2">Segment</th>
+              <th className="w-40"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...retailers]
+              .sort((a, b) => {
+                // Unclassified first, then alpha
+                if (!a.market_segment && b.market_segment) return -1;
+                if (a.market_segment && !b.market_segment) return 1;
+                return a.name.localeCompare(b.name);
+              })
+              .map((r) => (
+                <tr key={r.id} className={clsx(
+                  "border-t border-stone-100 hover:bg-stone-50/50",
+                  !r.market_segment && "bg-amber-50/40",
+                )}>
+                  <td className="px-4 py-2 font-medium text-stone-800">{r.name}</td>
+                  <td className="px-4 py-2 text-stone-500">{r.country}</td>
+                  <td className="px-4 py-2 text-right tabular-nums text-stone-600">
+                    {r.product_count.toLocaleString()}
+                  </td>
+                  <td className="px-4 py-2">
+                    {r.market_segment ? (
+                      <span className={clsx(
+                        "px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize",
+                        _SEG_STYLES[r.market_segment],
+                      )}>{r.market_segment}</span>
+                    ) : (
+                      <span className="text-amber-700 text-xs italic">Unclassified</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-2">
+                    <select
+                      value={r.market_segment || ""}
+                      disabled={saving === r.id}
+                      onChange={(e) => setSegment(r.id, e.target.value)}
+                      className="border border-stone-300 rounded-md px-2 py-1 text-xs bg-white w-full"
+                    >
+                      <option value="">— Unclassified —</option>
+                      <option value="luxury">Luxury</option>
+                      <option value="middle">Middle</option>
+                      <option value="mass">Mass</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

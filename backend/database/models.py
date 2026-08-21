@@ -43,6 +43,14 @@ class Retailer(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     country: Mapped[str] = mapped_column(String(10), default="US")
+    # Market tier this retailer sits in — drives segmented trend runs.
+    # 'luxury' (David Jones, Williams Sonoma, Bloomingville, ...) —
+    # aspirational signal, leads mainstream diffusion.
+    # 'middle' (Anthropologie, West Elm, Pottery Barn, ...) — bridge tier.
+    # 'mass' (Walmart, Target, IKEA, Kmart, ...) — mainstream adoption.
+    # NULL = unclassified; retailer's products are excluded from segmented
+    # trend runs until an operator assigns a tier via the retailer admin UI.
+    market_segment: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
     tier: Mapped[ScrapeTier] = mapped_column(SAEnum(ScrapeTier), nullable=False)
     adapter_class: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -207,12 +215,18 @@ class Trend(Base):
     price_tier: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # budget|mid|premium|luxury
 
     generation: Mapped[int] = mapped_column(Integer, default=1)  # which Try Again run produced this trend
+    # Market tier this trend belongs to — 'luxury' / 'middle' / 'mass'.
+    # NULL on legacy trends generated before segmentation (2026-08-08);
+    # segmented views auto-hide those. Enables per-tier momentum tracking
+    # and the cross-tier Compare-tiers diffusion view.
+    market_segment: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_trend_week_start", "week_start"),
         Index("ix_trend_category", "category"),
         Index("ix_trend_generation", "week_start", "generation"),
+        Index("ix_trend_segment", "week_start", "market_segment", "generation"),
     )
 
     examples: Mapped[list["TrendExample"]] = relationship(back_populates="trend")
@@ -420,12 +434,17 @@ class FragranceTrend(Base):
     # multiplied by ~9 trends per set → 30s+ tab switches).
     matching_product_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     generation: Mapped[int] = mapped_column(Integer, default=1)
+    # Market tier this fragrance trend belongs to — 'luxury' / 'middle' /
+    # 'mass'. NULL on legacy trends (pre-2026-08-08); segmented views
+    # auto-hide those.
+    market_segment: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_fragrance_trend_week_start", "week_start"),
         Index("ix_fragrance_trend_category", "category"),
         Index("ix_fragrance_trend_generation", "week_start", "generation"),
+        Index("ix_fragrance_trend_segment", "week_start", "market_segment", "generation"),
     )
 
     examples: Mapped[list["FragranceTrendExample"]] = relationship(back_populates="trend")

@@ -167,7 +167,11 @@ class FragranceTrendEngine:
     #  Main entry point                                                    #
     # ------------------------------------------------------------------ #
 
-    async def regenerate_analysis(self, fresh_run: bool = False) -> Optional[FragranceTrendReport]:
+    async def regenerate_analysis(
+        self,
+        fresh_run: bool = False,
+        market_segment: Optional[str] = None,
+    ) -> Optional[FragranceTrendReport]:
         """Generate a new set of fragrance trends.
 
         Fragrance is run-based, not weekly. `run_at` is a timestamp identifying
@@ -191,11 +195,16 @@ class FragranceTrendEngine:
         if fresh_run:
             run_at = datetime.utcnow()
         else:
-            latest_row = await self.db.execute(
-                select(FragranceTrend.week_start)
-                .order_by(FragranceTrend.week_start.desc())
-                .limit(1)
-            )
+            # Latest run for THIS segment — Luxury Try Again attaches to
+            # the last Luxury run, not to a Mass run that happened after.
+            latest_q = select(FragranceTrend.week_start).order_by(
+                FragranceTrend.week_start.desc()
+            ).limit(1)
+            if market_segment is not None:
+                latest_q = latest_q.where(FragranceTrend.market_segment == market_segment)
+            else:
+                latest_q = latest_q.where(FragranceTrend.market_segment.is_(None))
+            latest_row = await self.db.execute(latest_q)
             latest_run = latest_row.scalar_one_or_none()
             run_at = latest_run or datetime.utcnow()
 
@@ -203,22 +212,26 @@ class FragranceTrendEngine:
             "fragrance_regenerate_start",
             run_at=run_at.isoformat(),
             fresh_run=fresh_run,
+            market_segment=market_segment or "unsegmented",
         )
         self._progress(3, "Loading existing fragrance trends for exclusion…")
 
-        # Collect trend names across ALL generations for THIS run as exclusions.
-        # Scoped to run_at (not the whole "week") so a fresh run always starts
-        # with zero exclusions — buyers get Claude's best first-pass output.
-        prev_trends_result = await self.db.execute(
-            select(
-                FragranceTrend.name,
-                FragranceTrend.category,
-                FragranceTrend.dominant_colours,
-                FragranceTrend.dominant_materials,
-                FragranceTrend.scent_families,
-                FragranceTrend.generation,
-            ).where(FragranceTrend.week_start == run_at)
-        )
+        # Collect trend names across ALL generations for THIS run
+        # (scoped to segment) as exclusions. Fresh Luxury run starts
+        # with zero exclusions even if a Middle run happened earlier.
+        prev_q = select(
+            FragranceTrend.name,
+            FragranceTrend.category,
+            FragranceTrend.dominant_colours,
+            FragranceTrend.dominant_materials,
+            FragranceTrend.scent_families,
+            FragranceTrend.generation,
+        ).where(FragranceTrend.week_start == run_at)
+        if market_segment is not None:
+            prev_q = prev_q.where(FragranceTrend.market_segment == market_segment)
+        else:
+            prev_q = prev_q.where(FragranceTrend.market_segment.is_(None))
+        prev_trends_result = await self.db.execute(prev_q)
         prev_rows = prev_trends_result.all()
         previously_found_trends: list[dict] = [
             {
@@ -240,7 +253,7 @@ class FragranceTrendEngine:
         )
         self._progress(5, f"Generating set {next_generation} (excluding {len(previously_found_trends)} prior trends)…")
 
-        products = await self._load_fragrance_products()
+        products = await self._load_fragrance_products(market_segment=market_segment)
         if len(products) < self.MIN_CLUSTER_SIZE * 2:
             log.warning("fragrance_insufficient_products", count=len(products))
             return None
@@ -272,6 +285,7 @@ class FragranceTrendEngine:
             trend = self._build_trend_record(td, run_at, [], items_by_id)
             if trend:
                 trend.generation = next_generation
+                trend.market_segment = market_segment  # None for legacy runs
                 self.db.add(trend)
                 new_trends.append((trend, td))
 
@@ -344,7 +358,7 @@ class FragranceTrendEngine:
     #  Data loading                                                        #
     # ------------------------------------------------------------------ #
 
-    async def _load_fragrance_products(self) -> list[dict]:
+    async def _load_fragrance_products(self, market_segment: Optional[str] = None) -> list[dict]:
         """Load all active fragrance products with embeddings AND proper
         product images.
 
@@ -354,12 +368,20 @@ class FragranceTrendEngine:
 
         Image-quality gate skips products with placeholder or broken
         image URLs — buyers must never see a broken tile.
+
+        When market_segment is provided, restricts to retailers in that
+        tier — unclassified retailers are excluded from segmented runs.
         """
         from sqlalchemy import text as sa_text
         from analysis.fragrance_keywords import fragrance_regex_pattern
         from analysis.image_filter import image_ok_sql
 
         pattern = fragrance_regex_pattern()
+        segment_clause = ""
+        binds = {"frag_pattern": pattern}
+        if market_segment is not None:
+            segment_clause = "AND r.market_segment = :segment"
+            binds["segment"] = market_segment
         result = await self.db.execute(sa_text(f"""
             SELECT p.id AS product_id, r.id AS retailer_id
             FROM products p
@@ -370,7 +392,8 @@ class FragranceTrendEngine:
               AND (p.name ~* :frag_pattern
                    OR COALESCE(p.category, '') ~* :frag_pattern)
               AND {image_ok_sql()}
-        """), {"frag_pattern": pattern})
+              {segment_clause}
+        """), binds)
 
         ids = [(row.product_id, row.retailer_id) for row in result.all()]
         if not ids:

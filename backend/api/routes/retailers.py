@@ -18,6 +18,9 @@ class RetailerOut(BaseModel):
     name: str
     base_url: str
     country: str
+    # 'luxury' / 'middle' / 'mass' / None (unclassified). Drives which
+    # segmented trend runs this retailer's products participate in.
+    market_segment: Optional[str] = None
     tier: str
     adapter_class: str = ""
     is_active: bool
@@ -28,6 +31,10 @@ class RetailerOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SegmentUpdate(BaseModel):
+    market_segment: Optional[str] = None  # None clears the classification
 
 
 @router.get("/", response_model=list[RetailerOut])
@@ -67,6 +74,7 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
             name=r.name,
             base_url=r.base_url,
             country=r.country,
+            market_segment=r.market_segment,
             tier=r.tier.value,
             adapter_class=r.adapter_class or "",
             is_active=r.is_active,
@@ -76,6 +84,34 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
             last_scrape_status=last_job.status.value if last_job else None,
         ))
     return output
+
+
+_ALLOWED_SEGMENTS = {"luxury", "middle", "mass"}
+
+
+@router.patch("/{retailer_id}/segment", response_model=dict)
+async def update_market_segment(
+    retailer_id: int,
+    body: SegmentUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Set / clear the market_segment for a retailer.
+
+    Pass `{"market_segment": "luxury"}` to classify.
+    Pass `{"market_segment": null}` to un-classify (retailer drops out of
+    segmented trend runs until re-classified).
+    """
+    retailer = await db.get(Retailer, retailer_id)
+    if not retailer:
+        raise HTTPException(status_code=404, detail="Retailer not found")
+    if body.market_segment is not None and body.market_segment not in _ALLOWED_SEGMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"market_segment must be one of {sorted(_ALLOWED_SEGMENTS)} or null",
+        )
+    retailer.market_segment = body.market_segment
+    await db.commit()
+    return {"id": retailer.id, "market_segment": retailer.market_segment}
 
 
 @router.get("/{slug}/categories")

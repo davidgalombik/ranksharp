@@ -1,5 +1,5 @@
 """Report API routes."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
@@ -91,11 +91,39 @@ async def clear_all(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/regenerate")
-async def regenerate_report():
-    """Generate a fresh set of trends without deleting the previous generation (Try Again)."""
-    from tasks.analysis_tasks import regenerate_trend_analysis_task
-    task = regenerate_trend_analysis_task.apply_async(queue="reports")
-    return {"task_id": task.id, "status": "queued"}
+async def regenerate_report(
+    market_segment: Optional[str] = Query(
+        default=None,
+        description="'luxury' / 'middle' / 'mass' — scopes to that tier. "
+                    "'all' fires 3 sequential runs (Luxury → Middle → Mass). "
+                    "Omit for legacy unsegmented run.",
+    ),
+):
+    """Regenerate trends.
+
+    Segment routing:
+      * `?market_segment=all`  → runs Luxury, Middle, Mass sequentially
+      * `?market_segment=luxury` (or middle / mass) → runs just that tier
+      * omitted                 → legacy unsegmented run (kept for backward compat)
+    """
+    from tasks.analysis_tasks import (
+        regenerate_trend_analysis_task,
+        regenerate_trend_analysis_all_segments_task,
+    )
+    if market_segment == "all":
+        task = regenerate_trend_analysis_all_segments_task.apply_async(queue="reports")
+    elif market_segment in ("luxury", "middle", "mass"):
+        task = regenerate_trend_analysis_task.apply_async(
+            queue="reports", args=[market_segment],
+        )
+    elif market_segment is None:
+        task = regenerate_trend_analysis_task.apply_async(queue="reports")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="market_segment must be 'luxury', 'middle', 'mass', 'all', or omitted",
+        )
+    return {"task_id": task.id, "status": "queued", "market_segment": market_segment}
 
 
 @router.get("/task/{task_id}")

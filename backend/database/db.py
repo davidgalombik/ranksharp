@@ -224,6 +224,21 @@ async def init_db():
              _col("fragrance_trends", "filter_keywords")),
             ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS matching_product_count INTEGER",
              _col("fragrance_trends", "matching_product_count")),
+            # Market segmentation (2026-08-08). Retailers get classified
+            # into luxury / middle / mass; trends persist their segment
+            # so we can run analysis per-tier and show the diffusion view.
+            ("ALTER TABLE retailers ADD COLUMN IF NOT EXISTS market_segment VARCHAR(20)",
+             _col("retailers", "market_segment")),
+            ("CREATE INDEX IF NOT EXISTS ix_retailers_market_segment ON retailers (market_segment)",
+             _idx("ix_retailers_market_segment")),
+            ("ALTER TABLE trends ADD COLUMN IF NOT EXISTS market_segment VARCHAR(20)",
+             _col("trends", "market_segment")),
+            ("CREATE INDEX IF NOT EXISTS ix_trend_segment ON trends (week_start, market_segment, generation)",
+             _idx("ix_trend_segment")),
+            ("ALTER TABLE fragrance_trends ADD COLUMN IF NOT EXISTS market_segment VARCHAR(20)",
+             _col("fragrance_trends", "market_segment")),
+            ("CREATE INDEX IF NOT EXISTS ix_fragrance_trend_segment ON fragrance_trends (week_start, market_segment, generation)",
+             _idx("ix_fragrance_trend_segment")),
             # Ranksharp Catalogue (2026-08-08) — products Ranksharp has
             # sold to ALDI (and, later, other customers). Sold as one
             # product row + many sale rows so a SKU can carry multiple
@@ -483,3 +498,132 @@ async def seed_retailers():
                     if key in config:
                         setattr(existing, key, config[key])
         await session.commit()
+
+    # Classify retailers into market segments — idempotent. Only sets
+    # market_segment if it's currently NULL, so operator changes via the
+    # admin UI aren't clobbered on restart. See RETAILER_SEGMENT_MAP.
+    await classify_retailer_segments()
+
+
+# ── Retailer segmentation (2026-08-08) ────────────────────────────────────────
+#
+# Buyer-supplied classification: Luxury / Middle / Mass. Segments trend
+# analysis runs by tier — a trend in Luxury this week is a leading
+# indicator for Mass adoption 6-12 months later.
+#
+# Match strategy: exact match on Retailer.name (case-insensitive), then
+# a case-insensitive prefix match as fallback (handles minor drift like
+# "Mud Pie" (mapping) vs "Mud Pie USA Store" (DB row)). Retailers that
+# don't match anything stay NULL — surfaced on the admin UI so operators
+# can classify one-click.
+
+RETAILER_SEGMENT_MAP: dict[str, str] = {
+    # Luxury
+    "Bloomingville": "luxury",
+    "Cailini Coastal": "luxury",
+    "Casa and Beyond": "luxury",
+    "David Jones": "luxury",
+    "Hawkins New York": "luxury",
+    "Lenox": "luxury",
+    "Oliver Bonas": "luxury",
+    "Williams Sonoma": "luxury",
+    # Middle
+    "Anthropologie": "middle",
+    "Crate & Barrel": "middle",
+    "Design Stuff": "middle",
+    "Dusk": "middle",
+    "Etsy": "middle",
+    "H&M Home": "middle",
+    "Howards Storage World": "middle",
+    "Macy's": "middle",
+    "Mud Pie": "middle",
+    "Myer": "middle",
+    "Next AU": "middle",
+    "Next UK": "middle",
+    "Original Home": "middle",
+    "Pottery Barn": "middle",
+    "Pottery Barn AU": "middle",
+    "Pottery Barn Baby": "middle",
+    "Pottery Barn Kids": "middle",
+    "Pottery Barn Teens": "middle",
+    "S'well": "middle",
+    "Some Design Store": "middle",
+    "The Container Store": "middle",
+    "Uncharted": "middle",
+    "Wayfair": "middle",
+    "West Elm": "middle",
+    "World Market": "middle",
+    # Mass
+    "Amazon US": "mass",
+    "At Home": "mass",
+    "Big W": "mass",
+    "Bunnings": "mass",
+    "DW Home Candles": "mass",
+    "House": "mass",
+    "IKEA AU": "mass",
+    "IKEA US": "mass",
+    "Kmart AU": "mass",
+    "Marshalls": "mass",
+    "Meijer": "mass",
+    "Officeworks": "mass",
+    "Target AU": "mass",
+    "Target US": "mass",
+    "Temu": "mass",
+    "The Reject Shop": "mass",
+    "TJ Maxx": "mass",
+    "Walmart US": "mass",
+}
+
+
+async def classify_retailer_segments() -> dict:
+    """Assign market_segment to Retailer rows from RETAILER_SEGMENT_MAP.
+
+    Only writes when market_segment IS NULL — preserves operator overrides
+    made through the admin UI. Returns a summary dict for logging.
+    """
+    from database.models import Retailer
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Retailer))
+        retailers = result.scalars().all()
+
+        # Case-insensitive index of mapping keys.
+        by_lower = {name.lower(): seg for name, seg in RETAILER_SEGMENT_MAP.items()}
+
+        matched = 0
+        already_set = 0
+        unclassified: list[str] = []
+        for r in retailers:
+            if r.market_segment:
+                already_set += 1
+                continue
+            name_lc = r.name.lower()
+            # Exact case-insensitive match.
+            seg = by_lower.get(name_lc)
+            if not seg:
+                # Fallback: prefix match — 'mud pie' matches 'mud pie usa store'
+                for k, v in by_lower.items():
+                    if name_lc.startswith(k):
+                        seg = v
+                        break
+            if not seg:
+                # And the reverse — 'mud pie' in the DB, 'mud pie usa store' in mapping
+                for k, v in by_lower.items():
+                    if k.startswith(name_lc):
+                        seg = v
+                        break
+            if seg:
+                r.market_segment = seg
+                matched += 1
+            else:
+                unclassified.append(r.name)
+        await session.commit()
+    import structlog
+    structlog.get_logger().info(
+        "retailer_segments_classified",
+        matched=matched, already_set=already_set,
+        unclassified_count=len(unclassified),
+        unclassified=unclassified[:20],
+    )
+    return {"matched": matched, "already_set": already_set,
+            "unclassified": unclassified}
