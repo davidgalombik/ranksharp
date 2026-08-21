@@ -371,26 +371,26 @@ async def list_items(
 async def list_months(db: AsyncSession = Depends(get_db)):
     """Distinct upload months (YYYY-MM) that have at least one image.
     Powers the Month filter dropdown so buyers see only months with data.
-    Sorted newest first."""
-    # date_trunc('month', created_at) returns the first-of-month for each
-    # image; grouping collapses duplicates. Postgres-native, no per-row
-    # Python work.
+    Sorted newest first.
+
+    Uses Postgres to_char() so the result is already a 'YYYY-MM' string
+    on the wire — no timezone / type-ambiguity headaches on the Python
+    side (an earlier version used date_trunc + .strftime which 500'd
+    when SQLAlchemy handed back a value strftime couldn't format).
+    """
+    month_expr = func.to_char(InStoreCatalogueImage.created_at, "YYYY-MM")
     result = await db.execute(
         select(
-            func.date_trunc("month", InStoreCatalogueImage.created_at).label("month"),
+            month_expr.label("month"),
             func.count(InStoreCatalogueImage.id).label("count"),
         )
-        .group_by(func.date_trunc("month", InStoreCatalogueImage.created_at))
-        .order_by(desc(func.date_trunc("month", InStoreCatalogueImage.created_at)))
+        .where(InStoreCatalogueImage.created_at.isnot(None))
+        .group_by(month_expr)
+        .order_by(desc(month_expr))
     )
     return {
         "months": [
-            {
-                # Serialise as 'YYYY-MM' — the shape the frontend passes back
-                # as the `month` query param on the list endpoints.
-                "month": row.month.strftime("%Y-%m") if row.month else None,
-                "count": int(row.count),
-            }
+            {"month": row.month, "count": int(row.count)}
             for row in result.all() if row.month
         ]
     }
