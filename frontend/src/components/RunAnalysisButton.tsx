@@ -6,7 +6,14 @@ import clsx from "clsx";
 
 type Phase = "idle" | "running" | "done" | "error";
 
-export default function RunAnalysisButton({ onSuccess }: { onSuccess?: () => void } = {}) {
+export default function RunAnalysisButton({
+  onSuccess,
+  segment,
+}: {
+  onSuccess?: () => void;
+  /** 'luxury' | 'middle' | 'mass' — pins this fresh run to a tier. Omit for legacy unsegmented. */
+  segment?: string;
+} = {}) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("idle");
   const [pct, setPct] = useState(0);
@@ -31,7 +38,7 @@ export default function RunAnalysisButton({ onSuccess }: { onSuccess?: () => voi
 
     let taskId: string;
     try {
-      const res = await api.reports.generate();
+      const res = await api.reports.generate(segment);
       taskId = res.task_id;
     } catch {
       setPhase("error");

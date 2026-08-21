@@ -73,11 +73,38 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/generate")
-async def generate_report():
-    """Manually trigger the weekly trend analysis + report generation."""
-    from tasks.analysis_tasks import run_trend_analysis_task
-    task = run_trend_analysis_task.apply_async(queue="reports")
-    return {"task_id": task.id, "status": "queued"}
+async def generate_report(
+    market_segment: Optional[str] = Query(
+        default=None,
+        description="'luxury' / 'middle' / 'mass' — scopes to that tier. "
+                    "'all' fires 3 sequential runs. Omit for legacy unsegmented.",
+    ),
+):
+    """Trigger a trend analysis run. Same segment routing as /regenerate —
+    functionally these two endpoints do the same thing (both call
+    _run_trend_analysis which uses max_generation+1). Kept separate for
+    backward compat with existing button labels."""
+    from tasks.analysis_tasks import (
+        run_trend_analysis_task,
+        regenerate_trend_analysis_all_segments_task,
+        regenerate_trend_analysis_task,
+    )
+    if market_segment == "all":
+        task = regenerate_trend_analysis_all_segments_task.apply_async(queue="reports")
+    elif market_segment in ("luxury", "middle", "mass"):
+        # Reuse the regenerate task since it takes market_segment; the
+        # engine's max_generation+1 logic handles both fresh and repeat.
+        task = regenerate_trend_analysis_task.apply_async(
+            queue="reports", args=[market_segment],
+        )
+    elif market_segment is None:
+        task = run_trend_analysis_task.apply_async(queue="reports")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="market_segment must be 'luxury', 'middle', 'mass', 'all', or omitted",
+        )
+    return {"task_id": task.id, "status": "queued", "market_segment": market_segment}
 
 
 @router.delete("/clear")

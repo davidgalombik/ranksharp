@@ -272,9 +272,11 @@ export const api = {
     list: () => apiFetch<Report[]>("/api/reports/"),
     latest: () => apiFetch<Report>("/api/reports/latest"),
     get: (id: number) => apiFetch<Report>(`/api/reports/${id}`),
-    generate: () =>
-      fetch(`${API_BASE}/api/reports/generate`, { method: "POST" }).then((r) => r.json()),
     // market_segment: 'luxury'|'middle'|'mass'|'all' or omit for legacy unsegmented.
+    generate: (market_segment?: string) => {
+      const qs = market_segment ? `?market_segment=${market_segment}` : "";
+      return fetch(`${API_BASE}/api/reports/generate${qs}`, { method: "POST" }).then((r) => r.json());
+    },
     regenerate: (market_segment?: string) => {
       const qs = market_segment ? `?market_segment=${market_segment}` : "";
       return fetch(`${API_BASE}/api/reports/regenerate${qs}`, { method: "POST" }).then((r) => r.json());

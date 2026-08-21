@@ -15,5 +15,5 @@ export default function TrendsActionButton({ initialHasAnalysis, segment }: Prop
   const [hasAnalysis, setHasAnalysis] = useState(initialHasAnalysis);
 
   if (hasAnalysis) return <TryAgainTrendsButton segment={segment} />;
-  return <RunAnalysisButton onSuccess={() => setHasAnalysis(true)} />;
+  return <RunAnalysisButton segment={segment} onSuccess={() => setHasAnalysis(true)} />;
 }
