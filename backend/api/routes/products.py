@@ -153,6 +153,7 @@ async def search_products(
     q: Optional[str] = None,
     country: Optional[str] = None,
     retailer: Optional[str] = None,
+    market_segment: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
@@ -193,6 +194,8 @@ async def search_products(
         stmt = stmt.where(country_clause)
     if retailer:
         stmt = stmt.where(Retailer.slug == retailer)
+    if market_segment:
+        stmt = stmt.where(Retailer.market_segment == market_segment)
     if category:
         stmt = stmt.where(Product.category == category)
     if subcategory:
@@ -228,6 +231,8 @@ async def search_products(
         count_stmt = count_stmt.where(country_clause)
     if retailer:
         count_stmt = count_stmt.where(Retailer.slug == retailer)
+    if market_segment:
+        count_stmt = count_stmt.where(Retailer.market_segment == market_segment)
     if category:
         count_stmt = count_stmt.where(Product.category == category)
     if subcategory:
@@ -273,6 +278,7 @@ def _apply_current_filters(
     q: Optional[str],
     country: Optional[str],
     retailer: Optional[str],
+    market_segment: Optional[str],
     category: Optional[str],
     subcategory: Optional[str],
     product_segment: Optional[str],
@@ -302,6 +308,8 @@ def _apply_current_filters(
             stmt = stmt.where(country_clause)
     if retailer and "retailer" not in exclude:
         stmt = stmt.where(Retailer.slug == retailer)
+    if market_segment and "market_segment" not in exclude:
+        stmt = stmt.where(Retailer.market_segment == market_segment)
     if category and "category" not in exclude:
         stmt = stmt.where(Product.category == category)
     if subcategory and "subcategory" not in exclude:
@@ -330,6 +338,7 @@ async def current_product_facets(
     q: Optional[str] = None,
     country: Optional[str] = None,
     retailer: Optional[str] = None,
+    market_segment: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
@@ -345,7 +354,8 @@ async def current_product_facets(
     """Count per filter value for the Current Products page, so zero-reach
     options can be hidden in the UI."""
     kwargs = dict(
-        q=q, country=country, retailer=retailer, category=category, subcategory=subcategory,
+        q=q, country=country, retailer=retailer, market_segment=market_segment,
+        category=category, subcategory=subcategory,
         product_segment=product_segment,
         season=season, room=room,
         min_price=min_price, max_price=max_price,
@@ -448,6 +458,7 @@ def _apply_historical_filters(
     q: Optional[str],
     country: Optional[str],
     retailer: Optional[str],
+    market_segment: Optional[str],
     category: Optional[str],
     subcategory: Optional[str],
     product_segment: Optional[str],
@@ -478,6 +489,8 @@ def _apply_historical_filters(
             stmt = stmt.where(country_clause)
     if retailer and "retailer" not in exclude:
         stmt = stmt.where(Retailer.slug == retailer)
+    if market_segment and "market_segment" not in exclude:
+        stmt = stmt.where(Retailer.market_segment == market_segment)
     if category and "category" not in exclude:
         stmt = stmt.where(Product.category == category)
     if subcategory and "subcategory" not in exclude:
@@ -508,6 +521,7 @@ async def historical_product_facets(
     q: Optional[str] = None,
     country: Optional[str] = None,
     retailer: Optional[str] = None,
+    market_segment: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
@@ -524,7 +538,8 @@ async def historical_product_facets(
     """Count per filter value for the Historical Products page so zero-reach
     options can be hidden in the UI (mirrors the Online Products facets)."""
     kwargs = dict(
-        q=q, country=country, retailer=retailer, category=category, subcategory=subcategory,
+        q=q, country=country, retailer=retailer, market_segment=market_segment,
+        category=category, subcategory=subcategory,
         product_segment=product_segment, season=season, room=room,
         min_price=min_price, max_price=max_price,
         best_seller=best_seller, has_patent=has_patent, is_new=is_new,
@@ -615,6 +630,7 @@ async def search_historical_products(
     q: Optional[str] = None,
     country: Optional[str] = None,
     retailer: Optional[str] = None,
+    market_segment: Optional[str] = None,
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     product_segment: Optional[str] = None,
@@ -638,7 +654,8 @@ async def search_historical_products(
     )
     base = _apply_historical_filters(
         base,
-        q=q, country=country, retailer=retailer, category=category, subcategory=subcategory,
+        q=q, country=country, retailer=retailer, market_segment=market_segment,
+        category=category, subcategory=subcategory,
         product_segment=product_segment, season=season, room=room,
         min_price=min_price, max_price=max_price,
         best_seller=best_seller, has_patent=has_patent, is_new=is_new,

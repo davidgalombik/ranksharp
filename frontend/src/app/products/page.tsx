@@ -163,6 +163,7 @@ export default function ProductsPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [country, setCountry] = useState("");
+  const [marketSegment, setMarketSegment] = useState("");
   const [retailer, setRetailer] = useState("");
   const [category, setCategory] = useState("");
   const [season, setSeason] = useState("");
@@ -172,7 +173,7 @@ export default function ProductsPage() {
   const [bestSellerOnly, setBestSellerOnly] = useState(false);
   const [patentOnly, setPatentOnly] = useState(false);
   const [newOnly, setNewOnly] = useState(false);
-  const [retailers, setRetailers] = useState<{ slug: string; name: string; country: string }[]>([]);
+  const [retailers, setRetailers] = useState<{ slug: string; name: string; country: string; market_segment?: string | null }[]>([]);
   const [availableCategories, setAvailableCategories] = useState<string[]>([]);
   const [subcategory, setSubcategory] = useState("");
   const [productSegment, setProductSegment] = useState("");
@@ -248,12 +249,19 @@ export default function ProductsPage() {
   useEffect(() => {
     setRetailer("");
   }, [country]);
+  // Same for market segment — picking Luxury / Middle / Mass narrows the
+  // retailer dropdown, so any previous retailer selection may no longer
+  // be reachable.
+  useEffect(() => {
+    setRetailer("");
+  }, [marketSegment]);
 
   const fetchProducts = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (country) params.set("country", country);
+    if (marketSegment) params.set("market_segment", marketSegment);
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
     if (subcategory) params.set("subcategory", subcategory);
@@ -278,11 +286,11 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, country, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
+  }, [debouncedSearch, country, marketSegment, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly, page]);
 
   useEffect(() => {
     setPage(0);
-  }, [debouncedSearch, country, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
+  }, [debouncedSearch, country, marketSegment, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, newOnly]);
 
   useEffect(() => {
     fetchProducts();
@@ -294,6 +302,7 @@ export default function ProductsPage() {
     const params = new URLSearchParams();
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (country) params.set("country", country);
+    if (marketSegment) params.set("market_segment", marketSegment);
     if (retailer) params.set("retailer", retailer);
     if (category) params.set("category", category);
     if (subcategory) params.set("subcategory", subcategory);
@@ -309,9 +318,9 @@ export default function ProductsPage() {
       .then((r) => r.json())
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, country, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
+  }, [debouncedSearch, country, marketSegment, retailer, category, subcategory, productSegment, season, room, minPrice, maxPrice, bestSellerOnly, patentOnly, newOnly]);
 
-  const hasFilters = debouncedSearch || country || retailer || category || subcategory || productSegment || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
+  const hasFilters = debouncedSearch || country || marketSegment || retailer || category || subcategory || productSegment || season || room || minPrice || maxPrice || bestSellerOnly || patentOnly || newOnly;
 
   return (
     <div className="space-y-5">
@@ -349,7 +358,22 @@ export default function ProductsPage() {
             ))}
           </select>
 
-          {/* Retailer — narrows to selected country when set */}
+          {/* Market tier — narrows the retailer dropdown to that segment.
+              Buyer's Luxury/Middle/Mass classification from the trends
+              admin, applied here so the Products page filters the same
+              way. */}
+          <select
+            value={marketSegment}
+            onChange={(e) => setMarketSegment(e.target.value)}
+            className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
+          >
+            <option value="">All tiers</option>
+            <option value="luxury">Luxury</option>
+            <option value="middle">Middle</option>
+            <option value="mass">Mass</option>
+          </select>
+
+          {/* Retailer — narrows to selected country AND tier when set */}
           <select
             value={retailer}
             onChange={(e) => setRetailer(e.target.value)}
@@ -358,6 +382,7 @@ export default function ProductsPage() {
             <option value="">All retailers</option>
             {retailers
               .filter((r) => !country || retailerInBucket(r.country, country))
+              .filter((r) => !marketSegment || r.market_segment === marketSegment)
               .map((r) => (
                 <option key={r.slug} value={r.slug}>{r.name}</option>
               ))}
@@ -533,7 +558,7 @@ export default function ProductsPage() {
 
         {hasFilters && (
           <button
-            onClick={() => { setSearch(""); setCountry(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+            onClick={() => { setSearch(""); setCountry(""); setMarketSegment(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
             className="mt-2 text-xs text-stone-500 hover:text-stone-900 underline"
           >
             Clear all filters
@@ -578,7 +603,7 @@ export default function ProductsPage() {
             <>
               <p className="font-medium">No products match your filters</p>
               <button
-                onClick={() => { setSearch(""); setCountry(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
+                onClick={() => { setSearch(""); setCountry(""); setMarketSegment(""); setRetailer(""); setCategory(""); setSubcategory(""); setProductSegment(""); setSeason(""); setRoom(""); setMinPrice(""); setMaxPrice(""); setBestSellerOnly(false); setPatentOnly(false); setNewOnly(false); }}
                 className="mt-2 text-sm text-stone-600 underline hover:text-stone-900"
               >
                 Clear filters
