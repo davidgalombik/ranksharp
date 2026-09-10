@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useSearchParams, usePathname, useRouter } from "next/navigation";
 import clsx from "clsx";
 import InStoreRecommendationsModal from "@/components/InStoreRecommendationsModal";
 
@@ -289,7 +290,11 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function InStoreTrendsPage() {
+function InStoreTrendsPageInner() {
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
+
   const [report, setReport] = useState<InStoreReport | null>(null);
   const [reports, setReports] = useState<InStoreReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -297,17 +302,24 @@ export default function InStoreTrendsPage() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [categoryFilter, setCategoryFilter] = useState<string>("");
-  // Time horizon to analyse. null = all time. Default 3 months so a Run
-  // reflects "what's on shelves right now" rather than every photo ever
-  // uploaded. Persisted per-session; changing it does NOT auto-rerun —
-  // the buyer picks a window then clicks Run/Try Again.
-  // Calendar-month horizon (2026-09-10 semantics):
-  //   1  = previous full calendar month only (Aug when today is Sep)
-  //   3+ = trailing N calendar months INCLUDING current (Jul+Aug+Sep for 3)
-  //   null = all time
-  // Default 3 so a fresh run reflects current shelves rather than the
-  // full catalogue history.
-  const [monthsWindow, setMonthsWindow] = useState<number | null>(3);
+
+  // Time horizon lives in the URL (?window=3) so refresh keeps it and
+  // deep links work. Calendar semantics (see engine _month_range):
+  //   0    = current month only ("This month")
+  //   1    = previous full calendar month only ("Last month")
+  //   3+   = trailing N calendar months including current
+  //   "all"= no filter (map from null)
+  // Default 3 on first visit so a fresh run reflects current shelves.
+  const rawWindow = searchParams.get("window");
+  const monthsWindow: number | null =
+    rawWindow === "all" ? null
+    : rawWindow != null && /^\d+$/.test(rawWindow) ? parseInt(rawWindow, 10)
+    : 3;
+  const setMonthsWindow = (v: number | null) => {
+    const p = new URLSearchParams(searchParams.toString());
+    p.set("window", v === null ? "all" : String(v));
+    router.replace(`${pathname}?${p.toString()}`, { scroll: false });
+  };
 
   const loadLatest = useCallback(async () => {
     setLoading(true);
@@ -594,5 +606,16 @@ export default function InStoreTrendsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// useSearchParams() requires a Suspense boundary during static
+// prerender, otherwise the Vercel build fails
+// ("useSearchParams() should be wrapped in a suspense boundary").
+export default function InStoreTrendsPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-sm text-stone-400">Loading in-store trends…</div>}>
+      <InStoreTrendsPageInner />
+    </Suspense>
   );
 }
