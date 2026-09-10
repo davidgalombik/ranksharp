@@ -339,7 +339,8 @@ function InStoreTrendsPageInner() {
   };
 
   // Which Set to display. Also URL-driven so refreshes stick and
-  // deep links work. Undefined = the backend picks the latest.
+  // deep links work. Undefined = auto-resolve to the latest Set that
+  // matches the current pill horizon.
   const rawSet = searchParams.get("set");
   const activeSet: number | undefined =
     rawSet != null && /^\d+$/.test(rawSet) ? parseInt(rawSet, 10) : undefined;
@@ -349,17 +350,25 @@ function InStoreTrendsPageInner() {
     router.push(`${pathname}?${p.toString()}`);
   };
 
-  const loadLatest = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  // Sets whose analysed-horizon matches the current pill. The pill
+  // now filters the view: pick "Last month" and you see only Sets that
+  // were actually run with Last month as the horizon.
+  const matchingSets = sets.filter((s) => s.months_window === monthsWindow);
+  // The Set we should fetch. If the URL points to a matching Set, honor
+  // it (deep link). Otherwise, latest matching Set. If none match, undefined
+  // → empty state ("no analysis for this horizon yet").
+  const effectiveGen: number | undefined = (() => {
+    if (activeSet != null && matchingSets.some((s) => s.generation === activeSet)) {
+      return activeSet;
+    }
+    return matchingSets.length ? matchingSets[matchingSets.length - 1].generation : undefined;
+  })();
+
+  const loadMeta = useCallback(async () => {
+    // Sets list + report list — needed to decide what to fetch below.
+    // Kept separate from the specific-Set fetch so a pill click that
+    // changes the horizon doesn't force re-downloading /sets.
     try {
-      const qs = activeSet != null ? `?generation=${activeSet}` : "";
-      const res = await fetch(`${API_BASE}/api/instore-trends/latest${qs}`, { cache: "no-store" });
-      if (res.status === 404) {
-        setReport(null);
-      } else if (res.ok) {
-        setReport(await res.json());
-      }
       const [listRes, setsRes] = await Promise.all([
         fetch(`${API_BASE}/api/instore-trends/?limit=20`, { cache: "no-store" }),
         fetch(`${API_BASE}/api/instore-trends/sets`, { cache: "no-store" }),
@@ -368,12 +377,40 @@ function InStoreTrendsPageInner() {
       if (setsRes.ok) setSets(await setsRes.json());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const loadReport = useCallback(async (gen: number | undefined) => {
+    setLoading(true);
+    setError(null);
+    try {
+      if (gen == null) {
+        // Nothing to show — no Set at this horizon.
+        setReport(null);
+        return;
+      }
+      const res = await fetch(
+        `${API_BASE}/api/instore-trends/latest?generation=${gen}`,
+        { cache: "no-store" },
+      );
+      if (res.status === 404) setReport(null);
+      else if (res.ok) setReport(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, [activeSet]);
+  }, []);
 
-  useEffect(() => { loadLatest(); }, [loadLatest]);
+  // Convenience refresh after a run / delete completes.
+  const loadLatest = useCallback(async () => {
+    await loadMeta();
+    // loadReport will pick up automatically via the effect below once
+    // sets updates, so no direct call here.
+  }, [loadMeta]);
+
+  useEffect(() => { loadMeta(); }, [loadMeta]);
+  useEffect(() => { loadReport(effectiveGen); }, [loadReport, effectiveGen]);
 
   // Poll the running task
   useEffect(() => {
@@ -414,6 +451,10 @@ function InStoreTrendsPageInner() {
 
   const deleteSet = async (generation: number) => {
     if (!report) return;
+    // The 409 guard on the backend refuses when the delete would empty
+    // the WHOLE report across horizons, so it's fine to delete a lone
+    // matching Set as long as another Set exists elsewhere. Keep this
+    // client-side alert only for the truly-last-Set case.
     if (sets.length <= 1) {
       alert("Can't delete the only remaining Set — run a new analysis first, or clear all.");
       return;
@@ -551,15 +592,15 @@ function InStoreTrendsPageInner() {
           with the horizon that Set was analysed with. ✨ marks the
           highest generation number; × deletes with confirm. Hidden
           when there's only one Set (nothing to switch between). */}
-      {!running && sets.length > 1 && report && (() => {
-        const latestGen = sets[sets.length - 1].generation;
-        const currentGen = activeSet ?? latestGen;
+      {!running && matchingSets.length > 1 && report && (() => {
+        const latestGen = matchingSets[matchingSets.length - 1].generation;
+        const currentGen = effectiveGen ?? latestGen;
         return (
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
-              Sets:
+              Sets ({shortWindow(monthsWindow)}):
             </span>
-            {sets.map((s) => {
+            {matchingSets.map((s) => {
               const active = s.generation === currentGen;
               const isLatest = s.generation === latestGen;
               return (
@@ -667,15 +708,32 @@ function InStoreTrendsPageInner() {
         </div>
       )}
 
-      {/* Report summary */}
+      {/* Report summary — surfaces WHEN the report was generated and
+          WHAT time period it analysed, since those are the two facts
+          buyers most often want to verify at a glance. The report row's
+          `week_start` is a bucket key (the Monday of the run's week)
+          and misleading as a date, so we use `created_at` instead. */}
       {report && (
-        <div className="bg-white border border-stone-200 rounded-xl p-5">
-          <p className="text-xs text-stone-400 mb-1">
-            Report · {new Date(report.week_start).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
-            {" · "}{report.total_items_analysed.toLocaleString()} items analysed · {report.trend_count} trends
-          </p>
+        <div className="bg-white border border-stone-200 rounded-xl p-5 space-y-2">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            <span className="text-stone-500">
+              <span className="text-stone-400">Date report run: </span>
+              <span className="font-medium text-stone-900">
+                {new Date(report.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+              </span>
+            </span>
+            <span className="text-stone-500">
+              <span className="text-stone-400">Time period: </span>
+              <span className="font-medium text-stone-900">
+                {shortWindow(report.months_window)}
+              </span>
+            </span>
+            <span className="text-stone-400">
+              {report.total_items_analysed.toLocaleString()} items · {report.trend_count} trends
+            </span>
+          </div>
           <h2 className="text-lg font-semibold text-stone-900">{report.title}</h2>
-          <p className="text-sm text-stone-600 mt-1">{report.summary}</p>
+          <p className="text-sm text-stone-600">{report.summary}</p>
         </div>
       )}
 
@@ -694,15 +752,34 @@ function InStoreTrendsPageInner() {
           ))}
         </div>
       ) : !report ? (
-        <div className="text-center py-20 text-stone-400 bg-white border border-stone-200 rounded-xl">
-          <p className="text-4xl mb-3">⌂</p>
-          <p className="font-medium text-stone-700">No in-store trend reports yet</p>
-          <p className="text-sm mt-1">Click <em>Run analysis</em> above to generate the first one.</p>
-          <p className="text-xs mt-2">
-            Requires items in the In-store Products catalogue with embeddings.
-            New uploads get embeddings automatically; older items need a one-time backfill (admin).
-          </p>
-        </div>
+        // Two distinct empty states: no runs at ALL vs no runs at the
+        // currently-selected horizon. The second is the more common one
+        // once the buyer starts flipping pills.
+        sets.length === 0 ? (
+          <div className="text-center py-20 text-stone-400 bg-white border border-stone-200 rounded-xl">
+            <p className="text-4xl mb-3">⌂</p>
+            <p className="font-medium text-stone-700">No in-store trend reports yet</p>
+            <p className="text-sm mt-1">Click <em>Run analysis</em> above to generate the first one.</p>
+            <p className="text-xs mt-2">
+              Requires items in the In-store Products catalogue with embeddings.
+              New uploads get embeddings automatically; older items need a one-time backfill (admin).
+            </p>
+          </div>
+        ) : (
+          <div className="text-center py-20 text-stone-400 bg-white border border-stone-200 rounded-xl">
+            <p className="text-4xl mb-3">📅</p>
+            <p className="font-medium text-stone-700">
+              No analysis for <span className="text-stone-900">{shortWindow(monthsWindow)}</span> yet
+            </p>
+            <p className="text-sm mt-1">
+              Click <em>Run new analysis</em> above to analyse{" "}
+              {describeWindow(monthsWindow)}.
+            </p>
+            <p className="text-xs mt-3 text-stone-400">
+              Runs at other horizons stay available — switch pills to view them.
+            </p>
+          </div>
+        )
       ) : trends.length === 0 ? (
         <div className="text-center py-20 text-stone-400">
           <p>No trends match your filters.</p>
