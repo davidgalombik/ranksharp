@@ -6,7 +6,7 @@ Products catalogue (InStoreCatalogueItem rows), not the Online Products
 table.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, desc, delete
+from sqlalchemy import select, desc, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import (
@@ -97,14 +97,63 @@ async def list_reports(limit: int = 10, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/latest", response_model=InStoreReportOut)
-async def get_latest(db: AsyncSession = Depends(get_db)):
+async def get_latest(
+    generation: Optional[int] = Query(
+        default=None,
+        description="Filter trends to a single Set. Omit for the latest Set.",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Latest report. When `generation` is provided, only trends from that
+    Set are returned + the report's months_window switches to that Set's
+    horizon (each Set can have been run against a different window)."""
     result = await db.execute(
         select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
     )
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="No reports yet")
-    return await _build_report_out(report, db)
+    return await _build_report_out(report, db, generation=generation)
+
+
+class InStoreSetOut(BaseModel):
+    """One Set on the latest report — for the Set tab bar."""
+    generation: int
+    months_window: Optional[int] = None
+    trend_count: int
+    item_count: int  # sum of trend.item_count across the set
+
+
+@router.get("/sets", response_model=list[InStoreSetOut])
+async def list_sets(db: AsyncSession = Depends(get_db)):
+    """Every Set on the latest report, in generation order. Powers the
+    Set tab bar on the /instore page."""
+    latest_report = (await db.execute(
+        select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
+    )).scalar_one_or_none()
+    if not latest_report:
+        return []
+
+    rows = await db.execute(
+        select(
+            InStoreTrend.generation,
+            func.max(InStoreTrend.months_window).label("months_window"),
+            func.count(InStoreTrend.id).label("trend_count"),
+            func.coalesce(func.sum(InStoreTrend.item_count), 0).label("item_count"),
+        )
+        .where(InStoreTrend.week_start == latest_report.week_start)
+        .group_by(InStoreTrend.generation)
+        .order_by(InStoreTrend.generation)
+    )
+    return [
+        InStoreSetOut(
+            generation=int(gen),
+            months_window=(int(mw) if mw is not None else None),
+            trend_count=int(tc),
+            item_count=int(ic),
+        )
+        for gen, mw, tc, ic in rows.all()
+    ]
 
 
 @router.get("/{report_id}", response_model=InStoreReportOut)
@@ -162,6 +211,121 @@ async def clear_all(db: AsyncSession = Depends(get_db)):
     await db.execute(delete(InStoreTrendReport))
     await db.commit()
     return {"status": "cleared"}
+
+
+@router.delete("/reports/{report_id}/generations/{generation}")
+async def delete_set(
+    report_id: int,
+    generation: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete a single Set on an in-store trend report.
+
+    Steps (order matters):
+      1. Resolve the report's week_start.
+      2. Count what's in this generation and what remains.
+      3. Null any prev_trend_id backlinks pointing at the doomed rows.
+      4. Delete recommendations, examples, then the trend rows.
+      5. Prune the deleted IDs from report.trend_ids; recompute
+         generation_count from what's left.
+
+    Guardrails:
+      - 404 if the report doesn't exist, or the generation has no trends.
+      - 409 if deleting would leave the report with zero trends
+        (clear the whole run via /clear instead).
+    """
+    from sqlalchemy import delete as sa_delete, update as sa_update
+
+    report = await db.get(InStoreTrendReport, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
+
+    count_row = await db.execute(
+        select(func.count(InStoreTrend.id)).where(
+            InStoreTrend.week_start == report.week_start,
+            InStoreTrend.generation == generation,
+        )
+    )
+    to_delete = count_row.scalar_one() or 0
+    if to_delete == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No in-store trends found for report {report_id} generation {generation}",
+        )
+
+    remaining_row = await db.execute(
+        select(func.count(InStoreTrend.id)).where(
+            InStoreTrend.week_start == report.week_start,
+            InStoreTrend.generation != generation,
+        )
+    )
+    remaining = remaining_row.scalar_one() or 0
+    if remaining == 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing to delete — this is the only remaining Set for "
+                f"report {report_id}. Use /clear if you want a clean slate."
+            ),
+        )
+
+    id_rows = await db.execute(
+        select(InStoreTrend.id).where(
+            InStoreTrend.week_start == report.week_start,
+            InStoreTrend.generation == generation,
+        )
+    )
+    trend_ids = [tid for (tid,) in id_rows.all()]
+    trend_id_set = set(trend_ids)
+
+    # Null downstream backlinks (any trend elsewhere pointing at rows
+    # we're about to delete). Momentum was never wired for In-store,
+    # but the FK has no ON DELETE clause so we clear it defensively.
+    unlinked_result = await db.execute(
+        sa_update(InStoreTrend)
+        .where(InStoreTrend.prev_trend_id.in_(trend_ids))
+        .values(prev_trend_id=None)
+    )
+    unlinked = unlinked_result.rowcount or 0
+
+    rec_result = await db.execute(
+        sa_delete(InStoreTrendRecommendation).where(
+            InStoreTrendRecommendation.trend_id.in_(trend_ids)
+        )
+    )
+    recs_deleted = rec_result.rowcount or 0
+
+    ex_result = await db.execute(
+        sa_delete(InStoreTrendExample).where(
+            InStoreTrendExample.trend_id.in_(trend_ids)
+        )
+    )
+    examples_deleted = ex_result.rowcount or 0
+
+    await db.execute(
+        sa_delete(InStoreTrend).where(InStoreTrend.id.in_(trend_ids))
+    )
+
+    report.trend_ids = [tid for tid in (report.trend_ids or []) if tid not in trend_id_set]
+    gen_rows = await db.execute(
+        select(InStoreTrend.generation)
+        .where(InStoreTrend.week_start == report.week_start)
+        .distinct()
+    )
+    remaining_gens = sorted({int(g) for (g,) in gen_rows.all()})
+    report.generation_count = max(remaining_gens) if remaining_gens else 1
+
+    await db.commit()
+
+    return {
+        "report_id": report_id,
+        "generation": generation,
+        "deleted_trends": to_delete,
+        "deleted_examples": examples_deleted,
+        "deleted_recommendations": recs_deleted,
+        "unlinked_backlinks": unlinked,
+        "remaining_generations": remaining_gens,
+    }
 
 
 @router.get("/task/{task_id}")
@@ -267,7 +431,11 @@ async def get_trend_recommendations(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InStoreReportOut:
+async def _build_report_out(
+    report: InStoreTrendReport,
+    db: AsyncSession,
+    generation: Optional[int] = None,
+) -> InStoreReportOut:
     if not report.trend_ids:
         return InStoreReportOut(
             id=report.id, week_start=report.week_start, title=report.title,
@@ -277,12 +445,34 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
             all_trends=[], created_at=report.created_at,
         )
 
-    result = await db.execute(
-        select(InStoreTrend).where(InStoreTrend.id.in_(report.trend_ids))
+    # Resolve which Set to show. Default = latest generation for this
+    # report (so the buyer lands on their newest Set on first load,
+    # matching Product Trends' behaviour).
+    if generation is None:
+        latest_gen_row = await db.execute(
+            select(func.max(InStoreTrend.generation))
+            .where(InStoreTrend.week_start == report.week_start)
+        )
+        generation = latest_gen_row.scalar_one_or_none() or 1
+
+    q = (
+        select(InStoreTrend)
+        .where(InStoreTrend.id.in_(report.trend_ids))
+        .where(InStoreTrend.generation == generation)
         .order_by(desc(InStoreTrend.item_count))
     )
+    result = await db.execute(q)
     trends = result.scalars().all()
     trend_ids = [t.id for t in trends]
+
+    # Header horizon = the horizon of the Set actually being shown.
+    # Falls back to the report's stored months_window if the trends
+    # in this Set predate the per-trend column (legacy rows).
+    active_window = report.months_window
+    if trends:
+        window_from_trends = trends[0].months_window
+        if window_from_trends is not None:
+            active_window = window_from_trends
 
     # Bulk-fetch examples + their items + parent images for retailer/image_id.
     # "Is-a-product" gate — filter to items that Claude Vision actually
@@ -389,7 +579,7 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
     return InStoreReportOut(
         id=report.id, week_start=report.week_start, title=report.title,
         summary=report.summary, total_items_analysed=report.total_items_analysed,
-        trend_count=len(trends), months_window=report.months_window,
+        trend_count=len(trends), months_window=active_window,
         rising_trends=rising, new_trends=new, declining_trends=declining,
         all_trends=[to_out(t) for t in trends],
         created_at=report.created_at,

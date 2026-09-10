@@ -83,6 +83,15 @@ const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR
 // Human label for a calendar-month horizon. Matches the semantics in
 // backend _month_range(): 1 = previous month only; N>=2 = trailing N
 // calendar months including the current one.
+// Compact horizon label for a Set tab, e.g. "This month", "Last 3 mo",
+// "All time". Keeps tabs from wrapping. NULL / undefined → "All time".
+function shortWindow(monthsWindow: number | null | undefined): string {
+  if (monthsWindow == null) return "All time";
+  if (monthsWindow === 0) return "This month";
+  if (monthsWindow === 1) return "Last month";
+  return `Last ${monthsWindow} mo`;
+}
+
 function describeWindow(monthsWindow: number | null | undefined): string {
   if (monthsWindow == null) return "all-time shelf photos";
   const now = new Date();
@@ -120,6 +129,13 @@ interface TaskStatus {
   state: "PENDING" | "STARTED" | "PROGRESS" | "SUCCESS" | "FAILURE";
   pct: number;
   step: string;
+}
+
+interface InStoreSet {
+  generation: number;
+  months_window: number | null;
+  trend_count: number;
+  item_count: number;
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -297,6 +313,7 @@ function InStoreTrendsPageInner() {
 
   const [report, setReport] = useState<InStoreReport | null>(null);
   const [reports, setReports] = useState<InStoreReport[]>([]);
+  const [sets, setSets] = useState<InStoreSet[]>([]);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<TaskStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -321,24 +338,40 @@ function InStoreTrendsPageInner() {
     router.replace(`${pathname}?${p.toString()}`, { scroll: false });
   };
 
+  // Which Set to display. Also URL-driven so refreshes stick and
+  // deep links work. Undefined = the backend picks the latest.
+  const rawSet = searchParams.get("set");
+  const activeSet: number | undefined =
+    rawSet != null && /^\d+$/.test(rawSet) ? parseInt(rawSet, 10) : undefined;
+  const switchSet = (gen: number) => {
+    const p = new URLSearchParams(searchParams.toString());
+    p.set("set", String(gen));
+    router.push(`${pathname}?${p.toString()}`);
+  };
+
   const loadLatest = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/instore-trends/latest`, { cache: "no-store" });
+      const qs = activeSet != null ? `?generation=${activeSet}` : "";
+      const res = await fetch(`${API_BASE}/api/instore-trends/latest${qs}`, { cache: "no-store" });
       if (res.status === 404) {
         setReport(null);
       } else if (res.ok) {
         setReport(await res.json());
       }
-      const listRes = await fetch(`${API_BASE}/api/instore-trends/?limit=20`, { cache: "no-store" });
+      const [listRes, setsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/instore-trends/?limit=20`, { cache: "no-store" }),
+        fetch(`${API_BASE}/api/instore-trends/sets`, { cache: "no-store" }),
+      ]);
       if (listRes.ok) setReports(await listRes.json());
+      if (setsRes.ok) setSets(await setsRes.json());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeSet]);
 
   useEffect(() => { loadLatest(); }, [loadLatest]);
 
@@ -374,6 +407,41 @@ function InStoreTrendsPageInner() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setRunning({ task_id: data.task_id, state: "PENDING", pct: 2, step: "Queued…" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const deleteSet = async (generation: number) => {
+    if (!report) return;
+    if (sets.length <= 1) {
+      alert("Can't delete the only remaining Set — run a new analysis first, or clear all.");
+      return;
+    }
+    if (!confirm(`Delete Set ${generation}? This removes every trend + recommendation in that set. Can't be undone.`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/instore-trends/reports/${report.id}/generations/${generation}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); }
+        catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      const data = await res.json() as { remaining_generations: number[] };
+      // If we deleted the active set, jump to the highest remaining one.
+      if (activeSet === generation) {
+        const next = data.remaining_generations[data.remaining_generations.length - 1];
+        if (next != null) {
+          const p = new URLSearchParams(searchParams.toString());
+          p.set("set", String(next));
+          router.push(`${pathname}?${p.toString()}`);
+          return; // loadLatest will fire from the activeSet change
+        }
+      }
+      await loadLatest();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -478,6 +546,65 @@ function InStoreTrendsPageInner() {
           </span>
         </div>
       )}
+
+      {/* Set tabs — one per generation for the latest report, labelled
+          with the horizon that Set was analysed with. ✨ marks the
+          highest generation number; × deletes with confirm. Hidden
+          when there's only one Set (nothing to switch between). */}
+      {!running && sets.length > 1 && report && (() => {
+        const latestGen = sets[sets.length - 1].generation;
+        const currentGen = activeSet ?? latestGen;
+        return (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
+              Sets:
+            </span>
+            {sets.map((s) => {
+              const active = s.generation === currentGen;
+              const isLatest = s.generation === latestGen;
+              return (
+                <div
+                  key={s.generation}
+                  className={clsx(
+                    "inline-flex items-stretch rounded-lg overflow-hidden border transition-colors",
+                    active
+                      ? "border-stone-900 bg-stone-900 text-white"
+                      : "border-stone-200 bg-white text-stone-600 hover:border-stone-400"
+                  )}
+                  title={`${s.trend_count} trend${s.trend_count === 1 ? "" : "s"} · ${s.item_count.toLocaleString()} items analysed`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => switchSet(s.generation)}
+                    className="px-3 py-1 text-xs font-medium"
+                  >
+                    Set {s.generation}
+                    <span className={clsx(
+                      "ml-1.5 text-[10px] font-normal",
+                      active ? "text-stone-300" : "text-stone-400",
+                    )}>
+                      · {shortWindow(s.months_window)}
+                    </span>
+                    {isLatest && " ✨"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteSet(s.generation)}
+                    title={`Delete Set ${s.generation}`}
+                    aria-label={`Delete Set ${s.generation}`}
+                    className={clsx(
+                      "px-1.5 text-xs border-l transition-colors",
+                      active
+                        ? "border-stone-700 hover:bg-stone-800"
+                        : "border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600",
+                    )}
+                  >×</button>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* Progress */}
       {running && (

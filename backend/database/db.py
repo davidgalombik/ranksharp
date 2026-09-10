@@ -285,6 +285,11 @@ async def init_db():
             ("ALTER TABLE instore_trend_reports ADD COLUMN IF NOT EXISTS "
              "months_window INTEGER",
              _col("instore_trend_reports", "months_window")),
+            # Per-trend horizon so each Set can label + delete
+            # independently. NULL = all time. (2026-09-10)
+            ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
+             "months_window INTEGER",
+             _col("instore_trends", "months_window")),
             ("CREATE INDEX IF NOT EXISTS ix_instore_catalogue_images_country "
              "ON instore_catalogue_images (country)",
              _idx("ix_instore_catalogue_images_country")),

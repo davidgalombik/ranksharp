@@ -237,6 +237,9 @@ class InStoreTrendEngine:
             if not trend:
                 continue
             trend.generation = next_generation
+            # Stamp the horizon this Set was run against so /sets can
+            # label each tab and buyers can tell them apart.
+            trend.months_window = months_window
             self.db.add(trend)
             new_trends.append((trend, td))
 

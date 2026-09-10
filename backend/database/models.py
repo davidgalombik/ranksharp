@@ -652,6 +652,13 @@ class InStoreTrend(Base):
     dominant_taxonomy: Mapped[list] = mapped_column(JSON, default=list)  # ["Kitchenware > Cookware", ...]
 
     generation: Mapped[int] = mapped_column(Integer, default=1)
+    # Time-horizon the Set this trend belongs to was analysed with.
+    # NULL = all time; 0 = current month; 1 = previous month only;
+    # N>=2 = trailing N calendar months including current.
+    # Per-trend (not per-report) so Set tabs can label their own
+    # horizon and buyers can compare sets run against different windows.
+    # (2026-09-10)
+    months_window: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
