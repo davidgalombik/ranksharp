@@ -64,6 +64,9 @@ interface InStoreTrend {
   rationale: string;
   category: string;
   status: string;
+  // Buyer-voice momentum: emerging | noted | prominent | strong_focus |
+  // shifting. null on trends generated before the buyer-voice prompt.
+  momentum: string | null;
   item_count: number;
   momentum_pct: number | null;
   dominant_colours: string[];
@@ -163,6 +166,16 @@ const STATUS_ICONS: Record<string, string> = {
   declining: "↓",
 };
 
+// Buyer-voice momentum badge — the vocabulary from the team's trend
+// boards. Replaces the old status badge on trends that carry it.
+const MOMENTUM_BADGE: Record<string, { label: string; cls: string }> = {
+  emerging:     { label: "Emerging",     cls: "bg-sky-100 text-sky-800" },
+  noted:        { label: "Noted",        cls: "bg-stone-100 text-stone-600" },
+  prominent:    { label: "Prominent",    cls: "bg-amber-100 text-amber-800" },
+  strong_focus: { label: "Strong focus", cls: "bg-emerald-100 text-emerald-800" },
+  shifting:     { label: "Shifting",     cls: "bg-purple-100 text-purple-800" },
+};
+
 // ── Trend card ────────────────────────────────────────────────────────────────
 
 function TrendCard({ trend }: { trend: InStoreTrend }) {
@@ -193,13 +206,23 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
             <div key={`pad-${i}`} className="bg-stone-50" />
           ))}
 
-        <span className={clsx(
-          "absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-semibold shadow-sm",
-          STATUS_STYLES[trend.status] || "bg-stone-100 text-stone-600"
-        )}>
-          {STATUS_ICONS[trend.status] || ""} {trend.status.charAt(0).toUpperCase() + trend.status.slice(1)}
-          {trend.momentum_pct != null && ` ${trend.momentum_pct > 0 ? "+" : ""}${trend.momentum_pct.toFixed(0)}%`}
-        </span>
+        {trend.momentum && MOMENTUM_BADGE[trend.momentum] ? (
+          <span className={clsx(
+            "absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-semibold shadow-sm",
+            MOMENTUM_BADGE[trend.momentum].cls
+          )}>
+            {MOMENTUM_BADGE[trend.momentum].label}
+          </span>
+        ) : (
+          // Legacy trends (pre buyer-voice prompt) keep the old status badge.
+          <span className={clsx(
+            "absolute top-2 right-2 px-2 py-0.5 rounded-full text-xs font-semibold shadow-sm",
+            STATUS_STYLES[trend.status] || "bg-stone-100 text-stone-600"
+          )}>
+            {STATUS_ICONS[trend.status] || ""} {trend.status.charAt(0).toUpperCase() + trend.status.slice(1)}
+            {trend.momentum_pct != null && ` ${trend.momentum_pct > 0 ? "+" : ""}${trend.momentum_pct.toFixed(0)}%`}
+          </span>
+        )}
       </div>
 
       <div className="p-4 space-y-3 flex flex-col flex-1">
@@ -212,7 +235,9 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
 
         <div>
           <h3 className="text-base font-semibold text-stone-900 leading-snug">{trend.name}</h3>
-          <p className="text-sm text-stone-600 mt-1 line-clamp-2">{trend.description}</p>
+          {/* line-clamp-3 not 2: buyer-voice descriptions run to three
+              sentences for palette / seasonal transitions. */}
+          <p className="text-sm text-stone-600 mt-1 line-clamp-3">{trend.description}</p>
         </div>
 
         {trend.dominant_colours.length > 0 && (

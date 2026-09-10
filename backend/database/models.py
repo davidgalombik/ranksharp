@@ -664,6 +664,11 @@ class InStoreTrend(Base):
     # than per-report so each Set carries its own country tag, matching
     # months_window's shape. (2026-09-10)
     country: Mapped[Optional[str]] = mapped_column(String(2), nullable=True, default=None)
+    # Buyer-voice momentum for this single store walk. One of:
+    # emerging | noted | prominent | strong_focus | shifting. Mirrors the
+    # vocabulary on the buying team's trend boards. `status` is derived
+    # from this for anything still keyed on the old enum. (2026-09-10)
+    momentum: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

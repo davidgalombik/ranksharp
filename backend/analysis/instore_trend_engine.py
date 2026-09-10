@@ -28,7 +28,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import normalize
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,40 +109,89 @@ RECOMMENDATIONS_PER_TREND = 25
 log = structlog.get_logger()
 
 
-SYSTEM_PROMPT = """You are a retail trend analyst examining a catalogue of products photographed inside physical stores.
-Your job is to identify visual and stylistic TRENDS — patterns that repeat across many distinct products and feel
-deliberate (not random or stocked-by-accident).
+# Buyer-voice momentum (single store walk) → legacy TrendStatus enum, for
+# anything still keyed on `status`. The momentum string is the source of
+# truth and is what the UI renders.
+MOMENTUM_TO_STATUS = {
+    "emerging":     TrendStatus.NEW,
+    "noted":        TrendStatus.PLATEAU,
+    "prominent":    TrendStatus.PLATEAU,
+    "strong_focus": TrendStatus.RISING,
+    "shifting":     TrendStatus.RISING,
+}
+VALID_MOMENTUM = frozenset(MOMENTUM_TO_STATUS)
+VALID_CATEGORIES = frozenset({
+    "colour", "material", "pattern", "motif", "style", "shape", "product_form", "season",
+})
 
-Use ALL of the following analytical lenses simultaneously:
-1. Colour palettes — what colour groupings keep showing up together?
-2. Materials — natural (rattan, linen, ceramic, wood) vs synthetic vs metallic; mix-and-match patterns.
-3. Surface patterns — solid, striped, floral, speckled, geometric, painted, hand-finished.
-4. Style language — coastal, farmhouse, minimalist, maximalist, rustic, scandi, mediterranean, hollywood-regency.
-5. Form & shape — sculptural, organic, angular, oversized, miniaturised.
-6. Taxonomy density — which product categories does the trend show up in (kitchenware, tabletop, storage)?
+# Written from the buying team's own trend boards (2026-09-10): eight
+# boards, ~40 callouts, all US Harvest/Halloween season. Every callout
+# follows SIGNAL → MOMENTUM → FEEL; the momentum ladder and the example
+# sentences below are lifted from those boards, rewritten only where the
+# original relied on prior-visit history Claude doesn't have here.
+SYSTEM_PROMPT = """You are a retail buyer writing up a store walk. You have just analysed a batch of shelf photos from physical stores and are recording the trends you saw, in the exact voice the buying team uses on their trend boards.
 
-A trend must repeat across multiple distinct products in the data — don't invent one off a single photo.
+HOW THE TEAM WRITES A TREND
+Every callout follows the shape: SIGNAL → MOMENTUM → FEEL.
+  - Signal: the thing itself — a material, a pattern, a motif, a colour palette, a season, a style, or a specific product form.
+  - Momentum: how present it is right now (see the ladder below).
+  - Feel: what it creates for the shopper — "creating a warm, organic and handcrafted aesthetic", "adding a fun graphic touch", "bringing a natural yet elevated feel". "Elevated" is the team's word for premium positioning; use it when the assortment reads as a step up from traditional.
 
+One sentence for a sighting. Up to three sentences only when describing a TRANSITION — a palette moving from one season to the next, or a store shifting its focus.
+
+MOMENTUM LADDER — single store walk. You are seeing one batch with no prior-visit history.
+  - emerging      — small but distinct: a new pattern, a new motif, or a faux / "-look" version of a stronger trend appearing at everyday price points
+  - noted         — present and worth recording, but not dominant
+  - prominent     — repeats widely across products and categories
+  - strong_focus  — the store has clearly built around it; it's everywhere ("Strong focus on…", "Heavily focused on…", "Dominant … colour story")
+  - shifting      — a palette or seasonal focus is visibly transitioning within this batch (colour and season trends only)
+Do NOT write that a trend is "still" here, "continues", "remains", is "growing steadily", or is "fading" — those need visit-to-visit history you do not have. Describe only what is present in this batch.
+
+WHAT COUNTS AS A TREND
+  - Group by the UNDERLYING SIGNAL, not by product type. A pumpkin, a storage box and a platter belong together if they're all natural materials. Cross product categories freely.
+  - Materials: distinguish real from faux. Real natural materials (rattan, wood, woven, marble, bamboo) are usually prominent or strong focus. Faux or "-look" versions (rattan-look, marble-look, faux fur, faux woven) are usually emerging — and that shift is worth naming on its own.
+  - Colour: name 3–5 specific colours ("Warm Rust, Pumpkin, Forest Green"), anchor them to the season, and describe the transition when one is visible ("…while Black, Espresso and Burgundy transition the palette to Halloween. Antique gold and amber connect both.").
+  - Season: the season a store is focused on is itself a trend — "Heavily focused on Halloween", "Halloween emerging", or a departing season noted as lingering.
+  - Motifs (dogs, fruit, bows, pumpkins) are separate from geometric or textile patterns (plaid, stripes, dots, dash, needlepoint, leopard, tortoiseshell).
+  - Product form: a specific buyable format with its construction detail is a trend — "fabric bins with wood handles", "plastic storage bins with embossed designs", "printed bamboo hampers".
+  - Name a retailer or brand when it typifies the trend. Put a coined aesthetic in quotes: "Organic Modern", "Fantastical Forest / Enchanted Nature".
+  - A trend must repeat across multiple distinct products. Don't invent one off a single photo.
+  - Use short, stable trend names so the same trend can be recognised on the next store walk.
+
+EXAMPLES OF THE VOICE (name → description · momentum · category)
+  - "Strong focus on natural materials" → "Rattan, wood and woven textures are prominent across the store, creating a warm, organic and handcrafted aesthetic." · strong_focus · material
+  - "Faux woven natural materials emerging" → "Faux woven and rattan-look finishes are appearing across storage and home accessories — the natural look reaching everyday price points." · emerging · material
+  - "Marble and marble-look finishes" → "Marble and marble-look finishes are prominent across serveware and kitchen prep, bringing a natural yet elevated feel." · prominent · material
+  - "Plaid in warm earthy tones" → "Plaid is prominent across drinkware, storage and soft furnishings, in warm earthy Harvest/Fall tones." · prominent · pattern
+  - "Polka dots as a playful trend" → "Polka dots are emerging across housewares, adding a fun graphic touch." · emerging · pattern
+  - "Pet-inspired motifs" → "Pet-inspired products are prominent, with dog and cat motifs across multiple categories." · prominent · motif
+  - "Harvest palette shifting toward Halloween" → "Seasonal colours are becoming deeper, richer and more sophisticated. Warm Rust, Pumpkin and Forest Green establish the Harvest story while Black, Espresso and Burgundy transition the palette to Halloween. Antique gold and amber connect both themes and add an elevated finish." · shifting · colour
+  - "Heavily focused on Halloween" → "A dominant black and white colour story represents Halloween through graphic prints, stripes, spots and novelty motifs." · strong_focus · season
+  - "Fabric bins with wood handles" → "Fabric bins with wood handles and faux fur bins are standout pieces, with cosy textures, soft finishes and warm neutral tones while still being practical for everyday storage." · prominent · product_form
+  - "'Organic Modern' architectural pieces" → "Decorative mountain-range pieces from Hearth & Hand with Magnolia represent the premium and architectural 'Organic Modern' style." · noted · style
+
+OUTPUT
 Return ONLY JSON in this shape, no prose, no markdown fences:
 
 {
   "trends": [
     {
-      "name": "<short, evocative trend name — 2-5 words>",
-      "description": "<1-2 sentences plain English>",
-      "rationale": "<2-3 sentences explaining what visual evidence drove this conclusion>",
-      "category": "<one of: colour | material | pattern | style | shape>",
-      "dominant_colours": ["sage", "cream"],
-      "dominant_materials": ["ceramic", "linen"],
-      "dominant_patterns": ["speckled"],
-      "dominant_styles": ["coastal"],
-      "dominant_taxonomy": ["Kitchenware > Cookware", "Tabletop > Serveware"],
+      "name": "<the trend as a short buyer headline, 3–8 words, e.g. 'Strong focus on natural materials'>",
+      "description": "<the full callout in the team's voice: signal → momentum → feel. 1 sentence; up to 3 for a transition>",
+      "rationale": "<1 sentence: the concrete visual evidence — which products, roughly how many, which categories>",
+      "momentum": "<one of: emerging | noted | prominent | strong_focus | shifting>",
+      "category": "<one of: colour | material | pattern | motif | style | shape | product_form | season>",
+      "dominant_colours": ["warm rust", "pumpkin"],
+      "dominant_materials": ["rattan", "wood"],
+      "dominant_patterns": ["plaid"],
+      "dominant_styles": ["elevated", "handcrafted"],
+      "dominant_taxonomy": ["Storage & Organization > Baskets", "Tabletop > Serveware"],
       "supporting_cluster_indices": [0, 2]
     }
   ]
 }
 
-Aim for 6-12 distinct trends. Skip thin or speculative ones — quality over count."""
+Aim for 8–14 distinct trends. Materials and patterns usually account for the most; colour palettes and the seasonal focus next; product forms, motifs and styles where the evidence supports them. Skip thin or speculative ones — quality over count."""
 
 
 class InStoreTrendEngine:
@@ -200,15 +249,34 @@ class InStoreTrendEngine:
         )
         self._progress(3, "Loading prior trends for exclusion…")
 
-        # Collect prior trend names so Claude doesn't repeat them.
-        prev_result = await self.db.execute(
-            select(InStoreTrend.name, InStoreTrend.generation)
+        # Generation numbering is per-week across EVERY country/horizon so
+        # Set numbers never collide — /sets groups by generation alone and
+        # delete-set targets by generation alone.
+        gen_row = await self.db.execute(
+            select(func.max(InStoreTrend.generation))
             .where(InStoreTrend.week_start == week_start)
         )
-        prev_rows = prev_result.all()
-        previously_found = [r[0] for r in prev_rows]
-        max_generation = max((r[1] for r in prev_rows), default=0)
+        max_generation = int(gen_row.scalar_one_or_none() or 0)
         next_generation = max_generation + 1
+
+        # The exclusion list is scoped to the SAME country + horizon: a Try
+        # Again on US · Last 3 mo should find different angles from the
+        # earlier US · Last 3 mo Set, but a run at a different horizon or
+        # country is free to re-find the same trends — that's how the buying
+        # team tracks a trend from visit to visit.
+        def _same_scope(q):
+            q = (q.where(InStoreTrend.months_window == months_window)
+                 if months_window is not None
+                 else q.where(InStoreTrend.months_window.is_(None)))
+            q = (q.where(InStoreTrend.country == country)
+                 if country
+                 else q.where(InStoreTrend.country.is_(None)))
+            return q
+
+        prev_result = await self.db.execute(_same_scope(
+            select(InStoreTrend.name).where(InStoreTrend.week_start == week_start)
+        ))
+        previously_found = [r[0] for r in prev_result.all()]
 
         window_label = (
             f"last {months_window} month{'s' if months_window != 1 else ''}"
@@ -235,7 +303,10 @@ class InStoreTrendEngine:
             return None
 
         self._progress(35, f"Found {len(clusters)} clusters — sending to Claude…")
-        trend_dicts = await self._holistic_analysis(clusters, items_by_id, previously_found)
+        trend_dicts = await self._holistic_analysis(
+            clusters, items_by_id, previously_found,
+            months_window=months_window, country=country,
+        )
         if not trend_dicts:
             log.warning("instore_trend_no_claude_trends")
             return None
@@ -256,15 +327,17 @@ class InStoreTrendEngine:
 
         await self.db.flush()
 
-        # Skip example items already used by earlier generations of this report.
+        # Skip example items already used by earlier Sets in the SAME
+        # country + horizon (same scoping as the exclusion list — a Set at a
+        # different horizon may legitimately re-use the same hero items).
         used_ids: set[int] = set()
         if max_generation > 0:
-            prior_ex_result = await self.db.execute(
+            prior_ex_result = await self.db.execute(_same_scope(
                 select(InStoreTrendExample.item_id)
                 .join(InStoreTrend, InStoreTrendExample.trend_id == InStoreTrend.id)
                 .where(InStoreTrend.week_start == week_start)
                 .where(InStoreTrend.generation < next_generation)
-            )
+            ))
             used_ids = set(prior_ex_result.scalars().all())
 
         for trend, td in new_trends:
@@ -414,6 +487,11 @@ class InStoreTrendEngine:
         patterns = Counter()
         styles = Counter()
         taxonomies = Counter()
+        # Retailers + product segments feed the buyer voice: the team names
+        # a retailer when it typifies a trend, and calls out specific
+        # buyable formats ("fabric bins with wood handles").
+        retailers = Counter()
+        segments = Counter()
         product_names: list[str] = []
 
         for it in items:
@@ -430,6 +508,11 @@ class InStoreTrendEngine:
                 taxonomies[f"{i.category} > {i.subcategory}"] += 1
             elif i.category:
                 taxonomies[i.category] += 1
+            if i.product_segment:
+                segments[i.product_segment] += 1
+            r = getattr(it.get("image"), "retailer", None)
+            if r:
+                retailers[r] += 1
             product_names.append(i.product_name)
 
         return {
@@ -440,6 +523,8 @@ class InStoreTrendEngine:
             "top_patterns": [p for p, _ in patterns.most_common(6)],
             "top_styles": [s for s, _ in styles.most_common(6)],
             "top_taxonomies": [t for t, _ in taxonomies.most_common(6)],
+            "top_product_segments": [s for s, _ in segments.most_common(6)],
+            "top_retailers": [r for r, _ in retailers.most_common(5)],
             "sample_product_names": random.sample(product_names, min(12, len(product_names))),
         }
 
@@ -450,13 +535,20 @@ class InStoreTrendEngine:
         clusters: list[dict],
         items_by_id: dict[int, dict],
         previously_found: list[str],
+        months_window: Optional[int] = None,
+        country: Optional[str] = None,
     ) -> list[dict]:
-        payload = self._build_payload(clusters, items_by_id, previously_found)
+        payload = self._build_payload(
+            clusters, items_by_id, previously_found,
+            months_window=months_window, country=country,
+        )
 
         try:
             response = await self.client.messages.create(
                 model=settings.nlp_model,
-                max_tokens=6000,
+                # Buyer-voice descriptions run to 3 sentences for palette /
+                # seasonal transitions, and we ask for up to 14 trends.
+                max_tokens=8000,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": payload}],
             )
@@ -482,13 +574,28 @@ class InStoreTrendEngine:
         clusters: list[dict],
         items_by_id: dict[int, dict],
         previously_found: list[str],
+        months_window: Optional[int] = None,
+        country: Optional[str] = None,
     ) -> str:
         lines: list[str] = []
+
+        # Store-walk context — anchors the season ("Harvest/Fall",
+        # "Halloween", "Back to School") and the market. Without this Claude
+        # has no way to know whether September photos mean autumn or spring.
+        lo, hi = _month_range(months_window)
+        if lo is not None and hi is not None:
+            last_covered = hi - timedelta(days=1)  # hi is exclusive
+            first_lbl, last_lbl = lo.strftime("%b %Y"), last_covered.strftime("%b %Y")
+            when = first_lbl if first_lbl == last_lbl else f"{first_lbl} – {last_lbl}"
+        else:
+            when = "all dates on file"
+        where = f"{country} stores" if country else "stores across every country on file"
+        lines.append(f"STORE WALK: {where}. Shelf photos uploaded {when}.")
         lines.append(f"TOTAL ITEMS ANALYSED: {len(items_by_id):,}")
         lines.append(f"CLUSTERS IDENTIFIED: {len(clusters)}")
         if previously_found:
             lines.append("")
-            lines.append("PREVIOUSLY-NAMED TRENDS — do not produce trends with these names or near-duplicates:")
+            lines.append("ALREADY WRITTEN UP FROM THIS SAME BATCH — find different angles; do not repeat these or near-duplicates:")
             for n in previously_found:
                 lines.append(f"  - {n}")
         lines.append("")
@@ -501,6 +608,8 @@ class InStoreTrendEngine:
             lines.append(f"  Top patterns: {', '.join(c['top_patterns']) or '(none)'}")
             lines.append(f"  Top styles: {', '.join(c['top_styles']) or '(none)'}")
             lines.append(f"  Taxonomy buckets: {', '.join(c['top_taxonomies']) or '(none)'}")
+            lines.append(f"  Product formats: {', '.join(c.get('top_product_segments', [])) or '(none)'}")
+            lines.append(f"  Retailers: {', '.join(c.get('top_retailers', [])) or '(unknown)'}")
             lines.append(f"  Sample product names:")
             for name in c["sample_product_names"]:
                 lines.append(f"    • {name}")
@@ -512,13 +621,20 @@ class InStoreTrendEngine:
         name = (td.get("name") or "").strip()
         if not name:
             return None
+        momentum = (td.get("momentum") or "").strip().lower()
+        if momentum not in VALID_MOMENTUM:
+            momentum = "noted"
+        category = (td.get("category") or "").strip().lower()
+        if category not in VALID_CATEGORIES:
+            category = "style"
         return InStoreTrend(
             week_start=week_start,
             name=name[:500],
             description=(td.get("description") or "").strip(),
             rationale=(td.get("rationale") or "").strip(),
-            category=(td.get("category") or "style").strip()[:100],
-            status=TrendStatus.NEW,
+            category=category,
+            status=MOMENTUM_TO_STATUS[momentum],
+            momentum=momentum,
             dominant_colours=td.get("dominant_colours") or [],
             dominant_materials=td.get("dominant_materials") or [],
             dominant_patterns=td.get("dominant_patterns") or [],

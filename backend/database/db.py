@@ -296,6 +296,11 @@ async def init_db():
             ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
              "country VARCHAR(2)",
              _col("instore_trends", "country")),
+            # Buyer-voice momentum per trend (emerging / noted / prominent /
+            # strong_focus / shifting). NULL on legacy rows. (2026-09-10)
+            ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
+             "momentum VARCHAR(20)",
+             _col("instore_trends", "momentum")),
             # Backfill: every legacy Set was run against 100% US images
             # (all uploads to date are US), so tagging pre-existing
             # rows as US matches the reality of what was analysed.

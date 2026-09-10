@@ -53,6 +53,9 @@ class InStoreTrendOut(BaseModel):
     rationale: str
     category: str
     status: str
+    # Buyer-voice momentum for this store walk: emerging | noted |
+    # prominent | strong_focus | shifting. None on legacy trends.
+    momentum: Optional[str] = None
     item_count: int
     momentum_pct: Optional[float] = None
     dominant_colours: list[str]
@@ -592,7 +595,7 @@ async def _build_report_out(
         recs = recs_by_trend.get(t.id, [])
         return InStoreTrendOut(
             id=t.id, name=t.name, description=t.description, rationale=t.rationale,
-            category=t.category, status=t.status.value,
+            category=t.category, status=t.status.value, momentum=t.momentum,
             item_count=t.item_count, momentum_pct=t.momentum_pct,
             dominant_colours=t.dominant_colours or [],
             dominant_materials=t.dominant_materials or [],
