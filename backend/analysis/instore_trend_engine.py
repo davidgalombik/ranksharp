@@ -170,6 +170,8 @@ EXAMPLES OF THE VOICE (name → description · momentum · category)
   - "Fabric bins with wood handles" → "Fabric bins with wood handles and faux fur bins are standout pieces, with cosy textures, soft finishes and warm neutral tones while still being practical for everyday storage." · prominent · product_form
   - "'Organic Modern' architectural pieces" → "Decorative mountain-range pieces from Hearth & Hand with Magnolia represent the premium and architectural 'Organic Modern' style." · noted · style
 
+THE EXAMPLES ABOVE SHOW THE WRITING STYLE ONLY. Do not reproduce them. Every trend you write must be derived from the CLUSTER SUMMARIES in the user message and cite the cluster indices that support it. If the clusters don't show pet motifs, don't write about pet motifs — even though there's an example above. If they show something none of the examples mention, write it. The rationale must quote specific evidence from the cluster summaries (product names, taxonomy buckets, item counts, retailers), not generic claims.
+
 OUTPUT
 Return ONLY JSON in this shape, no prose, no markdown fences:
 
