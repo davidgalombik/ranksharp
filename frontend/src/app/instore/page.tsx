@@ -732,7 +732,11 @@ function InStoreTrendsPageInner() {
               {report.total_items_analysed.toLocaleString()} items · {report.trend_count} trends
             </span>
           </div>
-          <h2 className="text-lg font-semibold text-stone-900">{report.title}</h2>
+          {/* Skipping `report.title` — Claude generates it with a
+              'week of {week_start}' phrasing that's misleading (that
+              date is a bucket key, not the run date) and duplicates
+              the meta row above. The summary carries the actual
+              value from Claude. */}
           <p className="text-sm text-stone-600">{report.summary}</p>
         </div>
       )}
