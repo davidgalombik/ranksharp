@@ -79,6 +79,22 @@ interface InStoreTrend {
 
 const CURRENCIES: Record<string, string> = { USD: "$", AUD: "A$", GBP: "£", EUR: "€" };
 
+// Human label for a calendar-month horizon. Matches the semantics in
+// backend _month_range(): 1 = previous month only; N>=2 = trailing N
+// calendar months including the current one.
+function describeWindow(monthsWindow: number | null | undefined): string {
+  if (monthsWindow == null) return "all-time shelf photos";
+  const now = new Date();
+  const fmt = (d: Date) =>
+    d.toLocaleString(undefined, { month: "short", year: "numeric" });
+  if (monthsWindow === 1) {
+    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return `last month's shelf photos (${fmt(prev)})`;
+  }
+  const start = new Date(now.getFullYear(), now.getMonth() - (monthsWindow - 1), 1);
+  return `the last ${monthsWindow} months of shelf photos (${fmt(start)} – ${fmt(now)})`;
+}
+
 interface InStoreReport {
   id: number;
   week_start: string;
@@ -282,6 +298,12 @@ export default function InStoreTrendsPage() {
   // reflects "what's on shelves right now" rather than every photo ever
   // uploaded. Persisted per-session; changing it does NOT auto-rerun —
   // the buyer picks a window then clicks Run/Try Again.
+  // Calendar-month horizon (2026-09-10 semantics):
+  //   1  = previous full calendar month only (Aug when today is Sep)
+  //   3+ = trailing N calendar months INCLUDING current (Jul+Aug+Sep for 3)
+  //   null = all time
+  // Default 3 so a fresh run reflects current shelves rather than the
+  // full catalogue history.
   const [monthsWindow, setMonthsWindow] = useState<number | null>(3);
 
   const loadLatest = useCallback(async () => {
@@ -364,11 +386,9 @@ export default function InStoreTrendsPage() {
         <div>
           <h1 className="text-2xl font-bold text-stone-900">In-store Trends</h1>
           <p className="text-sm text-stone-500 mt-0.5">
-            {report?.months_window
-              ? <>Analysed the <span className="font-medium text-stone-700">last {report.months_window} month{report.months_window === 1 ? "" : "s"}</span> of shelf photos · {report.total_items_analysed.toLocaleString()} items</>
-              : report
-                ? <>Analysed <span className="font-medium text-stone-700">all-time</span> shelf photos · {report.total_items_analysed.toLocaleString()} items</>
-                : <>Trends synthesised across the In-store Products catalogue</>}
+            {report
+              ? <>Analysed <span className="font-medium text-stone-700">{describeWindow(report.months_window)}</span> · {report.total_items_analysed.toLocaleString()} items</>
+              : <>Trends synthesised across the In-store Products catalogue</>}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -411,16 +431,18 @@ export default function InStoreTrendsPage() {
             Analyse:
           </span>
           {([
-            { label: "Last month",    value: 1 },
-            { label: "Last 3 months", value: 3 },
-            { label: "Last 6 months", value: 6 },
-            { label: "All time",      value: null },
-          ] as { label: string; value: number | null }[]).map((opt) => {
+            // Calendar semantics — see _month_range() in the engine.
+            { label: "Last month",    value: 1,    title: "The previous complete calendar month (e.g. August when today is in September)" },
+            { label: "Last 3 months", value: 3,    title: "Trailing 3 calendar months including this one" },
+            { label: "Last 6 months", value: 6,    title: "Trailing 6 calendar months including this one" },
+            { label: "All time",      value: null, title: "Every shelf photo ever uploaded" },
+          ] as { label: string; value: number | null; title: string }[]).map((opt) => {
             const active = monthsWindow === opt.value;
             return (
               <button
                 key={String(opt.value)}
                 onClick={() => setMonthsWindow(opt.value)}
+                title={opt.title}
                 className={clsx(
                   "px-3 py-1 rounded-full text-xs font-semibold border transition-colors",
                   active

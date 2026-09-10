@@ -46,6 +46,50 @@ from database.models import (
 # 10 shared keyword boosts (+2.0 each) score ~0.025; 50 shared keywords scores
 # ~0.13. So this threshold is a noise floor, not a quality gate. Once the
 # embedding scheme is upgraded to a real semantic encoder, raise this to 0.5+.
+def _month_range(
+    months_window: Optional[int],
+    now: Optional[datetime] = None,
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Compute the [lower, upper) bounds on InStoreCatalogueImage.created_at
+    for a calendar-month horizon. Returns (None, None) for all-time.
+
+    Semantics (see _load_items docstring):
+      months_window == 1  → previous full month only.
+                            e.g. Sep 10 → [Aug 1 00:00, Sep 1 00:00).
+      months_window >= 2  → trailing N calendar months INCLUDING current.
+                            e.g. Sep 10, N=3 → [Jul 1 00:00, Oct 1 00:00).
+      months_window in (None, 0, negative) → (None, None), no filter.
+    """
+    if not months_window or months_window <= 0:
+        return (None, None)
+    now = now or datetime.utcnow()
+    first_of_this_month = datetime(now.year, now.month, 1)
+    # First day of NEXT month, used as the exclusive upper bound so
+    # today's uploads aren't sliced off by hour-of-day drift.
+    if now.month == 12:
+        first_of_next_month = datetime(now.year + 1, 1, 1)
+    else:
+        first_of_next_month = datetime(now.year, now.month + 1, 1)
+
+    if months_window == 1:
+        # "Last month" — previous calendar month only, excluding current.
+        # Walk back one month from first_of_this_month.
+        if first_of_this_month.month == 1:
+            lo = datetime(first_of_this_month.year - 1, 12, 1)
+        else:
+            lo = datetime(first_of_this_month.year, first_of_this_month.month - 1, 1)
+        return (lo, first_of_this_month)
+
+    # months_window >= 2: current + (months_window - 1) previous
+    months_back = months_window - 1
+    y, m = first_of_this_month.year, first_of_this_month.month - months_back
+    while m <= 0:
+        m += 12
+        y -= 1
+    lo = datetime(y, m, 1)
+    return (lo, first_of_next_month)
+
+
 RECOMMENDATION_THRESHOLD = 0.02
 # Max number of online product recommendations stored per trend.
 # Tuned 10 -> 50 -> 25 (2026-08-07). Field data: even at 50, each
@@ -270,12 +314,19 @@ class InStoreTrendEngine:
     async def _load_items(self, months_window: Optional[int] = None) -> list[dict]:
         """Hero + main items only, with non-null embeddings.
 
-        When `months_window` is set, restricts items to those whose parent
-        image was uploaded within the last N months (based on
-        InStoreCatalogueImage.created_at). None = all time. A 30-day-per-
-        month approximation is fine here — the window is a rough horizon
-        buyers use to distinguish "recent shelves" from "everything ever",
-        not a precise calendar boundary.
+        `months_window` is a CALENDAR-month horizon (2026-09-10):
+            1        = previous full calendar month only. If today is
+                       Sep 10, this loads August's uploads only —
+                       current month is excluded. Mirrors how humans
+                       say "last month".
+            3, 6, …  = trailing N calendar months INCLUDING the current
+                       partial month. If today is Sep 10, "3" loads
+                       Jul + Aug + Sep-so-far.
+            None     = all time (no date filter).
+
+        The mixed semantic (N=1 excludes current, N>=3 includes it)
+        matches how buyers use the words: "last month" means "August",
+        "last 3 months" means "the last three months of data ending now".
         """
         stmt = (
             select(InStoreCatalogueItem, InStoreCatalogueImage)
@@ -287,9 +338,11 @@ class InStoreTrendEngine:
                 )
             )
         )
-        if months_window and months_window > 0:
-            cutoff = datetime.utcnow() - timedelta(days=months_window * 30)
-            stmt = stmt.where(InStoreCatalogueImage.created_at >= cutoff)
+        lo, hi = _month_range(months_window)
+        if lo is not None:
+            stmt = stmt.where(InStoreCatalogueImage.created_at >= lo)
+        if hi is not None:
+            stmt = stmt.where(InStoreCatalogueImage.created_at < hi)
         result = await self.db.execute(stmt)
         return [{"item": it, "image": img} for it, img in result.all()]
 
