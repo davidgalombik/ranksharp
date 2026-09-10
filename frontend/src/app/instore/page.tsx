@@ -317,8 +317,12 @@ function InStoreTrendsPageInner() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<TaskStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>("");
+  // Cascading category → value filter (matches Product Trends). Value
+  // is a trend NAME within the chosen category — buyers can pick "colour"
+  // then narrow to a single named trend within it. Status dropdown was
+  // removed 2026-09-10 — In-store never populated it meaningfully.
   const [categoryFilter, setCategoryFilter] = useState<string>("");
+  const [valueFilter, setValueFilter] = useState<string>("");
 
   // Time horizon lives in the URL (?window=3) so refresh keeps it and
   // deep links work. Calendar semantics (see engine _month_range):
@@ -499,12 +503,25 @@ function InStoreTrendsPageInner() {
   };
 
   const trends = (report?.all_trends ?? []).filter((t) => {
-    if (statusFilter && t.status !== statusFilter) return false;
     if (categoryFilter && t.category !== categoryFilter) return false;
+    if (valueFilter && t.name !== valueFilter) return false;
     return true;
   });
 
   const categories = Array.from(new Set((report?.all_trends ?? []).map((t) => t.category)));
+  // Values available in the selected category — the trend names Claude
+  // produced for that category in this Set. Sorted alphabetically.
+  const valuesInCategory = categoryFilter
+    ? Array.from(new Set(
+        (report?.all_trends ?? [])
+          .filter((t) => t.category === categoryFilter)
+          .map((t) => t.name)
+      )).sort((a, b) => a.localeCompare(b))
+    : [];
+
+  // Cascading clear: switching category resets any deeper value filter,
+  // otherwise a stale value from a prior category would filter to zero.
+  useEffect(() => { setValueFilter(""); }, [categoryFilter]);
 
   return (
     <div className="space-y-6">
@@ -675,8 +692,11 @@ function InStoreTrendsPageInner() {
         </div>
       )}
 
-      {/* Filters */}
-      {report && trends.length > 0 && (
+      {/* Filters — same shape as Product Trends: pick a category and
+          a cascading value dropdown appears listing the trend names
+          within that category for this Set. Status dropdown removed
+          (never populated meaningfully by In-store). */}
+      {report && (report.all_trends.length > 0) && (
         <div className="flex items-end gap-3 flex-wrap">
           <div>
             <label className="block text-xs font-medium text-stone-500 mb-1">Category</label>
@@ -691,20 +711,23 @@ function InStoreTrendsPageInner() {
               ))}
             </select>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-stone-500 mb-1">Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="border border-stone-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none"
-            >
-              <option value="">All statuses</option>
-              <option value="rising">Rising</option>
-              <option value="new">New</option>
-              <option value="plateau">Plateau</option>
-              <option value="declining">Declining</option>
-            </select>
-          </div>
+          {categoryFilter && valuesInCategory.length > 0 && (
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1">
+                {categoryFilter.charAt(0).toUpperCase() + categoryFilter.slice(1)}
+              </label>
+              <select
+                value={valueFilter}
+                onChange={(e) => setValueFilter(e.target.value)}
+                className="border border-stone-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none"
+              >
+                <option value="">All {categoryFilter}s</option>
+                {valuesInCategory.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       )}
 
