@@ -54,13 +54,15 @@ def _month_range(
     for a calendar-month horizon. Returns (None, None) for all-time.
 
     Semantics (see _load_items docstring):
+      months_window == 0  → current calendar month only (partial).
+                            e.g. Sep 10 → [Sep 1 00:00, Oct 1 00:00).
       months_window == 1  → previous full month only.
                             e.g. Sep 10 → [Aug 1 00:00, Sep 1 00:00).
       months_window >= 2  → trailing N calendar months INCLUDING current.
                             e.g. Sep 10, N=3 → [Jul 1 00:00, Oct 1 00:00).
-      months_window in (None, 0, negative) → (None, None), no filter.
+      months_window is None (or negative) → (None, None), no filter.
     """
-    if not months_window or months_window <= 0:
+    if months_window is None or months_window < 0:
         return (None, None)
     now = now or datetime.utcnow()
     first_of_this_month = datetime(now.year, now.month, 1)
@@ -70,6 +72,10 @@ def _month_range(
         first_of_next_month = datetime(now.year + 1, 1, 1)
     else:
         first_of_next_month = datetime(now.year, now.month + 1, 1)
+
+    if months_window == 0:
+        # "This month" — current partial calendar month only.
+        return (first_of_this_month, first_of_next_month)
 
     if months_window == 1:
         # "Last month" — previous calendar month only, excluding current.

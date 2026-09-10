@@ -87,6 +87,9 @@ function describeWindow(monthsWindow: number | null | undefined): string {
   const now = new Date();
   const fmt = (d: Date) =>
     d.toLocaleString(undefined, { month: "short", year: "numeric" });
+  if (monthsWindow === 0) {
+    return `this month's shelf photos so far (${fmt(now)})`;
+  }
   if (monthsWindow === 1) {
     const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     return `last month's shelf photos (${fmt(prev)})`;
@@ -351,7 +354,10 @@ export default function InStoreTrendsPage() {
     setError(null);
     try {
       const endpoint = regenerate ? "regenerate" : "generate";
-      const qs = monthsWindow ? `?months_window=${monthsWindow}` : "";
+      // NOTE: check for null explicitly — 0 is a valid value ("This
+      // month") but falsy in JS, so a plain `monthsWindow ? …` would
+      // drop the param and back-end would default to all-time.
+      const qs = monthsWindow !== null ? `?months_window=${monthsWindow}` : "";
       const res = await fetch(`${API_BASE}/api/instore-trends/${endpoint}${qs}`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
@@ -432,6 +438,7 @@ export default function InStoreTrendsPage() {
           </span>
           {([
             // Calendar semantics — see _month_range() in the engine.
+            { label: "This month",    value: 0,    title: "Current calendar month only (whatever's been uploaded this month so far)" },
             { label: "Last month",    value: 1,    title: "The previous complete calendar month (e.g. August when today is in September)" },
             { label: "Last 3 months", value: 3,    title: "Trailing 3 calendar months including this one" },
             { label: "Last 6 months", value: 6,    title: "Trailing 6 calendar months including this one" },

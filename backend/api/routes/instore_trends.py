@@ -119,9 +119,11 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
 async def generate_report(
     months_window: Optional[int] = Query(
         default=None,
-        ge=1, le=60,
-        description="Restrict analysis to shelf photos uploaded in the last "
-                    "N months. Omit for all time.",
+        ge=0, le=60,
+        description="Time horizon for shelf photos to analyse. 0 = current "
+                    "month only. 1 = previous complete month only. N>=2 = "
+                    "trailing N calendar months including current. Omit for "
+                    "all time.",
     ),
 ):
     """Trigger a fresh in-store trend analysis."""
@@ -136,9 +138,11 @@ async def generate_report(
 async def regenerate_report(
     months_window: Optional[int] = Query(
         default=None,
-        ge=1, le=60,
-        description="Restrict analysis to shelf photos uploaded in the last "
-                    "N months. Omit for all time.",
+        ge=0, le=60,
+        description="Time horizon for shelf photos to analyse. 0 = current "
+                    "month only. 1 = previous complete month only. N>=2 = "
+                    "trailing N calendar months including current. Omit for "
+                    "all time.",
     ),
 ):
     """Generate a new generation of trends for the current week (Try Again)."""
