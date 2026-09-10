@@ -167,6 +167,7 @@ class InStoreTrendEngine:
         self,
         week_start: Optional[datetime] = None,
         months_window: Optional[int] = None,
+        country: Optional[str] = None,
     ) -> Optional[InStoreTrendReport]:
         """Run a fresh in-store trend analysis. If a report for `week_start`
         already exists, append a new generation (Try Again) — keeping prior
@@ -177,6 +178,12 @@ class InStoreTrendEngine:
         None (default) = all time. Buyers pick this from a pill selector
         on the trends page. Written back to the report row so the header
         can label the horizon that produced these trends.
+
+        `country` scopes to shelf photos tagged with that country code
+        ('US' or 'AU'). None (default) = mixed across every country.
+        Buyers don't usually want to conflate different markets so the
+        UI defaults to a specific country; None is here for the explicit
+        'All countries' pill.
         """
         if week_start is None:
             today = datetime.utcnow().date()
@@ -189,6 +196,7 @@ class InStoreTrendEngine:
             "instore_trend_run_start",
             week_start=week_start.isoformat(),
             months_window=months_window,
+            country=country,
         )
         self._progress(3, "Loading prior trends for exclusion…")
 
@@ -206,13 +214,15 @@ class InStoreTrendEngine:
             f"last {months_window} month{'s' if months_window != 1 else ''}"
             if months_window else "all time"
         )
-        self._progress(8, f"Loading in-store items ({window_label})…")
-        items = await self._load_items(months_window=months_window)
+        country_label = country or "all countries"
+        self._progress(8, f"Loading in-store items ({country_label}, {window_label})…")
+        items = await self._load_items(months_window=months_window, country=country)
         if len(items) < self.min_cluster_size * 2:
             log.warning(
                 "instore_trend_insufficient_items",
                 count=len(items),
                 months_window=months_window,
+                country=country,
             )
             return None
 
@@ -237,9 +247,10 @@ class InStoreTrendEngine:
             if not trend:
                 continue
             trend.generation = next_generation
-            # Stamp the horizon this Set was run against so /sets can
-            # label each tab and buyers can tell them apart.
+            # Stamp the horizon + country this Set was run against so
+            # /sets can label each tab and buyers can tell them apart.
             trend.months_window = months_window
+            trend.country = country
             self.db.add(trend)
             new_trends.append((trend, td))
 
@@ -320,22 +331,17 @@ class InStoreTrendEngine:
 
     # ── Data loading ──────────────────────────────────────────────────────
 
-    async def _load_items(self, months_window: Optional[int] = None) -> list[dict]:
+    async def _load_items(
+        self,
+        months_window: Optional[int] = None,
+        country: Optional[str] = None,
+    ) -> list[dict]:
         """Hero + main items only, with non-null embeddings.
 
-        `months_window` is a CALENDAR-month horizon (2026-09-10):
-            1        = previous full calendar month only. If today is
-                       Sep 10, this loads August's uploads only —
-                       current month is excluded. Mirrors how humans
-                       say "last month".
-            3, 6, …  = trailing N calendar months INCLUDING the current
-                       partial month. If today is Sep 10, "3" loads
-                       Jul + Aug + Sep-so-far.
-            None     = all time (no date filter).
-
-        The mixed semantic (N=1 excludes current, N>=3 includes it)
-        matches how buyers use the words: "last month" means "August",
-        "last 3 months" means "the last three months of data ending now".
+        `months_window` is a CALENDAR-month horizon (2026-09-10) —
+        see _month_range() for the mapping. `country` filters
+        InStoreCatalogueImage.country ('US' / 'AU'); None = mixed
+        (no filter).
         """
         stmt = (
             select(InStoreCatalogueItem, InStoreCatalogueImage)
@@ -352,6 +358,8 @@ class InStoreTrendEngine:
             stmt = stmt.where(InStoreCatalogueImage.created_at >= lo)
         if hi is not None:
             stmt = stmt.where(InStoreCatalogueImage.created_at < hi)
+        if country:
+            stmt = stmt.where(InStoreCatalogueImage.country == country)
         result = await self.db.execute(stmt)
         return [{"item": it, "image": img} for it, img in result.all()]
 

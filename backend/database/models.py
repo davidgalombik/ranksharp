@@ -659,6 +659,11 @@ class InStoreTrend(Base):
     # horizon and buyers can compare sets run against different windows.
     # (2026-09-10)
     months_window: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # Country this Set was scoped to. NULL = mixed (analysed across
+    # every country's shelf photos). "US" / "AU". Kept per-trend rather
+    # than per-report so each Set carries its own country tag, matching
+    # months_window's shape. (2026-09-10)
+    country: Mapped[Optional[str]] = mapped_column(String(2), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

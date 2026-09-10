@@ -74,9 +74,11 @@ class InStoreReportOut(BaseModel):
     summary: str
     total_items_analysed: int
     trend_count: int
-    # Time horizon used by the latest run. NULL = all time.
-    # Rendered in the header ("Analysed last 3 months of shelf photos").
+    # Horizon + country of the Set currently in view. NULL = all time /
+    # all countries. Rendered in the header so buyers always know what
+    # was analysed.
     months_window: Optional[int] = None
+    country: Optional[str] = None
     rising_trends: list[InStoreTrendOut]
     new_trends: list[InStoreTrendOut]
     declining_trends: list[InStoreTrendOut]
@@ -120,6 +122,7 @@ class InStoreSetOut(BaseModel):
     """One Set on the latest report — for the Set tab bar."""
     generation: int
     months_window: Optional[int] = None
+    country: Optional[str] = None
     trend_count: int
     item_count: int  # sum of trend.item_count across the set
 
@@ -127,7 +130,13 @@ class InStoreSetOut(BaseModel):
 @router.get("/sets", response_model=list[InStoreSetOut])
 async def list_sets(db: AsyncSession = Depends(get_db)):
     """Every Set on the latest report, in generation order. Powers the
-    Set tab bar on the /instore page."""
+    Set tab bar on the /instore page.
+
+    A Set is homogeneous per (generation, months_window, country) —
+    the engine stamps every trend in a run with the same tuple — so
+    grouping by generation and taking max() over the other two just
+    hoists the shared value into the row.
+    """
     latest_report = (await db.execute(
         select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
     )).scalar_one_or_none()
@@ -138,6 +147,7 @@ async def list_sets(db: AsyncSession = Depends(get_db)):
         select(
             InStoreTrend.generation,
             func.max(InStoreTrend.months_window).label("months_window"),
+            func.max(InStoreTrend.country).label("country"),
             func.count(InStoreTrend.id).label("trend_count"),
             func.coalesce(func.sum(InStoreTrend.item_count), 0).label("item_count"),
         )
@@ -149,10 +159,11 @@ async def list_sets(db: AsyncSession = Depends(get_db)):
         InStoreSetOut(
             generation=int(gen),
             months_window=(int(mw) if mw is not None else None),
+            country=(str(ctry) if ctry else None),
             trend_count=int(tc),
             item_count=int(ic),
         )
-        for gen, mw, tc, ic in rows.all()
+        for gen, mw, ctry, tc, ic in rows.all()
     ]
 
 
@@ -164,42 +175,64 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
     return await _build_report_out(report, db)
 
 
+def _validate_country(country: Optional[str]) -> Optional[str]:
+    if country is None:
+        return None
+    up = country.upper()
+    if up not in ("US", "AU"):
+        raise HTTPException(status_code=400, detail="country must be 'US' or 'AU'")
+    return up
+
+
 @router.post("/generate")
 async def generate_report(
     months_window: Optional[int] = Query(
-        default=None,
-        ge=0, le=60,
+        default=None, ge=0, le=60,
         description="Time horizon for shelf photos to analyse. 0 = current "
                     "month only. 1 = previous complete month only. N>=2 = "
                     "trailing N calendar months including current. Omit for "
                     "all time.",
     ),
+    country: Optional[str] = Query(
+        default=None,
+        description="Restrict shelf photos to a single country ('US' or 'AU'). "
+                    "Omit to analyse mixed across every country.",
+    ),
 ):
     """Trigger a fresh in-store trend analysis."""
     from tasks.analysis_tasks import run_instore_trend_analysis_task
+    country = _validate_country(country)
     task = run_instore_trend_analysis_task.apply_async(
-        queue="reports", args=[months_window],
+        queue="reports", args=[months_window, country],
     )
-    return {"task_id": task.id, "status": "queued", "months_window": months_window}
+    return {
+        "task_id": task.id, "status": "queued",
+        "months_window": months_window, "country": country,
+    }
 
 
 @router.post("/regenerate")
 async def regenerate_report(
     months_window: Optional[int] = Query(
+        default=None, ge=0, le=60,
+        description="Time horizon for shelf photos to analyse. Same shape as /generate.",
+    ),
+    country: Optional[str] = Query(
         default=None,
-        ge=0, le=60,
-        description="Time horizon for shelf photos to analyse. 0 = current "
-                    "month only. 1 = previous complete month only. N>=2 = "
-                    "trailing N calendar months including current. Omit for "
-                    "all time.",
+        description="Restrict shelf photos to a single country ('US' or 'AU'). "
+                    "Omit to analyse mixed across every country.",
     ),
 ):
     """Generate a new generation of trends for the current week (Try Again)."""
     from tasks.analysis_tasks import regenerate_instore_trend_analysis_task
+    country = _validate_country(country)
     task = regenerate_instore_trend_analysis_task.apply_async(
-        queue="reports", args=[months_window],
+        queue="reports", args=[months_window, country],
     )
-    return {"task_id": task.id, "status": "queued", "months_window": months_window}
+    return {
+        "task_id": task.id, "status": "queued",
+        "months_window": months_window, "country": country,
+    }
 
 
 @router.delete("/clear")
@@ -440,7 +473,7 @@ async def _build_report_out(
         return InStoreReportOut(
             id=report.id, week_start=report.week_start, title=report.title,
             summary=report.summary, total_items_analysed=report.total_items_analysed,
-            trend_count=0, months_window=report.months_window,
+            trend_count=0, months_window=report.months_window, country=None,
             rising_trends=[], new_trends=[], declining_trends=[],
             all_trends=[], created_at=report.created_at,
         )
@@ -465,14 +498,17 @@ async def _build_report_out(
     trends = result.scalars().all()
     trend_ids = [t.id for t in trends]
 
-    # Header horizon = the horizon of the Set actually being shown.
-    # Falls back to the report's stored months_window if the trends
-    # in this Set predate the per-trend column (legacy rows).
+    # Header horizon + country = whatever the Set actually being shown
+    # was stamped with. Legacy trends (pre per-trend columns) fall back
+    # to the report row's months_window; country falls back to None
+    # (was mixed before the column existed).
     active_window = report.months_window
+    active_country: Optional[str] = None
     if trends:
         window_from_trends = trends[0].months_window
         if window_from_trends is not None:
             active_window = window_from_trends
+        active_country = trends[0].country
 
     # Bulk-fetch examples + their items + parent images for retailer/image_id.
     # "Is-a-product" gate — filter to items that Claude Vision actually
@@ -579,7 +615,7 @@ async def _build_report_out(
     return InStoreReportOut(
         id=report.id, week_start=report.week_start, title=report.title,
         summary=report.summary, total_items_analysed=report.total_items_analysed,
-        trend_count=len(trends), months_window=active_window,
+        trend_count=len(trends), months_window=active_window, country=active_country,
         rising_trends=rising, new_trends=new, declining_trends=declining,
         all_trends=[to_out(t) for t in trends],
         created_at=report.created_at,

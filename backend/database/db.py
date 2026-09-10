@@ -290,6 +290,19 @@ async def init_db():
             ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
              "months_window INTEGER",
              _col("instore_trends", "months_window")),
+            # Per-trend country scope so buyers don't mix AU + US
+            # shelves in a single analysis. NULL = mixed (legacy runs
+            # + explicit 'All countries' runs). (2026-09-10)
+            ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
+             "country VARCHAR(2)",
+             _col("instore_trends", "country")),
+            # Backfill: every legacy Set was run against 100% US images
+            # (all uploads to date are US), so tagging pre-existing
+            # rows as US matches the reality of what was analysed.
+            # Guarded so the update only runs once.
+            ("UPDATE instore_trends SET country = 'US' WHERE country IS NULL",
+             "SELECT 1 WHERE NOT EXISTS ("
+             "SELECT 1 FROM instore_trends WHERE country IS NULL)"),
             ("CREATE INDEX IF NOT EXISTS ix_instore_catalogue_images_country "
              "ON instore_catalogue_images (country)",
              _idx("ix_instore_catalogue_images_country")),

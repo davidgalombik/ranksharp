@@ -92,6 +92,12 @@ function shortWindow(monthsWindow: number | null | undefined): string {
   return `Last ${monthsWindow} mo`;
 }
 
+// NULL / undefined → "All countries". Otherwise the raw code
+// ("US", "AU") — short enough to sit on a Set tab without wrapping.
+function shortCountry(country: string | null | undefined): string {
+  return country || "All countries";
+}
+
 function describeWindow(monthsWindow: number | null | undefined): string {
   if (monthsWindow == null) return "all-time shelf photos";
   const now = new Date();
@@ -115,8 +121,10 @@ interface InStoreReport {
   summary: string;
   total_items_analysed: number;
   trend_count: number;
-  // Time horizon used by the latest run. null = all time.
+  // Time horizon + country of the Set actually being shown. null =
+  // all time / all countries.
   months_window: number | null;
+  country: string | null;
   rising_trends: InStoreTrend[];
   new_trends: InStoreTrend[];
   declining_trends: InStoreTrend[];
@@ -134,6 +142,7 @@ interface TaskStatus {
 interface InStoreSet {
   generation: number;
   months_window: number | null;
+  country: string | null;
   trend_count: number;
   item_count: number;
 }
@@ -342,6 +351,25 @@ function InStoreTrendsPageInner() {
     router.replace(`${pathname}?${p.toString()}`, { scroll: false });
   };
 
+  // Country pill state (2026-09-10). Splits AU vs US shelf photos so
+  // buyers don't conflate markets. Defaults to US on first visit
+  // (matches today's data — every uploaded photo is US-tagged); the
+  // moment AU uploads land, the AU pill becomes useful.
+  //   ?country=us / au → that country only
+  //   ?country=all     → mixed across every country (explicit)
+  //   absent           → US (default)
+  const rawCountry = searchParams.get("country");
+  const countryFilter: string | null =
+    rawCountry === "all" ? null
+    : rawCountry === "au" ? "AU"
+    : rawCountry === "us" ? "US"
+    : "US";  // first-visit default
+  const setCountryFilter = (v: string | null) => {
+    const p = new URLSearchParams(searchParams.toString());
+    p.set("country", v === null ? "all" : v.toLowerCase());
+    router.replace(`${pathname}?${p.toString()}`, { scroll: false });
+  };
+
   // Which Set to display. Also URL-driven so refreshes stick and
   // deep links work. Undefined = auto-resolve to the latest Set that
   // matches the current pill horizon.
@@ -354,10 +382,13 @@ function InStoreTrendsPageInner() {
     router.push(`${pathname}?${p.toString()}`);
   };
 
-  // Sets whose analysed-horizon matches the current pill. The pill
-  // now filters the view: pick "Last month" and you see only Sets that
-  // were actually run with Last month as the horizon.
-  const matchingSets = sets.filter((s) => s.months_window === monthsWindow);
+  // Sets whose horizon AND country match the current pills. Both
+  // dimensions filter the view: pick "US" + "Last month" and you see
+  // only Sets that were run with that exact pair. Legacy Sets have
+  // country back-filled to 'US' by the migration.
+  const matchingSets = sets.filter((s) =>
+    s.months_window === monthsWindow && s.country === countryFilter
+  );
   // The Set we should fetch. If the URL points to a matching Set, honor
   // it (deep link). Otherwise, latest matching Set. If none match, undefined
   // → empty state ("no analysis for this horizon yet").
@@ -440,10 +471,14 @@ function InStoreTrendsPageInner() {
     setError(null);
     try {
       const endpoint = regenerate ? "regenerate" : "generate";
-      // NOTE: check for null explicitly — 0 is a valid value ("This
-      // month") but falsy in JS, so a plain `monthsWindow ? …` would
-      // drop the param and back-end would default to all-time.
-      const qs = monthsWindow !== null ? `?months_window=${monthsWindow}` : "";
+      // NOTE: check for null explicitly on months_window — 0 is a
+      // valid value ("This month") but falsy in JS, so a plain
+      // `monthsWindow ? …` would drop the param and back-end would
+      // default to all-time.
+      const params = new URLSearchParams();
+      if (monthsWindow !== null) params.set("months_window", String(monthsWindow));
+      if (countryFilter !== null) params.set("country", countryFilter);
+      const qs = params.toString() ? `?${params.toString()}` : "";
       const res = await fetch(`${API_BASE}/api/instore-trends/${endpoint}${qs}`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
@@ -531,7 +566,7 @@ function InStoreTrendsPageInner() {
           <h1 className="text-2xl font-bold text-stone-900">In-store Trends</h1>
           <p className="text-sm text-stone-500 mt-0.5">
             {report
-              ? <>Analysed <span className="font-medium text-stone-700">{describeWindow(report.months_window)}</span> · {report.total_items_analysed.toLocaleString()} items</>
+              ? <>Analysed <span className="font-medium text-stone-700">{report.country ?? "all-country"} · {describeWindow(report.months_window)}</span> · {report.total_items_analysed.toLocaleString()} items</>
               : <>Trends synthesised across the In-store Products catalogue</>}
           </p>
         </div>
@@ -563,6 +598,42 @@ function InStoreTrendsPageInner() {
           )}
         </div>
       </div>
+
+      {/* Country pill selector — splits AU vs US shelves so buyers
+          don't mix markets. Default US (matches today's data — all
+          uploads to date are US-tagged). Same pill-vs-Set semantics
+          as the horizon row: picking a country filters the visible
+          Set + is the country the NEXT Run / Try Again will use. */}
+      {!running && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
+            Country:
+          </span>
+          {([
+            { label: "US",             value: "US",  title: "US shelf photos only" },
+            { label: "AU",             value: "AU",  title: "Australian shelf photos only" },
+            { label: "All countries",  value: null,  title: "Mixed across every country (blends AU + US signals)" },
+          ] as { label: string; value: string | null; title: string }[]).map((opt) => {
+            const active = countryFilter === opt.value;
+            return (
+              <button
+                key={String(opt.value)}
+                type="button"
+                onClick={() => setCountryFilter(opt.value)}
+                title={opt.title}
+                className={clsx(
+                  "px-3 py-1 rounded-full text-xs font-semibold border transition-colors",
+                  active
+                    ? "border-stone-900 bg-stone-900 text-white"
+                    : "border-stone-200 bg-white text-stone-600 hover:border-stone-400"
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Time-window pill selector — sets the horizon the NEXT Run /
           Try Again will analyse. Doesn't refetch on its own; buyer
@@ -615,7 +686,7 @@ function InStoreTrendsPageInner() {
         return (
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
-              Sets ({shortWindow(monthsWindow)}):
+              Sets ({shortCountry(countryFilter)} · {shortWindow(monthsWindow)}):
             </span>
             {matchingSets.map((s) => {
               const active = s.generation === currentGen;
@@ -641,7 +712,7 @@ function InStoreTrendsPageInner() {
                       "ml-1.5 text-[10px] font-normal",
                       active ? "text-stone-300" : "text-stone-400",
                     )}>
-                      · {shortWindow(s.months_window)}
+                      · {shortCountry(s.country)} · {shortWindow(s.months_window)}
                     </span>
                     {isLatest && " ✨"}
                   </button>
@@ -746,6 +817,12 @@ function InStoreTrendsPageInner() {
               </span>
             </span>
             <span className="text-stone-500">
+              <span className="text-stone-400">Country: </span>
+              <span className="font-medium text-stone-900">
+                {shortCountry(report.country)}
+              </span>
+            </span>
+            <span className="text-stone-500">
               <span className="text-stone-400">Time period: </span>
               <span className="font-medium text-stone-900">
                 {shortWindow(report.months_window)}
@@ -796,14 +873,17 @@ function InStoreTrendsPageInner() {
           <div className="text-center py-20 text-stone-400 bg-white border border-stone-200 rounded-xl">
             <p className="text-4xl mb-3">📅</p>
             <p className="font-medium text-stone-700">
-              No analysis for <span className="text-stone-900">{shortWindow(monthsWindow)}</span> yet
+              No analysis for{" "}
+              <span className="text-stone-900">{shortCountry(countryFilter)}</span> ·{" "}
+              <span className="text-stone-900">{shortWindow(monthsWindow)}</span>{" "}
+              yet
             </p>
             <p className="text-sm mt-1">
               Click <em>Run new analysis</em> above to analyse{" "}
-              {describeWindow(monthsWindow)}.
+              {countryFilter ? `${countryFilter} ` : ""}{describeWindow(monthsWindow)}.
             </p>
             <p className="text-xs mt-3 text-stone-400">
-              Runs at other horizons stay available — switch pills to view them.
+              Runs at other countries / horizons stay available — switch pills to view them.
             </p>
           </div>
         )
