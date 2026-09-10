@@ -5,7 +5,7 @@ the InStoreTrend / InStoreTrendReport tables. Source data is the In-store
 Products catalogue (InStoreCatalogueItem rows), not the Online Products
 table.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
@@ -74,6 +74,9 @@ class InStoreReportOut(BaseModel):
     summary: str
     total_items_analysed: int
     trend_count: int
+    # Time horizon used by the latest run. NULL = all time.
+    # Rendered in the header ("Analysed last 3 months of shelf photos").
+    months_window: Optional[int] = None
     rising_trends: list[InStoreTrendOut]
     new_trends: list[InStoreTrendOut]
     declining_trends: list[InStoreTrendOut]
@@ -113,19 +116,37 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/generate")
-async def generate_report():
+async def generate_report(
+    months_window: Optional[int] = Query(
+        default=None,
+        ge=1, le=60,
+        description="Restrict analysis to shelf photos uploaded in the last "
+                    "N months. Omit for all time.",
+    ),
+):
     """Trigger a fresh in-store trend analysis."""
     from tasks.analysis_tasks import run_instore_trend_analysis_task
-    task = run_instore_trend_analysis_task.apply_async(queue="reports")
-    return {"task_id": task.id, "status": "queued"}
+    task = run_instore_trend_analysis_task.apply_async(
+        queue="reports", args=[months_window],
+    )
+    return {"task_id": task.id, "status": "queued", "months_window": months_window}
 
 
 @router.post("/regenerate")
-async def regenerate_report():
+async def regenerate_report(
+    months_window: Optional[int] = Query(
+        default=None,
+        ge=1, le=60,
+        description="Restrict analysis to shelf photos uploaded in the last "
+                    "N months. Omit for all time.",
+    ),
+):
     """Generate a new generation of trends for the current week (Try Again)."""
     from tasks.analysis_tasks import regenerate_instore_trend_analysis_task
-    task = regenerate_instore_trend_analysis_task.apply_async(queue="reports")
-    return {"task_id": task.id, "status": "queued"}
+    task = regenerate_instore_trend_analysis_task.apply_async(
+        queue="reports", args=[months_window],
+    )
+    return {"task_id": task.id, "status": "queued", "months_window": months_window}
 
 
 @router.delete("/clear")
@@ -247,7 +268,8 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
         return InStoreReportOut(
             id=report.id, week_start=report.week_start, title=report.title,
             summary=report.summary, total_items_analysed=report.total_items_analysed,
-            trend_count=0, rising_trends=[], new_trends=[], declining_trends=[],
+            trend_count=0, months_window=report.months_window,
+            rising_trends=[], new_trends=[], declining_trends=[],
             all_trends=[], created_at=report.created_at,
         )
 
@@ -363,7 +385,7 @@ async def _build_report_out(report: InStoreTrendReport, db: AsyncSession) -> InS
     return InStoreReportOut(
         id=report.id, week_start=report.week_start, title=report.title,
         summary=report.summary, total_items_analysed=report.total_items_analysed,
-        trend_count=len(trends),
+        trend_count=len(trends), months_window=report.months_window,
         rising_trends=rising, new_trends=new, declining_trends=declining,
         all_trends=[to_out(t) for t in trends],
         created_at=report.created_at,

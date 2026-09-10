@@ -616,6 +616,12 @@ class InStoreTrendReport(Base):
     trend_ids: Mapped[list] = mapped_column(JSON, default=list)
     total_items_analysed: Mapped[int] = mapped_column(Integer, default=0)
     generation_count: Mapped[int] = mapped_column(Integer, default=1)
+    # Time window used by the latest run of this report. NULL = all time.
+    # A buyer running "Last 3 months" then re-running "Last 6 months"
+    # updates this to 6 — the value reflects the most recent Try Again,
+    # not per-Set. Displayed in the header so buyers know what horizon
+    # produced these trends. (2026-09-10)
+    months_window: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

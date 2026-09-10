@@ -86,6 +86,8 @@ interface InStoreReport {
   summary: string;
   total_items_analysed: number;
   trend_count: number;
+  // Time horizon used by the latest run. null = all time.
+  months_window: number | null;
   rising_trends: InStoreTrend[];
   new_trends: InStoreTrend[];
   declining_trends: InStoreTrend[];
@@ -276,6 +278,11 @@ export default function InStoreTrendsPage() {
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [categoryFilter, setCategoryFilter] = useState<string>("");
+  // Time horizon to analyse. null = all time. Default 3 months so a Run
+  // reflects "what's on shelves right now" rather than every photo ever
+  // uploaded. Persisted per-session; changing it does NOT auto-rerun —
+  // the buyer picks a window then clicks Run/Try Again.
+  const [monthsWindow, setMonthsWindow] = useState<number | null>(3);
 
   const loadLatest = useCallback(async () => {
     setLoading(true);
@@ -322,7 +329,8 @@ export default function InStoreTrendsPage() {
     setError(null);
     try {
       const endpoint = regenerate ? "regenerate" : "generate";
-      const res = await fetch(`${API_BASE}/api/instore-trends/${endpoint}`, { method: "POST" });
+      const qs = monthsWindow ? `?months_window=${monthsWindow}` : "";
+      const res = await fetch(`${API_BASE}/api/instore-trends/${endpoint}${qs}`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setRunning({ task_id: data.task_id, state: "PENDING", pct: 2, step: "Queued…" });
@@ -356,7 +364,11 @@ export default function InStoreTrendsPage() {
         <div>
           <h1 className="text-2xl font-bold text-stone-900">In-store Trends</h1>
           <p className="text-sm text-stone-500 mt-0.5">
-            Trends synthesised across the In-store Products catalogue
+            {report?.months_window
+              ? <>Analysed the <span className="font-medium text-stone-700">last {report.months_window} month{report.months_window === 1 ? "" : "s"}</span> of shelf photos · {report.total_items_analysed.toLocaleString()} items</>
+              : report
+                ? <>Analysed <span className="font-medium text-stone-700">all-time</span> shelf photos · {report.total_items_analysed.toLocaleString()} items</>
+                : <>Trends synthesised across the In-store Products catalogue</>}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -387,6 +399,44 @@ export default function InStoreTrendsPage() {
           )}
         </div>
       </div>
+
+      {/* Time-window pill selector — sets the horizon the NEXT Run /
+          Try Again will analyse. Doesn't refetch on its own; buyer
+          picks then hits the button. Default is Last 3 months so a
+          fresh run reflects current shelves rather than every photo
+          ever uploaded. Hidden while an analysis is running. */}
+      {!running && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
+            Analyse:
+          </span>
+          {([
+            { label: "Last month",    value: 1 },
+            { label: "Last 3 months", value: 3 },
+            { label: "Last 6 months", value: 6 },
+            { label: "All time",      value: null },
+          ] as { label: string; value: number | null }[]).map((opt) => {
+            const active = monthsWindow === opt.value;
+            return (
+              <button
+                key={String(opt.value)}
+                onClick={() => setMonthsWindow(opt.value)}
+                className={clsx(
+                  "px-3 py-1 rounded-full text-xs font-semibold border transition-colors",
+                  active
+                    ? "border-stone-900 bg-stone-900 text-white"
+                    : "border-stone-200 bg-white text-stone-600 hover:border-stone-400"
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+          <span className="text-xs text-stone-400 ml-1">
+            (applies to the next Run / Try again)
+          </span>
+        </div>
+      )}
 
       {/* Progress */}
       {running && (

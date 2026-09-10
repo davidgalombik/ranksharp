@@ -275,18 +275,25 @@ def regenerate_fragrance_trend_analysis_all_segments_task(self):
 
 
 @app.task(bind=True, queue="reports")
-def run_instore_trend_analysis_task(self):
-    """Run the in-store catalogue trend clustering + report generation."""
-    asyncio.run(_run_instore_trend_analysis(self))
+def run_instore_trend_analysis_task(self, months_window=None):
+    """Run the in-store catalogue trend clustering + report generation.
+
+    `months_window`: None = analyse all uploaded shelf photos ever;
+    integer N = restrict to photos uploaded in the last N months.
+    """
+    asyncio.run(_run_instore_trend_analysis(self, months_window=months_window))
 
 
 @app.task(bind=True, queue="reports")
-def regenerate_instore_trend_analysis_task(self):
-    """Append a new generation to the current in-store trend report (Try Again)."""
-    asyncio.run(_run_instore_trend_analysis(self))
+def regenerate_instore_trend_analysis_task(self, months_window=None):
+    """Append a new generation to the current in-store trend report (Try Again).
+
+    `months_window`: same semantics as run_instore_trend_analysis_task.
+    """
+    asyncio.run(_run_instore_trend_analysis(self, months_window=months_window))
 
 
-async def _run_instore_trend_analysis(task):
+async def _run_instore_trend_analysis(task, months_window=None):
     from database.db import AsyncSessionLocal, async_engine
     from analysis.instore_trend_engine import InStoreTrendEngine
 
@@ -294,13 +301,14 @@ async def _run_instore_trend_analysis(task):
 
     async with AsyncSessionLocal() as session:
         engine_instance = InStoreTrendEngine(session, task=task)
-        report = await engine_instance.regenerate_analysis()
+        report = await engine_instance.regenerate_analysis(months_window=months_window)
         if report:
             log.info(
                 "instore_trend_analysis_complete",
                 report_id=report.id,
                 generation_count=report.generation_count,
                 trends=len(report.trend_ids),
+                months_window=months_window,
             )
 
 

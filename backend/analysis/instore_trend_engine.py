@@ -113,10 +113,20 @@ class InStoreTrendEngine:
 
     # ── Public entry point ────────────────────────────────────────────────
 
-    async def regenerate_analysis(self, week_start: Optional[datetime] = None) -> Optional[InStoreTrendReport]:
+    async def regenerate_analysis(
+        self,
+        week_start: Optional[datetime] = None,
+        months_window: Optional[int] = None,
+    ) -> Optional[InStoreTrendReport]:
         """Run a fresh in-store trend analysis. If a report for `week_start`
         already exists, append a new generation (Try Again) — keeping prior
         trends and their examples intact.
+
+        `months_window` scopes the analysed items to those whose parent
+        InStoreCatalogueImage was uploaded within the last N months.
+        None (default) = all time. Buyers pick this from a pill selector
+        on the trends page. Written back to the report row so the header
+        can label the horizon that produced these trends.
         """
         if week_start is None:
             today = datetime.utcnow().date()
@@ -125,7 +135,11 @@ class InStoreTrendEngine:
                 datetime.min.time(),
             )
 
-        log.info("instore_trend_run_start", week_start=week_start.isoformat())
+        log.info(
+            "instore_trend_run_start",
+            week_start=week_start.isoformat(),
+            months_window=months_window,
+        )
         self._progress(3, "Loading prior trends for exclusion…")
 
         # Collect prior trend names so Claude doesn't repeat them.
@@ -138,10 +152,18 @@ class InStoreTrendEngine:
         max_generation = max((r[1] for r in prev_rows), default=0)
         next_generation = max_generation + 1
 
-        self._progress(8, "Loading in-store catalogue items…")
-        items = await self._load_items()
+        window_label = (
+            f"last {months_window} month{'s' if months_window != 1 else ''}"
+            if months_window else "all time"
+        )
+        self._progress(8, f"Loading in-store items ({window_label})…")
+        items = await self._load_items(months_window=months_window)
         if len(items) < self.min_cluster_size * 2:
-            log.warning("instore_trend_insufficient_items", count=len(items))
+            log.warning(
+                "instore_trend_insufficient_items",
+                count=len(items),
+                months_window=months_window,
+            )
             return None
 
         items_by_id: dict[int, dict] = {it["item"].id: it for it in items}
@@ -219,11 +241,13 @@ class InStoreTrendEngine:
             report.trend_ids = (report.trend_ids or []) + committed_ids
             report.generation_count = next_generation
             report.total_items_analysed = len(items)
+            report.months_window = months_window
         else:
             report_values = await self._generate_report_meta(
                 week_start, [t for t, _ in new_trends], len(items),
             )
             report_values["generation_count"] = next_generation
+            report_values["months_window"] = months_window
             upsert_stmt = (
                 pg_insert(InStoreTrendReport)
                 .values(**report_values)
@@ -243,9 +267,17 @@ class InStoreTrendEngine:
 
     # ── Data loading ──────────────────────────────────────────────────────
 
-    async def _load_items(self) -> list[dict]:
-        """Hero + main items only, with non-null embeddings."""
-        result = await self.db.execute(
+    async def _load_items(self, months_window: Optional[int] = None) -> list[dict]:
+        """Hero + main items only, with non-null embeddings.
+
+        When `months_window` is set, restricts items to those whose parent
+        image was uploaded within the last N months (based on
+        InStoreCatalogueImage.created_at). None = all time. A 30-day-per-
+        month approximation is fine here — the window is a rough horizon
+        buyers use to distinguish "recent shelves" from "everything ever",
+        not a precise calendar boundary.
+        """
+        stmt = (
             select(InStoreCatalogueItem, InStoreCatalogueImage)
             .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
             .where(
@@ -255,6 +287,10 @@ class InStoreTrendEngine:
                 )
             )
         )
+        if months_window and months_window > 0:
+            cutoff = datetime.utcnow() - timedelta(days=months_window * 30)
+            stmt = stmt.where(InStoreCatalogueImage.created_at >= cutoff)
+        result = await self.db.execute(stmt)
         return [{"item": it, "image": img} for it, img in result.all()]
 
     # ── Clustering ────────────────────────────────────────────────────────

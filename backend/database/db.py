@@ -280,6 +280,11 @@ async def init_db():
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
              "country VARCHAR(2) NOT NULL DEFAULT 'US'",
              _col("instore_catalogue_images", "country")),
+            # In-store trend reports: months_window records the time
+            # horizon the run analysed. NULL = all time. (2026-09-10)
+            ("ALTER TABLE instore_trend_reports ADD COLUMN IF NOT EXISTS "
+             "months_window INTEGER",
+             _col("instore_trend_reports", "months_window")),
             ("CREATE INDEX IF NOT EXISTS ix_instore_catalogue_images_country "
              "ON instore_catalogue_images (country)",
              _idx("ix_instore_catalogue_images_country")),
