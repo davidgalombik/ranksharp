@@ -128,6 +128,7 @@ interface InStoreReport {
   // all time / all countries.
   months_window: number | null;
   country: string | null;
+  retailer: string | null;
   rising_trends: InStoreTrend[];
   new_trends: InStoreTrend[];
   declining_trends: InStoreTrend[];
@@ -146,8 +147,18 @@ interface InStoreSet {
   generation: number;
   months_window: number | null;
   country: string | null;
+  retailer: string | null;   // null = all retailers in the country
   trend_count: number;
   item_count: number;
+}
+
+// What's runnable at the current country + horizon — powers the retailer
+// dropdown (item counts + ✓ for scopes that already have a Set).
+interface ScopeCounts {
+  min_items: number;
+  total_items: number;
+  all_retailers_has_set: boolean;
+  retailers: { name: string; item_count: number; has_set: boolean }[];
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -348,6 +359,7 @@ function InStoreTrendsPageInner() {
   const [report, setReport] = useState<InStoreReport | null>(null);
   const [reports, setReports] = useState<InStoreReport[]>([]);
   const [sets, setSets] = useState<InStoreSet[]>([]);
+  const [scope, setScope] = useState<ScopeCounts | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<TaskStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -392,8 +404,34 @@ function InStoreTrendsPageInner() {
   const setCountryFilter = (v: string | null) => {
     const p = new URLSearchParams(searchParams.toString());
     p.set("country", v === null ? "all" : v.toLowerCase());
+    // A retailer belongs to a country — changing country clears it.
+    p.delete("retailer");
     router.replace(`${pathname}?${p.toString()}`, { scroll: false });
   };
+
+  // Retailer scope (2026-09-10): a single store walk, or null for every
+  // retailer in the country (market-level aggregate). URL-driven like the
+  // rest. The dropdown is filtered by the country pill so the two can't
+  // disagree.
+  const retailerFilter: string | null = searchParams.get("retailer") || null;
+  const setRetailerFilter = (v: string | null) => {
+    const p = new URLSearchParams(searchParams.toString());
+    if (v) p.set("retailer", v); else p.delete("retailer");
+    router.replace(`${pathname}?${p.toString()}`, { scroll: false });
+  };
+
+  // Item counts + existing-Set marks for the current country + horizon.
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams();
+    if (countryFilter !== null) params.set("country", countryFilter);
+    if (monthsWindow !== null) params.set("months_window", String(monthsWindow));
+    fetch(`${API_BASE}/api/instore-trends/scope-counts?${params.toString()}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled) setScope(d); })
+      .catch(() => { if (!cancelled) setScope(null); });
+    return () => { cancelled = true; };
+  }, [countryFilter, monthsWindow, sets]);
 
   // Which Set to display. Also URL-driven so refreshes stick and
   // deep links work. Undefined = auto-resolve to the latest Set that
@@ -412,7 +450,9 @@ function InStoreTrendsPageInner() {
   // only Sets that were run with that exact pair. Legacy Sets have
   // country back-filled to 'US' by the migration.
   const matchingSets = sets.filter((s) =>
-    s.months_window === monthsWindow && s.country === countryFilter
+    s.months_window === monthsWindow
+    && s.country === countryFilter
+    && s.retailer === retailerFilter
   );
   // The Set we should fetch. If the URL points to a matching Set, honor
   // it (deep link). Otherwise, latest matching Set. If none match, undefined
@@ -503,6 +543,7 @@ function InStoreTrendsPageInner() {
       const params = new URLSearchParams();
       if (monthsWindow !== null) params.set("months_window", String(monthsWindow));
       if (countryFilter !== null) params.set("country", countryFilter);
+      if (retailerFilter !== null) params.set("retailer", retailerFilter);
       const qs = params.toString() ? `?${params.toString()}` : "";
       const res = await fetch(`${API_BASE}/api/instore-trends/${endpoint}${qs}`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
@@ -591,7 +632,7 @@ function InStoreTrendsPageInner() {
           <h1 className="text-2xl font-bold text-stone-900">In-store Trends</h1>
           <p className="text-sm text-stone-500 mt-0.5">
             {report
-              ? <>Analysed <span className="font-medium text-stone-700">{report.country ?? "all-country"} · {describeWindow(report.months_window)}</span> · {report.total_items_analysed.toLocaleString()} items</>
+              ? <>Analysed <span className="font-medium text-stone-700">{report.retailer ?? report.country ?? "all-country"} · {describeWindow(report.months_window)}</span> · {report.total_items_analysed.toLocaleString()} items</>
               : <>Trends synthesised across the In-store Products catalogue</>}
           </p>
         </div>
@@ -657,6 +698,41 @@ function InStoreTrendsPageInner() {
               </button>
             );
           })}
+
+          {/* Retailer dropdown — a single store walk, or the whole
+              country. Filtered by the country pill. Shows hero/main item
+              counts at the current horizon (so you know before clicking
+              Run whether there's enough to cluster) and ✓ where a Set
+              already exists at this scope. */}
+          <span className="text-xs text-stone-400 font-medium uppercase tracking-wider ml-3">
+            Retailer:
+          </span>
+          <select
+            value={retailerFilter ?? ""}
+            onChange={(e) => setRetailerFilter(e.target.value || null)}
+            className="border border-stone-200 rounded-lg px-2.5 py-1 text-xs font-semibold bg-white focus:outline-none max-w-[260px]"
+          >
+            <option value="">
+              All retailers
+              {scope ? ` (${scope.total_items.toLocaleString()} items)` : ""}
+              {scope?.all_retailers_has_set ? " ✓" : ""}
+            </option>
+            {(scope?.retailers ?? []).map((r) => {
+              const tooFew = scope ? r.item_count < scope.min_items : false;
+              return (
+                <option key={r.name} value={r.name} disabled={tooFew}>
+                  {r.name} ({r.item_count.toLocaleString()} item{r.item_count === 1 ? "" : "s"}
+                  {tooFew ? " — too few" : ""})
+                  {r.has_set ? " ✓" : ""}
+                </option>
+              );
+            })}
+            {/* Keep a deep-linked retailer selectable even if it has no
+                items at this horizon, so the URL doesn't silently reset. */}
+            {retailerFilter && !(scope?.retailers ?? []).some((r) => r.name === retailerFilter) && (
+              <option value={retailerFilter}>{retailerFilter} (no items at this horizon)</option>
+            )}
+          </select>
         </div>
       )}
 
@@ -711,7 +787,7 @@ function InStoreTrendsPageInner() {
         return (
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
-              Sets ({shortCountry(countryFilter)} · {shortWindow(monthsWindow)}):
+              Sets ({retailerFilter ?? shortCountry(countryFilter)} · {shortWindow(monthsWindow)}):
             </span>
             {matchingSets.map((s) => {
               const active = s.generation === currentGen;
@@ -737,7 +813,8 @@ function InStoreTrendsPageInner() {
                       "ml-1.5 text-[10px] font-normal",
                       active ? "text-stone-300" : "text-stone-400",
                     )}>
-                      · {shortCountry(s.country)} · {shortWindow(s.months_window)}
+                      {/* Retailer implies country, so show one or the other. */}
+                      · {s.retailer ?? shortCountry(s.country)} · {shortWindow(s.months_window)}
                     </span>
                     {isLatest && " ✨"}
                   </button>
@@ -848,6 +925,12 @@ function InStoreTrendsPageInner() {
               </span>
             </span>
             <span className="text-stone-500">
+              <span className="text-stone-400">Retailer: </span>
+              <span className="font-medium text-stone-900">
+                {report.retailer ?? "All retailers"}
+              </span>
+            </span>
+            <span className="text-stone-500">
               <span className="text-stone-400">Time period: </span>
               <span className="font-medium text-stone-900">
                 {shortWindow(report.months_window)}
@@ -899,16 +982,17 @@ function InStoreTrendsPageInner() {
             <p className="text-4xl mb-3">📅</p>
             <p className="font-medium text-stone-700">
               No analysis for{" "}
-              <span className="text-stone-900">{shortCountry(countryFilter)}</span> ·{" "}
+              <span className="text-stone-900">{retailerFilter ?? shortCountry(countryFilter)}</span> ·{" "}
               <span className="text-stone-900">{shortWindow(monthsWindow)}</span>{" "}
               yet
             </p>
             <p className="text-sm mt-1">
               Click <em>Run new analysis</em> above to analyse{" "}
-              {countryFilter ? `${countryFilter} ` : ""}{describeWindow(monthsWindow)}.
+              {retailerFilter ? `${retailerFilter}'s ` : countryFilter ? `${countryFilter} ` : ""}{describeWindow(monthsWindow)}.
             </p>
             <p className="text-xs mt-3 text-stone-400">
-              Runs at other countries / horizons stay available — switch pills to view them.
+              Runs at other retailers / countries / horizons stay available — switch scope to view them.
+              {" "}Retailers with a ✓ in the dropdown already have a Set at this horizon.
             </p>
           </div>
         )

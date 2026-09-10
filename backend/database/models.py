@@ -664,6 +664,10 @@ class InStoreTrend(Base):
     # than per-report so each Set carries its own country tag, matching
     # months_window's shape. (2026-09-10)
     country: Mapped[Optional[str]] = mapped_column(String(2), nullable=True, default=None)
+    # Retailer this Set was scoped to — a single store walk. NULL = all
+    # retailers in the country (market-level aggregate). Matches the
+    # free-text InStoreCatalogueImage.retailer value. (2026-09-10)
+    retailer: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, default=None)
     # Buyer-voice momentum for this single store walk. One of:
     # emerging | noted | prominent | strong_focus | shifting. Mirrors the
     # vocabulary on the buying team's trend boards. `status` is derived

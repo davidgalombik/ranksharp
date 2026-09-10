@@ -82,6 +82,7 @@ class InStoreReportOut(BaseModel):
     # was analysed.
     months_window: Optional[int] = None
     country: Optional[str] = None
+    retailer: Optional[str] = None
     rising_trends: list[InStoreTrendOut]
     new_trends: list[InStoreTrendOut]
     declining_trends: list[InStoreTrendOut]
@@ -126,6 +127,7 @@ class InStoreSetOut(BaseModel):
     generation: int
     months_window: Optional[int] = None
     country: Optional[str] = None
+    retailer: Optional[str] = None  # None = all retailers in scope
     trend_count: int
     item_count: int  # sum of trend.item_count across the set
 
@@ -151,6 +153,7 @@ async def list_sets(db: AsyncSession = Depends(get_db)):
             InStoreTrend.generation,
             func.max(InStoreTrend.months_window).label("months_window"),
             func.max(InStoreTrend.country).label("country"),
+            func.max(InStoreTrend.retailer).label("retailer"),
             func.count(InStoreTrend.id).label("trend_count"),
             func.coalesce(func.sum(InStoreTrend.item_count), 0).label("item_count"),
         )
@@ -163,14 +166,96 @@ async def list_sets(db: AsyncSession = Depends(get_db)):
             generation=int(gen),
             months_window=(int(mw) if mw is not None else None),
             country=(str(ctry) if ctry else None),
+            retailer=(str(rt) if rt else None),
             trend_count=int(tc),
             item_count=int(ic),
         )
-        for gen, mw, ctry, tc, ic in rows.all()
+        for gen, mw, ctry, rt, tc, ic in rows.all()
     ]
 
 
-@router.get("/{report_id}", response_model=InStoreReportOut)
+class ScopeRetailerOut(BaseModel):
+    name: str
+    item_count: int   # hero/main items with embeddings — what a run would load
+    has_set: bool     # a Set already exists at this country + horizon + retailer
+
+
+class ScopeCountsOut(BaseModel):
+    """What's runnable at the current country + horizon. Powers the retailer
+    dropdown: item counts so buyers know whether there's enough to analyse,
+    and ✓ marks for scopes that already have a Set."""
+    min_items: int
+    total_items: int
+    all_retailers_has_set: bool
+    retailers: list[ScopeRetailerOut]
+
+
+@router.get("/scope-counts", response_model=ScopeCountsOut)
+async def scope_counts(
+    country: Optional[str] = None,
+    months_window: Optional[int] = Query(default=None, ge=0, le=60),
+    db: AsyncSession = Depends(get_db),
+):
+    # Same predicates as InStoreTrendEngine._load_items so the counts here
+    # equal what the engine would actually cluster.
+    from analysis.instore_trend_engine import _month_range
+    from config import settings
+
+    country = _validate_country(country)
+    lo, hi = _month_range(months_window)
+
+    base = (
+        select(InStoreCatalogueImage.retailer, func.count(InStoreCatalogueItem.id))
+        .select_from(InStoreCatalogueItem)
+        .join(InStoreCatalogueImage, InStoreCatalogueItem.image_id == InStoreCatalogueImage.id)
+        .where(InStoreCatalogueItem.embedding.isnot(None))
+        .where(InStoreCatalogueItem.prominence.in_(["hero", "main"]))
+    )
+    if lo is not None:
+        base = base.where(InStoreCatalogueImage.created_at >= lo)
+    if hi is not None:
+        base = base.where(InStoreCatalogueImage.created_at < hi)
+    if country:
+        base = base.where(InStoreCatalogueImage.country == country)
+    rows = (await db.execute(
+        base.group_by(InStoreCatalogueImage.retailer)
+            .order_by(InStoreCatalogueImage.retailer)
+    )).all()
+
+    # Which scopes already have a Set on the latest report.
+    have: set[Optional[str]] = set()
+    latest_report = (await db.execute(
+        select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
+    )).scalar_one_or_none()
+    if latest_report:
+        q = (
+            select(InStoreTrend.retailer)
+            .where(InStoreTrend.week_start == latest_report.week_start)
+            .distinct()
+        )
+        q = (q.where(InStoreTrend.months_window == months_window)
+             if months_window is not None
+             else q.where(InStoreTrend.months_window.is_(None)))
+        q = (q.where(InStoreTrend.country == country)
+             if country
+             else q.where(InStoreTrend.country.is_(None)))
+        have = {r for (r,) in (await db.execute(q)).all()}
+
+    retailers = [
+        ScopeRetailerOut(name=str(name), item_count=int(n), has_set=(str(name) in have))
+        for name, n in rows if name
+    ]
+    return ScopeCountsOut(
+        min_items=max(5, settings.trend_cluster_min_size) * 2,
+        total_items=sum(int(n) for _, n in rows),
+        all_retailers_has_set=(None in have),
+        retailers=retailers,
+    )
+
+
+# :int converter so sibling static paths (/sets, /scope-counts, /latest)
+# can never be swallowed by this param route — same trap /trends/compare hit.
+@router.get("/{report_id:int}", response_model=InStoreReportOut)
 async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
     report = await db.get(InStoreTrendReport, report_id)
     if not report:
@@ -201,16 +286,22 @@ async def generate_report(
         description="Restrict shelf photos to a single country ('US' or 'AU'). "
                     "Omit to analyse mixed across every country.",
     ),
+    retailer: Optional[str] = Query(
+        default=None,
+        description="Restrict to a single retailer's shelf photos (exact match "
+                    "on the catalogue's retailer tag). Omit for all retailers.",
+    ),
 ):
     """Trigger a fresh in-store trend analysis."""
     from tasks.analysis_tasks import run_instore_trend_analysis_task
     country = _validate_country(country)
+    retailer = (retailer or "").strip() or None
     task = run_instore_trend_analysis_task.apply_async(
-        queue="reports", args=[months_window, country],
+        queue="reports", args=[months_window, country, retailer],
     )
     return {
         "task_id": task.id, "status": "queued",
-        "months_window": months_window, "country": country,
+        "months_window": months_window, "country": country, "retailer": retailer,
     }
 
 
@@ -225,16 +316,21 @@ async def regenerate_report(
         description="Restrict shelf photos to a single country ('US' or 'AU'). "
                     "Omit to analyse mixed across every country.",
     ),
+    retailer: Optional[str] = Query(
+        default=None,
+        description="Restrict to a single retailer's shelf photos. Omit for all.",
+    ),
 ):
     """Generate a new generation of trends for the current week (Try Again)."""
     from tasks.analysis_tasks import regenerate_instore_trend_analysis_task
     country = _validate_country(country)
+    retailer = (retailer or "").strip() or None
     task = regenerate_instore_trend_analysis_task.apply_async(
-        queue="reports", args=[months_window, country],
+        queue="reports", args=[months_window, country, retailer],
     )
     return {
         "task_id": task.id, "status": "queued",
-        "months_window": months_window, "country": country,
+        "months_window": months_window, "country": country, "retailer": retailer,
     }
 
 
@@ -476,7 +572,7 @@ async def _build_report_out(
         return InStoreReportOut(
             id=report.id, week_start=report.week_start, title=report.title,
             summary=report.summary, total_items_analysed=report.total_items_analysed,
-            trend_count=0, months_window=report.months_window, country=None,
+            trend_count=0, months_window=report.months_window, country=None, retailer=None,
             rising_trends=[], new_trends=[], declining_trends=[],
             all_trends=[], created_at=report.created_at,
         )
@@ -507,11 +603,13 @@ async def _build_report_out(
     # (was mixed before the column existed).
     active_window = report.months_window
     active_country: Optional[str] = None
+    active_retailer: Optional[str] = None
     if trends:
         window_from_trends = trends[0].months_window
         if window_from_trends is not None:
             active_window = window_from_trends
         active_country = trends[0].country
+        active_retailer = trends[0].retailer
 
     # Bulk-fetch examples + their items + parent images for retailer/image_id.
     # "Is-a-product" gate — filter to items that Claude Vision actually
@@ -619,6 +717,7 @@ async def _build_report_out(
         id=report.id, week_start=report.week_start, title=report.title,
         summary=report.summary, total_items_analysed=report.total_items_analysed,
         trend_count=len(trends), months_window=active_window, country=active_country,
+        retailer=active_retailer,
         rising_trends=rising, new_trends=new, declining_trends=declining,
         all_trends=[to_out(t) for t in trends],
         created_at=report.created_at,

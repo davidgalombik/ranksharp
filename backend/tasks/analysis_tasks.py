@@ -275,24 +275,30 @@ def regenerate_fragrance_trend_analysis_all_segments_task(self):
 
 
 @app.task(bind=True, queue="reports")
-def run_instore_trend_analysis_task(self, months_window=None, country=None):
+def run_instore_trend_analysis_task(self, months_window=None, country=None, retailer=None):
     """Run the in-store catalogue trend clustering + report generation.
 
     `months_window`: None = all uploaded shelf photos ever; integer
     N = calendar-month horizon (see engine _month_range).
     `country`: None = mixed across every country; 'US' / 'AU' scopes
     to shelf photos tagged with that country.
+    `retailer`: None = every retailer in scope; a name scopes to a
+    single store walk.
     """
-    asyncio.run(_run_instore_trend_analysis(self, months_window=months_window, country=country))
+    asyncio.run(_run_instore_trend_analysis(
+        self, months_window=months_window, country=country, retailer=retailer,
+    ))
 
 
 @app.task(bind=True, queue="reports")
-def regenerate_instore_trend_analysis_task(self, months_window=None, country=None):
+def regenerate_instore_trend_analysis_task(self, months_window=None, country=None, retailer=None):
     """Append a new generation to the current in-store trend report (Try Again)."""
-    asyncio.run(_run_instore_trend_analysis(self, months_window=months_window, country=country))
+    asyncio.run(_run_instore_trend_analysis(
+        self, months_window=months_window, country=country, retailer=retailer,
+    ))
 
 
-async def _run_instore_trend_analysis(task, months_window=None, country=None):
+async def _run_instore_trend_analysis(task, months_window=None, country=None, retailer=None):
     from database.db import AsyncSessionLocal, async_engine
     from analysis.instore_trend_engine import InStoreTrendEngine
 
@@ -301,7 +307,7 @@ async def _run_instore_trend_analysis(task, months_window=None, country=None):
     async with AsyncSessionLocal() as session:
         engine_instance = InStoreTrendEngine(session, task=task)
         report = await engine_instance.regenerate_analysis(
-            months_window=months_window, country=country,
+            months_window=months_window, country=country, retailer=retailer,
         )
         if report:
             log.info(
@@ -311,6 +317,7 @@ async def _run_instore_trend_analysis(task, months_window=None, country=None):
                 trends=len(report.trend_ids),
                 months_window=months_window,
                 country=country,
+                retailer=retailer,
             )
 
 

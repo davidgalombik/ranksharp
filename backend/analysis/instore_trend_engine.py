@@ -219,10 +219,15 @@ class InStoreTrendEngine:
         week_start: Optional[datetime] = None,
         months_window: Optional[int] = None,
         country: Optional[str] = None,
+        retailer: Optional[str] = None,
     ) -> Optional[InStoreTrendReport]:
         """Run a fresh in-store trend analysis. If a report for `week_start`
         already exists, append a new generation (Try Again) — keeping prior
         trends and their examples intact.
+
+        `retailer` scopes to a single store walk (exact match on
+        InStoreCatalogueImage.retailer). None = every retailer in scope —
+        the market-level aggregate.
 
         `months_window` scopes the analysed items to those whose parent
         InStoreCatalogueImage was uploaded within the last N months.
@@ -248,6 +253,7 @@ class InStoreTrendEngine:
             week_start=week_start.isoformat(),
             months_window=months_window,
             country=country,
+            retailer=retailer,
         )
         self._progress(3, "Loading prior trends for exclusion…")
 
@@ -273,6 +279,9 @@ class InStoreTrendEngine:
             q = (q.where(InStoreTrend.country == country)
                  if country
                  else q.where(InStoreTrend.country.is_(None)))
+            q = (q.where(InStoreTrend.retailer == retailer)
+                 if retailer
+                 else q.where(InStoreTrend.retailer.is_(None)))
             return q
 
         prev_result = await self.db.execute(_same_scope(
@@ -284,15 +293,18 @@ class InStoreTrendEngine:
             f"last {months_window} month{'s' if months_window != 1 else ''}"
             if months_window else "all time"
         )
-        country_label = country or "all countries"
-        self._progress(8, f"Loading in-store items ({country_label}, {window_label})…")
-        items = await self._load_items(months_window=months_window, country=country)
+        scope_label = retailer or country or "all countries"
+        self._progress(8, f"Loading in-store items ({scope_label}, {window_label})…")
+        items = await self._load_items(
+            months_window=months_window, country=country, retailer=retailer,
+        )
         if len(items) < self.min_cluster_size * 2:
             log.warning(
                 "instore_trend_insufficient_items",
                 count=len(items),
                 months_window=months_window,
                 country=country,
+                retailer=retailer,
             )
             return None
 
@@ -307,7 +319,7 @@ class InStoreTrendEngine:
         self._progress(35, f"Found {len(clusters)} clusters — sending to Claude…")
         trend_dicts = await self._holistic_analysis(
             clusters, items_by_id, previously_found,
-            months_window=months_window, country=country,
+            months_window=months_window, country=country, retailer=retailer,
         )
         if not trend_dicts:
             log.warning("instore_trend_no_claude_trends")
@@ -324,6 +336,7 @@ class InStoreTrendEngine:
             # /sets can label each tab and buyers can tell them apart.
             trend.months_window = months_window
             trend.country = country
+            trend.retailer = retailer
             self.db.add(trend)
             new_trends.append((trend, td))
 
@@ -410,13 +423,18 @@ class InStoreTrendEngine:
         self,
         months_window: Optional[int] = None,
         country: Optional[str] = None,
+        retailer: Optional[str] = None,
     ) -> list[dict]:
         """Hero + main items only, with non-null embeddings.
 
         `months_window` is a CALENDAR-month horizon (2026-09-10) —
         see _month_range() for the mapping. `country` filters
-        InStoreCatalogueImage.country ('US' / 'AU'); None = mixed
-        (no filter).
+        InStoreCatalogueImage.country ('US' / 'AU'); `retailer` filters
+        InStoreCatalogueImage.retailer (exact match). None = no filter
+        on that dimension.
+
+        The /scope-counts API mirrors these exact predicates so the
+        dropdown's item counts equal what a run would actually load.
         """
         stmt = (
             select(InStoreCatalogueItem, InStoreCatalogueImage)
@@ -435,6 +453,8 @@ class InStoreTrendEngine:
             stmt = stmt.where(InStoreCatalogueImage.created_at < hi)
         if country:
             stmt = stmt.where(InStoreCatalogueImage.country == country)
+        if retailer:
+            stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
         result = await self.db.execute(stmt)
         return [{"item": it, "image": img} for it, img in result.all()]
 
@@ -539,10 +559,11 @@ class InStoreTrendEngine:
         previously_found: list[str],
         months_window: Optional[int] = None,
         country: Optional[str] = None,
+        retailer: Optional[str] = None,
     ) -> list[dict]:
         payload = self._build_payload(
             clusters, items_by_id, previously_found,
-            months_window=months_window, country=country,
+            months_window=months_window, country=country, retailer=retailer,
         )
 
         try:
@@ -578,6 +599,7 @@ class InStoreTrendEngine:
         previously_found: list[str],
         months_window: Optional[int] = None,
         country: Optional[str] = None,
+        retailer: Optional[str] = None,
     ) -> str:
         lines: list[str] = []
 
@@ -591,8 +613,14 @@ class InStoreTrendEngine:
             when = first_lbl if first_lbl == last_lbl else f"{first_lbl} – {last_lbl}"
         else:
             when = "all dates on file"
-        where = f"{country} stores" if country else "stores across every country on file"
-        lines.append(f"STORE WALK: {where}. Shelf photos uploaded {when}.")
+        # A single retailer is a genuine store walk — the framing the buyer
+        # voice was written for. The aggregate is a market read across stores.
+        if retailer:
+            where = f"{retailer} ({country})" if country else retailer
+            lines.append(f"STORE WALK: {where}. Shelf photos uploaded {when}.")
+        else:
+            where = f"{country} stores" if country else "stores across every country on file"
+            lines.append(f"MARKET READ across {where}. Shelf photos uploaded {when}.")
         lines.append(f"TOTAL ITEMS ANALYSED: {len(items_by_id):,}")
         lines.append(f"CLUSTERS IDENTIFIED: {len(clusters)}")
         if previously_found:

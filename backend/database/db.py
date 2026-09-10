@@ -296,6 +296,11 @@ async def init_db():
             ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
              "country VARCHAR(2)",
              _col("instore_trends", "country")),
+            # Per-trend retailer scope for single-store-walk Sets. NULL =
+            # all retailers in the country. (2026-09-10)
+            ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
+             "retailer VARCHAR(100)",
+             _col("instore_trends", "retailer")),
             # Buyer-voice momentum per trend (emerging / noted / prominent /
             # strong_focus / shifting). NULL on legacy rows. (2026-09-10)
             ("ALTER TABLE instore_trends ADD COLUMN IF NOT EXISTS "
