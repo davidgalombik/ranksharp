@@ -18,6 +18,9 @@ class ScrapeTier(str, enum.Enum):
     API = "api"
     HTTP = "http"
     BROWSER = "browser"
+    # CSV-fed retailer — products arrive via the CSV upload, no scraper.
+    # scrape_all_retailers skips these; manual scrape returns 400. (2026-09-14)
+    CSV = "csv"
 
 
 class ScrapeStatus(str, enum.Enum):

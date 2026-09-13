@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
-from database.models import Retailer, ScrapeJob, Product, ScrapeStatus
+from database.models import Retailer, ScrapeJob, Product, ScrapeStatus, ScrapeTier
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
@@ -87,6 +87,63 @@ async def list_retailers(db: AsyncSession = Depends(get_db)):
 
 
 _ALLOWED_SEGMENTS = {"luxury", "middle", "mass"}
+_ALLOWED_COUNTRIES = {"US", "AU", "GB", "EU"}
+
+
+class RetailerCreate(BaseModel):
+    name: str
+    base_url: str
+    country: str = "US"
+    market_segment: Optional[str] = None  # luxury / middle / mass / None
+
+
+def _slugify(name: str) -> str:
+    """'McGee & Co.' → 'mcgee-and-co'. Mirrors the client-side preview."""
+    import re
+    s = name.strip().lower().replace("&", " and ")
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return (s or "retailer")[:80]
+
+
+@router.post("/", response_model=RetailerOut, status_code=201)
+async def create_retailer(body: RetailerCreate, db: AsyncSession = Depends(get_db)):
+    """Create a CSV-fed retailer — no scraper, products arrive via
+    /csv-upload. Slug is generated from the name and de-duplicated with a
+    numeric suffix. The slug is what goes in the CSV's `retailer_slug` column."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    base_url = body.base_url.strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+    if not base_url.lower().startswith(("http://", "https://")):
+        base_url = "https://" + base_url
+    country = (body.country or "US").strip().upper()
+    if country not in _ALLOWED_COUNTRIES:
+        raise HTTPException(status_code=400, detail=f"country must be one of {sorted(_ALLOWED_COUNTRIES)}")
+    segment = body.market_segment.strip().lower() if body.market_segment else None
+    if segment is not None and segment not in _ALLOWED_SEGMENTS:
+        raise HTTPException(status_code=400, detail=f"market_segment must be one of {sorted(_ALLOWED_SEGMENTS)} or null")
+
+    base_slug = _slugify(name)
+    slug, n = base_slug, 2
+    while (await db.execute(select(Retailer).where(Retailer.slug == slug))).scalar_one_or_none():
+        slug = f"{base_slug}-{n}"
+        n += 1
+
+    r = Retailer(
+        slug=slug, name=name, base_url=base_url, country=country,
+        market_segment=segment, tier=ScrapeTier.CSV, adapter_class="csv",
+        is_active=True, categories={},
+    )
+    db.add(r)
+    await db.commit()
+    await db.refresh(r)
+    return RetailerOut(
+        id=r.id, slug=r.slug, name=r.name, base_url=r.base_url, country=r.country,
+        market_segment=r.market_segment, tier=r.tier.value, adapter_class=r.adapter_class,
+        is_active=r.is_active,
+    )
 
 
 @router.patch("/{retailer_id}/segment", response_model=dict)
@@ -151,6 +208,11 @@ async def trigger_scrape(
     retailer = await db.get(Retailer, retailer_id)
     if not retailer:
         raise HTTPException(status_code=404, detail="Retailer not found")
+    if retailer.tier == ScrapeTier.CSV:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{retailer.name} is CSV-fed — upload products via CSV instead of scraping.",
+        )
     task = scrape_retailer.delay(retailer_id, skip_analysis=skip_analysis)
     return {"task_id": task.id, "retailer": retailer.name, "status": "queued", "skip_analysis": skip_analysis}
 

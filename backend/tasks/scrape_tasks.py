@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 import redis as redis_lib
 from tasks.celery_app import app
 from config import settings
-from database.models import Retailer, ScrapeJob, Product, ScrapeStatus
+from database.models import Retailer, ScrapeJob, Product, ScrapeStatus, ScrapeTier
 from scraper.registry import AdapterRegistry
 import structlog
 
@@ -231,11 +231,15 @@ async def _run_scrape(retailer_config: dict, retailer_id: int, job_id: int, sess
 
 @app.task(queue="scrape")
 def scrape_all_retailers(skip_analysis: bool = False):
-    """Fan out a scrape task per active retailer."""
+    """Fan out a scrape task per active retailer. CSV-fed retailers have no
+    adapter and are skipped — importing their placeholder adapter_class
+    would crash the fan-out."""
     session = _get_session()
     try:
         retailers = session.execute(
-            select(Retailer).where(Retailer.is_active == True)
+            select(Retailer)
+            .where(Retailer.is_active == True)
+            .where(Retailer.tier != ScrapeTier.CSV)
         ).scalars().all()
 
         job_ids = []

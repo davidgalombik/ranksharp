@@ -1,10 +1,11 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api, type Retailer } from "@/lib/api";
 import clsx from "clsx";
 import ScrapeProgressPanel from "@/components/ScrapeProgressPanel";
 
 function techLabel(adapterClass: string, tier: string): string {
+  if (tier === "csv") return "CSV";
   const a = (adapterClass || "").toLowerCase();
   if (a.includes("apify")) return "Apify";
   if (a.includes("firecrawl")) return "Firecrawl";
@@ -50,6 +51,8 @@ export default function RetailersPage() {
   useEffect(() => {
     api.retailers.list().then(setRetailers).finally(() => setLoading(false));
   }, []);
+
+  const [showAdd, setShowAdd] = useState(false);
 
   async function triggerScrape(retailer: Retailer) {
     setScraping((s) => ({ ...s, [retailer.id]: true }));
@@ -152,6 +155,12 @@ export default function RetailersPage() {
             </button>
           )}
           <button
+            onClick={() => setShowAdd((v) => !v)}
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-stone-200 bg-white hover:border-stone-400 transition-colors"
+          >
+            {showAdd ? "Close" : "+ Add retailer"}
+          </button>
+          <button
             onClick={triggerAll}
             className="bg-stone-900 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-stone-700 transition-colors"
           >
@@ -159,6 +168,12 @@ export default function RetailersPage() {
           </button>
         </div>
       </div>
+
+      {showAdd && (
+        <AddRetailerPanel
+          onCreated={() => api.retailers.list().then(setRetailers)}
+        />
+      )}
 
       {/* Scrape Progress tab */}
       {tab === "progress" && <ScrapeProgressPanel />}
@@ -259,13 +274,24 @@ export default function RetailersPage() {
                             {analysing[r.id] ? "Queuing..." : "Analyse"}
                           </button>
                         )}
-                        <button
-                          onClick={() => triggerScrape(r)}
-                          disabled={scraping[r.id] || !r.is_active}
-                          className="px-2.5 py-1 text-xs font-medium border border-stone-200 rounded-lg hover:bg-stone-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                        >
-                          {scraping[r.id] ? "Queuing..." : "Scrape"}
-                        </button>
+                        {r.tier === "csv" ? (
+                          // CSV-fed — no scraper. Show the slug so it can be
+                          // copied straight into the CSV's retailer_slug column.
+                          <span
+                            title="Products for this retailer arrive via CSV upload. Use this slug in the retailer_slug column."
+                            className="px-2 py-1 text-xs font-mono border border-sky-200 bg-sky-50 text-sky-800 rounded-lg select-all"
+                          >
+                            CSV · {r.slug}
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => triggerScrape(r)}
+                            disabled={scraping[r.id] || !r.is_active}
+                            className="px-2.5 py-1 text-xs font-medium border border-stone-200 rounded-lg hover:bg-stone-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {scraping[r.id] ? "Queuing..." : "Scrape"}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -291,6 +317,110 @@ const _SEG_STYLES: Record<string, string> = {
   middle: "bg-stone-100 text-stone-800 border-stone-200",
   mass:   "bg-sky-100 text-sky-800 border-sky-200",
 };
+
+// Client-side mirror of the backend _slugify, for a live preview only —
+// the server is authoritative and de-duplicates with a numeric suffix.
+function previewSlug(name: string): string {
+  return name.trim().toLowerCase().replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+}
+
+/**
+ * Add a CSV-fed retailer (no scraper). On success shows the generated
+ * slug — that's the value for the CSV's `retailer_slug` column.
+ */
+function AddRetailerPanel({ onCreated }: { onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [country, setCountry] = useState("US");
+  const [segment, setSegment] = useState<"luxury" | "middle" | "mass" | "">("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [created, setCreated] = useState<Retailer | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const r = await api.retailers.create({
+        name, base_url: baseUrl, country,
+        market_segment: segment === "" ? null : segment,
+      });
+      setCreated(r);
+      setName(""); setBaseUrl("");
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4 space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-stone-900">Add a CSV-fed retailer</p>
+        <p className="text-xs text-stone-500 mt-0.5">
+          No scraper is created. Products arrive via the CSV upload — put the generated slug in the <code className="font-mono">retailer_slug</code> column.
+        </p>
+      </div>
+      <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+        <div className="lg:col-span-1">
+          <label className="block text-xs font-medium text-stone-500 mb-1">Name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} required
+                 placeholder="McGee & Co."
+                 className="w-full border border-stone-200 rounded-lg px-3 py-1.5 text-sm" />
+        </div>
+        <div className="lg:col-span-2">
+          <label className="block text-xs font-medium text-stone-500 mb-1">Website URL</label>
+          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} required
+                 placeholder="https://www.mcgeeandco.com"
+                 className="w-full border border-stone-200 rounded-lg px-3 py-1.5 text-sm" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Country</label>
+          <select value={country} onChange={(e) => setCountry(e.target.value)}
+                  className="w-full border border-stone-200 rounded-lg px-3 py-1.5 text-sm bg-white">
+            <option value="US">US</option>
+            <option value="AU">AU</option>
+            <option value="GB">GB</option>
+            <option value="EU">EU</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Market tier</label>
+          <select value={segment} onChange={(e) => setSegment(e.target.value as typeof segment)}
+                  className="w-full border border-stone-200 rounded-lg px-3 py-1.5 text-sm bg-white">
+            <option value="">Unclassified</option>
+            <option value="luxury">Luxury</option>
+            <option value="middle">Middle</option>
+            <option value="mass">Mass</option>
+          </select>
+        </div>
+        <div className="sm:col-span-2 lg:col-span-5 flex items-center gap-3 flex-wrap">
+          <button type="submit" disabled={busy || !name.trim() || !baseUrl.trim()}
+                  className="bg-stone-900 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-stone-700 disabled:opacity-40 disabled:cursor-not-allowed">
+            {busy ? "Creating…" : "Create retailer"}
+          </button>
+          {name.trim() && (
+            <span className="text-xs text-stone-500">
+              Slug preview: <code className="font-mono text-stone-800">{previewSlug(name)}</code>
+            </span>
+          )}
+          {error && <span className="text-xs text-rose-600">{error}</span>}
+        </div>
+      </form>
+      {created && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-sm text-emerald-900">
+          Created <span className="font-medium">{created.name}</span> — use{" "}
+          <code className="font-mono bg-white border border-emerald-200 rounded px-1.5 py-0.5 select-all">{created.slug}</code>{" "}
+          as <code className="font-mono">retailer_slug</code> in your CSV.
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SegmentsPanel({
   retailers,

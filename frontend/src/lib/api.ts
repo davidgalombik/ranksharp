@@ -612,6 +612,24 @@ export const api = {
   },
   retailers: {
     list: () => apiFetch<Retailer[]>("/api/retailers/"),
+    // Create a CSV-fed retailer (no scraper). Returns the row incl. the
+    // generated slug — that slug goes in the CSV's retailer_slug column.
+    create: async (body: {
+      name: string; base_url: string; country: string;
+      market_segment: "luxury" | "middle" | "mass" | null;
+    }) => {
+      const res = await fetch(`${API_BASE}/api/retailers/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        let detail: string;
+        try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = await res.text(); }
+        throw new Error(detail);
+      }
+      return res.json() as Promise<Retailer>;
+    },
     // Market segmentation (2026-08-08). Pass null to un-classify.
     setSegment: async (retailerId: number, market_segment: "luxury" | "middle" | "mass" | null) => {
       const res = await fetch(`${API_BASE}/api/retailers/${retailerId}/segment`, {

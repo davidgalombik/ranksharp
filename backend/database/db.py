@@ -275,6 +275,14 @@ async def init_db():
              _idx("ix_ranksharp_sales_product")),
             ("CREATE INDEX IF NOT EXISTS ix_ranksharp_sales_date ON ranksharp_product_sales (on_sale_date)",
              _idx("ix_ranksharp_sales_date")),
+            # ScrapeTier gains 'csv' for retailers fed by CSV upload rather
+            # than a scraper. Postgres enum values are additive-only; the
+            # guard checks pg_enum so this is a no-op once applied. Type name
+            # is SQLAlchemy's default for SAEnum(ScrapeTier) — the lowercased
+            # class name. (2026-09-14)
+            ("ALTER TYPE scrapetier ADD VALUE IF NOT EXISTS 'csv'",
+             "SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
+             "WHERE t.typname = 'scrapetier' AND e.enumlabel = 'csv'"),
             # In-store catalogue images: country tag (AU/US). Default 'US'
             # so existing rows backfill automatically.
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
@@ -535,6 +543,7 @@ async def seed_retailers():
     # Classify retailers into market segments — idempotent. Only sets
     # market_segment if it's currently NULL, so operator changes via the
     # admin UI aren't clobbered on restart. See RETAILER_SEGMENT_MAP.
+    await seed_csv_retailers()
     await classify_retailer_segments()
 
 
@@ -549,6 +558,76 @@ async def seed_retailers():
 # "Mud Pie" (mapping) vs "Mud Pie USA Store" (DB row)). Retailers that
 # don't match anything stay NULL — surfaced on the admin UI so operators
 # can classify one-click.
+
+# CSV-fed retailers (2026-09-14). Products for these arrive via the CSV
+# upload — there is no scraper. Seeded insert-only: if the slug already
+# exists nothing is touched, so operator edits (segment, active flag) are
+# never clobbered on restart. Buyers add further retailers through the
+# Retailers page ("Add retailer"), which uses the same tier/adapter.
+#
+# Source: buyer's "Retailers - Sheet94.csv". Zara Home's URL in the sheet
+# was the text "WorldWide - Zara Home"; substituted the real domain.
+CSV_FED_RETAILERS: list[dict] = [
+    dict(slug="zara-home",         name="Zara Home",          base_url="https://www.zarahome.com",          country="GB", market_segment="middle"),
+    dict(slug="alessi",            name="Alessi",             base_url="https://alessi.com",                country="EU", market_segment="luxury"),
+    dict(slug="ralph-lauren",      name="Ralph Lauren",       base_url="https://www.ralphlauren.com.au",    country="AU", market_segment="luxury"),
+    dict(slug="addison-ross",      name="Addison Ross",       base_url="https://www.addisonross.com",       country="GB", market_segment="luxury"),
+    dict(slug="aerin",             name="Aerin",              base_url="https://www.aerin.com",             country="US", market_segment="luxury"),
+    dict(slug="mcgee-and-co",      name="McGee & Co.",        base_url="https://www.mcgeeandco.com",        country="US", market_segment="luxury"),
+    dict(slug="lulu-and-georgia",  name="Lulu and Georgia",   base_url="https://www.luluandgeorgia.com",    country="US", market_segment="luxury"),
+    dict(slug="the-white-company", name="The White Company",  base_url="https://www.thewhitecompany.com",   country="GB", market_segment="luxury"),
+    dict(slug="jonathan-adler",    name="Jonathan Adler",     base_url="https://www.jonathanadler.com",     country="US", market_segment="luxury"),
+    dict(slug="soho-home",         name="Soho Home",          base_url="https://www.sohohome.com",          country="GB", market_segment="luxury"),
+    dict(slug="ferm-living",       name="ferm LIVING",        base_url="https://fermliving.com",            country="EU", market_segment="luxury"),
+    dict(slug="coco-republic",     name="Coco Republic",      base_url="https://www.cocorepublic.com.au",   country="AU", market_segment="luxury"),
+    dict(slug="aura-home",         name="Aura Home",          base_url="https://www.aurahome.com.au",       country="AU", market_segment="luxury"),
+    dict(slug="maison-balzac",     name="Maison Balzac",      base_url="https://maisonbalzac.com",          country="AU", market_segment="luxury"),
+    dict(slug="liberty-london",    name="Liberty London",     base_url="https://www.libertylondon.com",     country="GB", market_segment="luxury"),
+    dict(slug="oka",               name="OKA",                base_url="https://www.oka.com",               country="GB", market_segment="luxury"),
+    dict(slug="cox-and-cox",       name="Cox & Cox",          base_url="https://www.coxandcox.co.uk",       country="GB", market_segment="luxury"),
+    dict(slug="nordic-nest",       name="Nordic Nest",        base_url="https://www.nordicnest.com",        country="EU", market_segment="luxury"),
+    dict(slug="broste-copenhagen", name="Broste Copenhagen",  base_url="https://www.brostecopenhagen.com",  country="EU", market_segment="luxury"),
+    dict(slug="terrain",           name="Terrain",            base_url="https://www.shopterrain.com",       country="US", market_segment="luxury"),
+    dict(slug="juliska",           name="Juliska",            base_url="https://juliska.com",               country="US", market_segment="luxury"),
+    dict(slug="simon-pearce",      name="Simon Pearce",       base_url="https://www.simonpearce.com",       country="US", market_segment="luxury"),
+    dict(slug="fenton-and-fenton", name="Fenton & Fenton",    base_url="https://fentonandfenton.com.au",    country="AU", market_segment="luxury"),
+    dict(slug="dinosaur-designs",  name="Dinosaur Designs",   base_url="https://dinosaurdesigns.com.au",    country="AU", market_segment="luxury"),
+    dict(slug="mud-australia",     name="Mud Australia",      base_url="https://mudaustralia.com",          country="AU", market_segment="luxury"),
+]
+
+
+async def seed_csv_retailers() -> None:
+    """Insert any CSV_FED_RETAILERS whose slug isn't present yet. Never
+    updates existing rows. Failures are logged per-row and never block
+    startup — a bad enum migration should surface in logs, not crash the API."""
+    from database.models import Retailer, ScrapeTier
+    from sqlalchemy import select
+    import structlog
+    log = structlog.get_logger()
+
+    async with AsyncSessionLocal() as session:
+        existing = set((await session.execute(select(Retailer.slug))).scalars().all())
+        added: list[str] = []
+        for cfg in CSV_FED_RETAILERS:
+            if cfg["slug"] in existing:
+                continue
+            try:
+                session.add(Retailer(
+                    **cfg,
+                    tier=ScrapeTier.CSV,
+                    adapter_class="csv",
+                    is_active=True,
+                    categories={},
+                ))
+                await session.flush()
+                added.append(cfg["slug"])
+            except Exception as exc:  # noqa: BLE001 — log and keep going
+                await session.rollback()
+                log.error("csv_retailer_seed_failed", slug=cfg["slug"], error=str(exc))
+        await session.commit()
+        if added:
+            log.info("csv_retailers_seeded", count=len(added), slugs=added)
+
 
 RETAILER_SEGMENT_MAP: dict[str, str] = {
     # Luxury
