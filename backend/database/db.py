@@ -275,14 +275,17 @@ async def init_db():
              _idx("ix_ranksharp_sales_product")),
             ("CREATE INDEX IF NOT EXISTS ix_ranksharp_sales_date ON ranksharp_product_sales (on_sale_date)",
              _idx("ix_ranksharp_sales_date")),
-            # ScrapeTier gains 'csv' for retailers fed by CSV upload rather
-            # than a scraper. Postgres enum values are additive-only; the
-            # guard checks pg_enum so this is a no-op once applied. Type name
-            # is SQLAlchemy's default for SAEnum(ScrapeTier) — the lowercased
-            # class name. (2026-09-14)
-            ("ALTER TYPE scrapetier ADD VALUE IF NOT EXISTS 'csv'",
+            # ScrapeTier gains CSV for retailers fed by CSV upload rather
+            # than a scraper. NOTE the label is the enum member NAME ('CSV'),
+            # not its value ('csv'): SAEnum(PythonEnum) persists member names
+            # by default, so the existing labels are API / HTTP / BROWSER.
+            # A first attempt added a lowercase 'csv' label — harmless but
+            # unused (Postgres can't drop enum labels); this adds the one
+            # SQLAlchemy actually writes. Guard checks pg_enum so it's a
+            # no-op once applied. (2026-09-14)
+            ("ALTER TYPE scrapetier ADD VALUE IF NOT EXISTS 'CSV'",
              "SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
-             "WHERE t.typname = 'scrapetier' AND e.enumlabel = 'csv'"),
+             "WHERE t.typname = 'scrapetier' AND e.enumlabel = 'CSV'"),
             # In-store catalogue images: country tag (AU/US). Default 'US'
             # so existing rows backfill automatically.
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
@@ -348,8 +351,15 @@ async def init_db():
                 await conn.execute(text("SAVEPOINT mig"))
                 await conn.execute(text(stmt))
                 await conn.execute(text("RELEASE SAVEPOINT mig"))
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — a failed migration must never block boot
                 await conn.execute(text("ROLLBACK TO SAVEPOINT mig"))
+                # Log it. Silent rollback here hid a bad enum label for a
+                # full deploy cycle (2026-09-14) — the API booted fine and
+                # only the downstream seed surfaced the problem.
+                import structlog
+                structlog.get_logger().warning(
+                    "migration_failed", stmt=stmt[:160], error=str(exc)[:300],
+                )
 
 
 async def seed_retailers():
