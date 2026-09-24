@@ -682,19 +682,21 @@ export const api = {
 
   // ── Ranksharp Catalogue ──────────────────────────────────────────────────
   ranksharp: {
-    listProducts: (params: { q?: string; category?: string; limit?: number; offset?: number } = {}) => {
+    listProducts: (params: { q?: string; category?: string; subcategory?: string; limit?: number; offset?: number } = {}) => {
       const qs: Record<string, string> = {
         limit: String(params.limit ?? 48),
         offset: String(params.offset ?? 0),
       };
       if (params.q) qs.q = params.q;
       if (params.category) qs.category = params.category;
+      if (params.subcategory) qs.subcategory = params.subcategory;
       return apiFetch<RanksharpProductListPage>("/api/ranksharp/products", qs);
     },
     getProduct: (id: number) =>
       apiFetch<RanksharpProductDetail>(`/api/ranksharp/products/${id}`),
+    // subcategories is keyed by category — drives the cascading dropdown.
     listCategories: () =>
-      apiFetch<{ categories: string[] }>("/api/ranksharp/categories"),
+      apiFetch<{ categories: string[]; subcategories?: Record<string, string[]> }>("/api/ranksharp/categories"),
     // Pass image_version so an overwritten image gets a fresh URL — the
     // server caches versioned URLs for a year and never caches bare ones.
     imageUrl: (productId: number, version?: string | null) =>

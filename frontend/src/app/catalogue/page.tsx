@@ -25,7 +25,11 @@ export default function CataloguePage() {
 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
+  const [subcategory, setSubcategory] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
+  // category → subcategories, from /categories. Cascade: the Subcategory
+  // dropdown only shows once a category is picked, and only its children.
+  const [subcategoriesByCat, setSubcategoriesByCat] = useState<Record<string, string[]>>({});
 
   const [csvOpen, setCsvOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
@@ -34,9 +38,13 @@ export default function CataloguePage() {
 
   useEffect(() => {
     api.ranksharp.listCategories()
-      .then((r) => setCategories(r.categories))
-      .catch(() => setCategories([]));
+      .then((r) => { setCategories(r.categories); setSubcategoriesByCat(r.subcategories ?? {}); })
+      .catch(() => { setCategories([]); setSubcategoriesByCat({}); });
   }, [refreshTick]);
+
+  // Changing category clears the subcategory — a stale child from the
+  // previous category would filter everything out.
+  useEffect(() => { setSubcategory(""); }, [category]);
 
   const loadFirstPage = useCallback(async () => {
     setLoading(true);
@@ -45,6 +53,7 @@ export default function CataloguePage() {
       const res = await api.ranksharp.listProducts({
         q: query || undefined,
         category: category || undefined,
+        subcategory: subcategory || undefined,
         limit: PAGE_SIZE,
         offset: 0,
       });
@@ -56,7 +65,7 @@ export default function CataloguePage() {
     } finally {
       setLoading(false);
     }
-  }, [query, category]);
+  }, [query, category, subcategory]);
 
   // Debounce the search input so we don't hammer the API on every keystroke.
   useEffect(() => {
@@ -72,6 +81,7 @@ export default function CataloguePage() {
       const res = await api.ranksharp.listProducts({
         q: query || undefined,
         category: category || undefined,
+        subcategory: subcategory || undefined,
         limit: PAGE_SIZE,
         offset: next,
       });
@@ -134,6 +144,23 @@ export default function CataloguePage() {
             ))}
           </select>
         </div>
+        {/* Cascading Subcategory — same pattern as Online Products. Only
+            rendered once a category is chosen and it has children. */}
+        {category && (subcategoriesByCat[category]?.length ?? 0) > 0 && (
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Subcategory</label>
+            <select
+              value={subcategory}
+              onChange={(e) => setSubcategory(e.target.value)}
+              className="border border-stone-300 rounded-lg px-3 py-1.5 text-sm bg-white"
+            >
+              <option value="">All subcategories</option>
+              {subcategoriesByCat[category].map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       <p className="text-sm text-stone-500">
@@ -146,9 +173,9 @@ export default function CataloguePage() {
         <div className="bg-stone-50 border border-stone-200 rounded-xl p-12 text-center">
           <p className="text-4xl mb-3">📦</p>
           <p className="text-stone-600 font-medium">
-            {query || category ? "No products match your filters" : "Catalogue is empty"}
+            {query || category || subcategory ? "No products match your filters" : "Catalogue is empty"}
           </p>
-          {!query && !category && (
+          {!query && !category && !subcategory && (
             <p className="text-stone-400 text-sm mt-1">
               Upload a CSV to add the products you&apos;ve sold
             </p>
@@ -223,7 +250,10 @@ function ProductCard({ product }: { product: RanksharpProductListItem }) {
           {product.name}
         </p>
         {product.category && (
-          <p className="text-xs text-stone-500 truncate">{product.category}</p>
+          <p className="text-xs text-stone-500 truncate">
+            {product.category}
+            {product.subcategory && <span className="text-stone-400"> › {product.subcategory}</span>}
+          </p>
         )}
         <div className="flex items-center justify-between text-xs text-stone-500 pt-1 border-t border-stone-100">
           <span>

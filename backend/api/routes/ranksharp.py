@@ -619,6 +619,7 @@ class ProductDetail(BaseModel):
 async def list_products(
     q: Optional[str] = Query(default=None, description="Search SKU or name"),
     category: Optional[str] = None,
+    subcategory: Optional[str] = None,
     limit: int = 48,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
@@ -653,6 +654,8 @@ async def list_products(
         ))
     if category:
         base = base.where(RanksharpProduct.category == category)
+    if subcategory:
+        base = base.where(RanksharpProduct.subcategory == subcategory)
 
     total_row = await db.execute(select(func.count()).select_from(base.subquery()))
     total = total_row.scalar_one() or 0
@@ -705,20 +708,33 @@ async def list_products(
 
 class CategoriesOut(BaseModel):
     categories: list[str]
+    # category → its subcategories (sorted). Drives the cascading
+    # Subcategory dropdown: pick a category, see only its children.
+    subcategories: dict[str, list[str]] = {}
 
 
 @router.get("/categories", response_model=CategoriesOut)
 async def list_categories(db: AsyncSession = Depends(get_db)):
-    """Distinct categories currently in the catalogue — powers the filter
-    dropdown without hardcoding a list."""
+    """Distinct categories + their subcategories currently in the
+    catalogue — powers the cascading filter dropdowns without hardcoding
+    a taxonomy. One query; grouped in Python."""
     result = await db.execute(
-        select(RanksharpProduct.category)
+        select(RanksharpProduct.category, RanksharpProduct.subcategory)
         .where(RanksharpProduct.category.isnot(None))
         .distinct()
-        .order_by(RanksharpProduct.category)
+        .order_by(RanksharpProduct.category, RanksharpProduct.subcategory)
     )
-    cats = [row[0] for row in result.all() if row[0]]
-    return CategoriesOut(categories=cats)
+    cats: list[str] = []
+    subs: dict[str, list[str]] = {}
+    for cat, sub in result.all():
+        if not cat:
+            continue
+        if cat not in subs:
+            cats.append(cat)
+            subs[cat] = []
+        if sub and sub not in subs[cat]:
+            subs[cat].append(sub)
+    return CategoriesOut(categories=cats, subcategories=subs)
 
 
 @router.get("/products/{product_id}", response_model=ProductDetail)
