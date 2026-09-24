@@ -206,7 +206,7 @@ function ProductCard({ product }: { product: RanksharpProductListItem }) {
         {product.has_image ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={api.ranksharp.imageUrl(product.id)}
+            src={api.ranksharp.imageUrl(product.id, product.image_version)}
             alt={product.name}
             loading="lazy"
             className="w-full h-full object-cover"

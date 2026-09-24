@@ -397,6 +397,13 @@ def _persist_image(sku: str, data: bytes, ext: str) -> tuple[str, str]:
     # SKUs may contain path-hostile chars — hash-free but sanitised filename.
     safe_sku = "".join(c if c.isalnum() or c in "-_" else "_" for c in sku)
     path = upload_dir / f"{safe_sku}.{ext}"
+    # Overwrite semantics: if the SKU previously had an image in a different
+    # format (RS-1234.png replaced by RS-1234.jpg), the old file was left
+    # behind — the DB pointer moved but the volume kept filling. Remove any
+    # sibling with another extension before writing. (2026-09-24)
+    for stale in upload_dir.glob(f"{safe_sku}.*"):
+        if stale != path:
+            stale.unlink(missing_ok=True)
     path.write_bytes(data)
     return str(path), ext
 
@@ -509,7 +516,21 @@ async def upload_images(
 
 
 @router.get("/products/{product_id}/image")
-async def get_product_image(product_id: int, db: AsyncSession = Depends(get_db)):
+async def get_product_image(
+    product_id: int,
+    v: Optional[str] = Query(default=None, description="Cache-busting version (image_version)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve the product image.
+
+    Caching (2026-09-24): the URL used to be identical before and after an
+    overwrite, with a 24h public max-age — so browsers AND Railway's edge
+    kept serving the old bytes and a hard-refresh didn't help. Now the
+    frontend appends ?v=<image_version>; a versioned URL is safe to cache
+    for a year because a new upload produces a new URL. An unversioned
+    request must not be cached, so anything still using the bare URL
+    always gets the current file.
+    """
     product = await db.get(RanksharpProduct, product_id)
     if not product or not product.image_path:
         raise HTTPException(status_code=404, detail="No image for this product")
@@ -521,8 +542,25 @@ async def get_product_image(product_id: int, db: AsyncSession = Depends(get_db))
         "jpg": "image/jpeg", "jpeg": "image/jpeg",
         "png": "image/png", "webp": "image/webp",
     }.get(ext, "application/octet-stream")
+    cache = (
+        "public, max-age=31536000, immutable" if v
+        else "no-cache, must-revalidate"
+    )
     return FileResponse(path=str(path), media_type=media,
-                        headers={"Cache-Control": "public, max-age=86400"})
+                        headers={"Cache-Control": cache})
+
+
+def _image_version(product: RanksharpProduct) -> Optional[str]:
+    """Cache-busting token for the image URL. Uses the file's mtime — it
+    changes on every overwrite, whereas product.updated_at also moves on
+    unrelated metadata edits. Falls back to updated_at if the file is
+    missing. None when there's no image."""
+    if not product.image_path:
+        return None
+    try:
+        return str(int(pathlib.Path(product.image_path).stat().st_mtime))
+    except OSError:
+        return str(int(product.updated_at.timestamp())) if product.updated_at else None
 
 
 # ── Read / browse ────────────────────────────────────────────────────────────
@@ -547,6 +585,9 @@ class ProductListItem(BaseModel):
     category: Optional[str] = None
     subcategory: Optional[str] = None
     has_image: bool
+    # Append as ?v= to the image URL so an overwritten image busts every
+    # cache layer. None when has_image is False.
+    image_version: Optional[str] = None
     sale_count: int
     total_units: int
     latest_sale_date: Optional[datetime] = None
@@ -568,6 +609,7 @@ class ProductDetail(BaseModel):
     category: Optional[str] = None
     subcategory: Optional[str] = None
     has_image: bool
+    image_version: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     sales: list[SaleOut]
@@ -649,6 +691,7 @@ async def list_products(
             category=product.category,
             subcategory=product.subcategory,
             has_image=bool(product.image_path),
+            image_version=_image_version(product),
             sale_count=int(sale_count or 0),
             total_units=int(total_units or 0),
             latest_sale_date=latest_sale_date,
@@ -703,6 +746,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
         category=product.category,
         subcategory=product.subcategory,
         has_image=bool(product.image_path),
+        image_version=_image_version(product),
         created_at=product.created_at,
         updated_at=product.updated_at,
         sales=[SaleOut(

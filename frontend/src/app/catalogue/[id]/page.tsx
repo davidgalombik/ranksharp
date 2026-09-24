@@ -83,7 +83,7 @@ export default function ProductDetailPage() {
           {detail.has_image ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={api.ranksharp.imageUrl(detail.id)}
+              src={api.ranksharp.imageUrl(detail.id, detail.image_version)}
               alt={detail.name}
               className="w-full h-full object-cover"
             />

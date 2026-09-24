@@ -695,8 +695,10 @@ export const api = {
       apiFetch<RanksharpProductDetail>(`/api/ranksharp/products/${id}`),
     listCategories: () =>
       apiFetch<{ categories: string[] }>("/api/ranksharp/categories"),
-    imageUrl: (productId: number) =>
-      `${API_BASE}/api/ranksharp/products/${productId}/image`,
+    // Pass image_version so an overwritten image gets a fresh URL — the
+    // server caches versioned URLs for a year and never caches bare ones.
+    imageUrl: (productId: number, version?: string | null) =>
+      `${API_BASE}/api/ranksharp/products/${productId}/image${version ? `?v=${encodeURIComponent(version)}` : ""}`,
     csvPreview: async (file: File) => {
       const fd = new FormData();
       fd.append("file", file);
@@ -754,6 +756,7 @@ export const api = {
 
 export interface RanksharpProductListItem {
   id: number;
+  image_version?: string | null;
   sku: string;
   name: string;
   description: string | null;
@@ -787,6 +790,7 @@ export interface RanksharpSale {
 
 export interface RanksharpProductDetail {
   id: number;
+  image_version?: string | null;
   sku: string;
   name: string;
   description: string | null;
