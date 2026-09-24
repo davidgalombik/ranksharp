@@ -678,7 +678,7 @@ async def list_products(
                     RanksharpProductSale.currency,
                 )
                 .where(RanksharpProductSale.product_id == product.id)
-                .order_by(desc(RanksharpProductSale.on_sale_date.nullslast()),
+                .order_by(desc(RanksharpProductSale.on_sale_date).nullslast(),
                           desc(RanksharpProductSale.id))
                 .limit(1)
             )
@@ -733,7 +733,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     sales_res = await db.execute(
         select(RanksharpProductSale)
         .where(RanksharpProductSale.product_id == product_id)
-        .order_by(desc(RanksharpProductSale.on_sale_date.nullslast()),
+        .order_by(desc(RanksharpProductSale.on_sale_date).nullslast(),
                   desc(RanksharpProductSale.id))
     )
     sales = sales_res.scalars().all()
