@@ -427,15 +427,19 @@ async def get_facets(
         )
         if q:
             stmt = apply_instore_search(stmt, q)
-        if country:
+        # Image-side filters honour `exclude` too (2026-09-25) so the
+        # country / retailer / month option lists can each be computed
+        # under every filter EXCEPT their own — pick September and the
+        # retailer list shows only retailers with September photos.
+        if country and "country" not in exclude:
             stmt = stmt.where(InStoreCatalogueImage.country == country.upper())
-        if retailer:
+        if retailer and "retailer" not in exclude:
             if retailer == "__none__":
                 stmt = stmt.where(InStoreCatalogueImage.retailer.is_(None))
             else:
                 stmt = stmt.where(InStoreCatalogueImage.retailer == retailer)
         mr = _month_range(month)
-        if mr:
+        if mr and "month" not in exclude:
             stmt = stmt.where(
                 InStoreCatalogueImage.created_at >= mr[0],
                 InStoreCatalogueImage.created_at < mr[1],
@@ -483,11 +487,42 @@ async def get_facets(
         select(func.count()).select_from(uncat_stmt.subquery())
     )).scalar_one()
 
+    # Image-side option lists (2026-09-25). Each is grouped on an image
+    # column under every filter except its own, so the dropdowns narrow
+    # each other. Counts are ITEMS (same unit as the category facets, and
+    # what the grid actually shows), not images. _group_count can't be
+    # reused here — it groups on item columns — so join and group
+    # explicitly.
+    def _image_group(col, exclude: set[str]):
+        sub = _base(exclude).subquery()
+        return (
+            select(col, func.count())
+            .select_from(sub)
+            .join(InStoreCatalogueImage, sub.c.image_id == InStoreCatalogueImage.id)
+            .group_by(col)
+        )
+
+    country_rows = (await db.execute(_image_group(InStoreCatalogueImage.country, {"country"}))).all()
+    countries = {c: n for c, n in country_rows if c}
+
+    retailer_rows = (await db.execute(_image_group(InStoreCatalogueImage.retailer, {"retailer"}))).all()
+    retailers = {r: n for r, n in retailer_rows if r}
+    # Untagged images surface as the "(no retailer)" option.
+    untagged = sum(n for r, n in retailer_rows if r is None)
+
+    month_expr = func.to_char(InStoreCatalogueImage.created_at, "YYYY-MM")
+    month_rows = (await db.execute(_image_group(month_expr, {"month"}))).all()
+    months = {m: n for m, n in month_rows if m}
+
     return {
         "categories": categories,
         "subcategories": subcategories,
         "product_segments": product_segments,
         "uncategorised": uncategorised_ct,
+        "countries": countries,
+        "retailers": retailers,
+        "untagged_retailer": untagged,
+        "months": months,
     }
 
 

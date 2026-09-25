@@ -432,13 +432,14 @@ export const api = {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
-    facets: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; retailer?: string; show_all?: boolean; month?: string } = {}) => {
+    facets: async (params: { q?: string; category?: string; subcategory?: string; product_segment?: string; uncategorised_only?: boolean; country?: string; retailer?: string; show_all?: boolean; month?: string } = {}) => {
       const qs = new URLSearchParams();
       if (params.q) qs.set("q", params.q);
       if (params.category) qs.set("category", params.category);
       if (params.subcategory) qs.set("subcategory", params.subcategory);
       if (params.product_segment) qs.set("product_segment", params.product_segment);
       if (params.uncategorised_only) qs.set("uncategorised_only", "true");
+      if (params.country) qs.set("country", params.country);
       if (params.retailer) qs.set("retailer", params.retailer);
       if (params.show_all) qs.set("show_all", "true");
       if (params.month) qs.set("month", params.month);
@@ -449,6 +450,13 @@ export const api = {
         subcategories: Record<string, number>;
         product_segments: Record<string, number>;
         uncategorised: number;
+        // Image-side option lists, each computed under every filter except
+        // its own (2026-09-25). Counts are items. Optional so the UI keeps
+        // working against an API that predates them during a rolling deploy.
+        countries?: Record<string, number>;
+        retailers?: Record<string, number>;
+        untagged_retailer?: number;
+        months?: Record<string, number>;
       }>;
     },
     taxonomy: async () => {

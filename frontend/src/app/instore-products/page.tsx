@@ -1278,6 +1278,10 @@ export default function InStoreProductsPage() {
     subcategories: Record<string, number>;
     product_segments: Record<string, number>;
     uncategorised: number;
+    countries?: Record<string, number>;
+    retailers?: Record<string, number>;
+    untagged_retailer?: number;
+    months?: Record<string, number>;
   } | null>(null);
 
   // Retailer + country currently selected in the upload zone
@@ -1404,7 +1408,11 @@ export default function InStoreProductsPage() {
   }, []);
   useEffect(() => { loadRetailers(); }, [loadRetailers]);
 
-  // Load facet counts for all 3 levels so zero-reach options can be hidden.
+  // Load facet counts so zero-reach options can be hidden — category
+  // cascade AND (2026-09-25) the country / retailer / month dropdowns,
+  // which now narrow each other from this one response. `country` was
+  // previously omitted from this call, so category counts silently
+  // ignored the country filter; fixed here.
   useEffect(() => {
     api.instoreCatalogue.facets({
       q: debouncedSearch || undefined,
@@ -1412,21 +1420,52 @@ export default function InStoreProductsPage() {
       subcategory: subcategory || undefined,
       product_segment: productSegment || undefined,
       uncategorised_only: uncategorisedOnly || undefined,
+      country: countryFilter || undefined,
       retailer: retailerFilter || undefined,
       month: monthFilter || undefined,
       show_all: showAll,
     })
       .then((f) => setFacets(f))
       .catch(() => setFacets(null));
-  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, monthFilter, showAll]);
+  }, [debouncedSearch, category, subcategory, productSegment, uncategorisedOnly, countryFilter, retailerFilter, monthFilter, showAll, retailers.length]);
 
-  // Load the distinct upload months once at mount + whenever an upload
-  // completes (via bump on `retailers` load — good enough proxy).
+  // Fallback month list for the dropdown until /facets returns (or if it
+  // fails) — keeps the control populated during a rolling deploy.
   useEffect(() => {
     api.instoreCatalogue.listMonths()
       .then((r) => setMonths(r.months || []))
       .catch(() => setMonths([]));
   }, [retailers.length]);
+
+  // Dropdown option lists. Facet-driven when available (narrowed by the
+  // other active filters); otherwise the global lists. The currently
+  // selected value is always kept even at zero count, so a combination
+  // that empties the grid never deletes the buyer's own selection.
+  const COUNTRY_LABELS: Record<string, string> = { US: "USA", AU: "Australia" };
+  const countryOptions: { value: string; label: string }[] = (() => {
+    const base = Object.keys(COUNTRY_LABELS);
+    if (!facets?.countries) return base.map((c) => ({ value: c, label: COUNTRY_LABELS[c] }));
+    return base
+      .filter((c) => c === countryFilter || (facets.countries?.[c] ?? 0) > 0)
+      .map((c) => ({ value: c, label: `${COUNTRY_LABELS[c]} (${(facets.countries?.[c] ?? 0).toLocaleString()})` }));
+  })();
+  const retailerOptions: { name: string; count: number }[] = (() => {
+    if (!facets?.retailers) return retailers;
+    const fr = facets.retailers;
+    const list = Object.entries(fr).map(([name, count]) => ({ name, count }));
+    if (retailerFilter && retailerFilter !== RETAILER_NONE && !(retailerFilter in fr)) {
+      list.push({ name: retailerFilter, count: 0 });
+    }
+    return list.sort((a, b) => a.name.localeCompare(b.name));
+  })();
+  const untaggedOptionCount = facets?.retailers ? (facets.untagged_retailer ?? 0) : untaggedCount;
+  const monthOptions: { month: string; count: number }[] = (() => {
+    if (!facets?.months) return months;
+    const fm = facets.months;
+    const list = Object.entries(fm).map(([month, count]) => ({ month, count }));
+    if (monthFilter && !(monthFilter in fm)) list.push({ month: monthFilter, count: 0 });
+    return list.sort((a, b) => b.month.localeCompare(a.month)); // newest first
+  })();
 
   // Fetch the shared 3-level taxonomy tree once at mount.
   useEffect(() => {
@@ -1761,20 +1800,24 @@ export default function InStoreProductsPage() {
                 className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
               >
                 <option value="">All countries</option>
-                <option value="US">USA</option>
-                <option value="AU">Australia</option>
+                {countryOptions.map((c) => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
               </select>
+              {/* Retailer + month options are narrowed by the OTHER active
+                  filters (facet-driven) — pick September and only retailers
+                  with September photos appear. Counts are items. */}
               <select
                 value={retailerFilter}
                 onChange={(e) => setRetailerFilter(e.target.value)}
                 className="border border-stone-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none"
               >
                 <option value="">All retailers</option>
-                {retailers.map((r) => (
-                  <option key={r.name} value={r.name}>{r.name} ({r.count})</option>
+                {retailerOptions.map((r) => (
+                  <option key={r.name} value={r.name}>{r.name} ({r.count.toLocaleString()})</option>
                 ))}
-                {untaggedCount > 0 && (
-                  <option value={RETAILER_NONE}>(no retailer) ({untaggedCount})</option>
+                {(untaggedOptionCount > 0 || retailerFilter === RETAILER_NONE) && (
+                  <option value={RETAILER_NONE}>(no retailer) ({untaggedOptionCount.toLocaleString()})</option>
                 )}
               </select>
               {/* Month filter — buyers upload once per month so month-precision
@@ -1788,14 +1831,14 @@ export default function InStoreProductsPage() {
                 title="Filter by upload month"
               >
                 <option value="">All months</option>
-                {months.map((m) => {
+                {monthOptions.map((m) => {
                   // 'YYYY-MM' → 'Aug 2026'. Parse-and-format so locale
                   // doesn't drift the label.
                   const [y, mo] = m.month.split("-").map(Number);
                   const label = new Date(y, mo - 1, 1)
                     .toLocaleString(undefined, { month: "short", year: "numeric" });
                   return (
-                    <option key={m.month} value={m.month}>{label}</option>
+                    <option key={m.month} value={m.month}>{label} ({m.count.toLocaleString()})</option>
                   );
                 })}
               </select>
