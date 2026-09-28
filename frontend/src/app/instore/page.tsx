@@ -129,6 +129,8 @@ interface InStoreReport {
   months_window: number | null;
   country: string | null;
   retailer: string | null;
+  // When the Set in view was run. Prefer over created_at (the week's first run).
+  set_run_at: string | null;
   rising_trends: InStoreTrend[];
   new_trends: InStoreTrend[];
   declining_trends: InStoreTrend[];
@@ -144,7 +146,11 @@ interface TaskStatus {
 }
 
 interface InStoreSet {
+  // Identity is (report_id, generation): generation numbers restart each
+  // week, so alone they collide across reports.
+  report_id: number;
   generation: number;
+  run_at: string;
   months_window: number | null;
   country: string | null;
   retailer: string | null;   // null = all retailers in the country
@@ -433,15 +439,17 @@ function InStoreTrendsPageInner() {
     return () => { cancelled = true; };
   }, [countryFilter, monthsWindow, sets]);
 
-  // Which Set to display. Also URL-driven so refreshes stick and
-  // deep links work. Undefined = auto-resolve to the latest Set that
-  // matches the current pill horizon.
+  // Which Set to display, as "<report_id>-<generation>" in the URL so
+  // refreshes stick and deep links work. Sets span many weekly reports
+  // now (2026-09-28), so a bare generation number is ambiguous.
+  // Undefined = auto-resolve to the newest Set in the current scope.
+  const setKey = (s: { report_id: number; generation: number }) => `${s.report_id}-${s.generation}`;
   const rawSet = searchParams.get("set");
-  const activeSet: number | undefined =
-    rawSet != null && /^\d+$/.test(rawSet) ? parseInt(rawSet, 10) : undefined;
-  const switchSet = (gen: number) => {
+  const activeSetKey: string | undefined =
+    rawSet != null && /^\d+-\d+$/.test(rawSet) ? rawSet : undefined;
+  const switchSet = (s: InStoreSet) => {
     const p = new URLSearchParams(searchParams.toString());
-    p.set("set", String(gen));
+    p.set("set", setKey(s));
     router.push(`${pathname}?${p.toString()}`);
   };
 
@@ -449,20 +457,24 @@ function InStoreTrendsPageInner() {
   // dimensions filter the view: pick "US" + "Last month" and you see
   // only Sets that were run with that exact pair. Legacy Sets have
   // country back-filled to 'US' by the migration.
-  const matchingSets = sets.filter((s) =>
-    s.months_window === monthsWindow
-    && s.country === countryFilter
-    && s.retailer === retailerFilter
-  );
-  // The Set we should fetch. If the URL points to a matching Set, honor
-  // it (deep link). Otherwise, latest matching Set. If none match, undefined
-  // → empty state ("no analysis for this horizon yet").
-  const effectiveGen: number | undefined = (() => {
-    if (activeSet != null && matchingSets.some((s) => s.generation === activeSet)) {
-      return activeSet;
-    }
-    return matchingSets.length ? matchingSets[matchingSets.length - 1].generation : undefined;
+  // Oldest → newest within the scope (the API already orders by run time;
+  // the sort is a cheap guarantee since "last = newest" is relied on below).
+  const matchingSets = sets
+    .filter((s) =>
+      s.months_window === monthsWindow
+      && s.country === countryFilter
+      && s.retailer === retailerFilter
+    )
+    .sort((a, b) => a.run_at.localeCompare(b.run_at));
+  // The Set we should fetch. If the URL points to a Set in this scope,
+  // honor it (deep link). Otherwise the newest in scope. If none, undefined
+  // → empty state ("no analysis for this scope yet").
+  const effectiveSet: InStoreSet | undefined = (() => {
+    const hit = activeSetKey ? matchingSets.find((s) => setKey(s) === activeSetKey) : undefined;
+    return hit ?? (matchingSets.length ? matchingSets[matchingSets.length - 1] : undefined);
   })();
+  // Stable string for effect deps — effectiveSet is a fresh object each render.
+  const effectiveKey = effectiveSet ? setKey(effectiveSet) : undefined;
 
   const loadMeta = useCallback(async () => {
     // Sets list + report list — needed to decide what to fetch below.
@@ -480,17 +492,18 @@ function InStoreTrendsPageInner() {
     }
   }, []);
 
-  const loadReport = useCallback(async (gen: number | undefined) => {
+  const loadReport = useCallback(async (key: string | undefined) => {
     setLoading(true);
     setError(null);
     try {
-      if (gen == null) {
-        // Nothing to show — no Set at this horizon.
+      if (key == null) {
+        // Nothing to show — no Set in this scope.
         setReport(null);
         return;
       }
+      const [reportId, gen] = key.split("-");
       const res = await fetch(
-        `${API_BASE}/api/instore-trends/latest?generation=${gen}`,
+        `${API_BASE}/api/instore-trends/latest?report_id=${reportId}&generation=${gen}`,
         { cache: "no-store" },
       );
       if (res.status === 404) setReport(null);
@@ -510,7 +523,7 @@ function InStoreTrendsPageInner() {
   }, [loadMeta]);
 
   useEffect(() => { loadMeta(); }, [loadMeta]);
-  useEffect(() => { loadReport(effectiveGen); }, [loadReport, effectiveGen]);
+  useEffect(() => { loadReport(effectiveKey); }, [loadReport, effectiveKey]);
 
   // Poll the running task
   useEffect(() => {
@@ -554,20 +567,14 @@ function InStoreTrendsPageInner() {
     }
   };
 
-  const deleteSet = async (generation: number) => {
-    if (!report) return;
-    // The 409 guard on the backend refuses when the delete would empty
-    // the WHOLE report across horizons, so it's fine to delete a lone
-    // matching Set as long as another Set exists elsewhere. Keep this
-    // client-side alert only for the truly-last-Set case.
-    if (sets.length <= 1) {
-      alert("Can't delete the only remaining Set — run a new analysis first, or clear all.");
-      return;
-    }
-    if (!confirm(`Delete Set ${generation}? This removes every trend + recommendation in that set. Can't be undone.`)) return;
+  const deleteSet = async (s: InStoreSet) => {
+    const when = new Date(s.run_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+    if (!confirm(`Delete the Set run on ${when}? This removes every trend + recommendation in it. Can't be undone.`)) return;
     try {
+      // Address the Set by ITS report, not whatever report is newest —
+      // Sets in one scope can span several weekly reports.
       const res = await fetch(
-        `${API_BASE}/api/instore-trends/reports/${report.id}/generations/${generation}`,
+        `${API_BASE}/api/instore-trends/reports/${s.report_id}/generations/${s.generation}`,
         { method: "DELETE" }
       );
       if (!res.ok) {
@@ -576,16 +583,12 @@ function InStoreTrendsPageInner() {
         catch { detail = await res.text(); }
         throw new Error(detail);
       }
-      const data = await res.json() as { remaining_generations: number[] };
-      // If we deleted the active set, jump to the highest remaining one.
-      if (activeSet === generation) {
-        const next = data.remaining_generations[data.remaining_generations.length - 1];
-        if (next != null) {
-          const p = new URLSearchParams(searchParams.toString());
-          p.set("set", String(next));
-          router.push(`${pathname}?${p.toString()}`);
-          return; // loadLatest will fire from the activeSet change
-        }
+      // Drop any explicit ?set= so the view auto-resolves to the newest
+      // remaining Set in scope (or the empty state), then refresh.
+      if (activeSetKey === setKey(s)) {
+        const p = new URLSearchParams(searchParams.toString());
+        p.delete("set");
+        router.replace(`${pathname}?${p.toString()}`, { scroll: false });
       }
       await loadLatest();
     } catch (err) {
@@ -777,52 +780,55 @@ function InStoreTrendsPageInner() {
         </div>
       )}
 
-      {/* Set tabs — one per generation for the latest report, labelled
-          with the horizon that Set was analysed with. ✨ marks the
-          highest generation number; × deletes with confirm. Hidden
-          when there's only one Set (nothing to switch between). */}
+      {/* Set tabs — every run in the current scope (country · retailer ·
+          horizon), oldest → newest, regardless of which weekly report it
+          landed on. Numbered by position in the scope (the backend's
+          generation number restarts weekly, so it's meaningless here)
+          and labelled with the run date. ✨ = newest; × deletes with
+          confirm. Hidden when there's only one Set. */}
       {!running && matchingSets.length > 1 && report && (() => {
-        const latestGen = matchingSets[matchingSets.length - 1].generation;
-        const currentGen = effectiveGen ?? latestGen;
+        const latestKey = setKey(matchingSets[matchingSets.length - 1]);
+        const currentKey = effectiveKey ?? latestKey;
         return (
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-stone-400 font-medium uppercase tracking-wider">
               Sets ({retailerFilter ?? shortCountry(countryFilter)} · {shortWindow(monthsWindow)}):
             </span>
-            {matchingSets.map((s) => {
-              const active = s.generation === currentGen;
-              const isLatest = s.generation === latestGen;
+            {matchingSets.map((s, idx) => {
+              const k = setKey(s);
+              const active = k === currentKey;
+              const isLatest = k === latestKey;
+              const when = new Date(s.run_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
               return (
                 <div
-                  key={s.generation}
+                  key={k}
                   className={clsx(
                     "inline-flex items-stretch rounded-lg overflow-hidden border transition-colors",
                     active
                       ? "border-stone-900 bg-stone-900 text-white"
                       : "border-stone-200 bg-white text-stone-600 hover:border-stone-400"
                   )}
-                  title={`${s.trend_count} trend${s.trend_count === 1 ? "" : "s"} · ${s.item_count.toLocaleString()} items analysed`}
+                  title={`Run ${new Date(s.run_at).toLocaleString()} · ${s.trend_count} trend${s.trend_count === 1 ? "" : "s"} · ${s.item_count.toLocaleString()} items analysed`}
                 >
                   <button
                     type="button"
-                    onClick={() => switchSet(s.generation)}
+                    onClick={() => switchSet(s)}
                     className="px-3 py-1 text-xs font-medium"
                   >
-                    Set {s.generation}
+                    Set {idx + 1}
                     <span className={clsx(
                       "ml-1.5 text-[10px] font-normal",
                       active ? "text-stone-300" : "text-stone-400",
                     )}>
-                      {/* Retailer implies country, so show one or the other. */}
-                      · {s.retailer ?? shortCountry(s.country)} · {shortWindow(s.months_window)}
+                      · {when}
                     </span>
                     {isLatest && " ✨"}
                   </button>
                   <button
                     type="button"
-                    onClick={() => deleteSet(s.generation)}
-                    title={`Delete Set ${s.generation}`}
-                    aria-label={`Delete Set ${s.generation}`}
+                    onClick={() => deleteSet(s)}
+                    title={`Delete the Set run on ${when}`}
+                    aria-label={`Delete the Set run on ${when}`}
                     className={clsx(
                       "px-1.5 text-xs border-l transition-colors",
                       active
@@ -915,7 +921,8 @@ function InStoreTrendsPageInner() {
             <span className="text-stone-500">
               <span className="text-stone-400">Date report run: </span>
               <span className="font-medium text-stone-900">
-                {new Date(report.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                {/* The Set's own run time; created_at is the WEEK's first run. */}
+                {new Date(report.set_run_at ?? report.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
               </span>
             </span>
             <span className="text-stone-500">

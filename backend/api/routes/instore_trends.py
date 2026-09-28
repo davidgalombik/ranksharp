@@ -83,6 +83,10 @@ class InStoreReportOut(BaseModel):
     months_window: Optional[int] = None
     country: Optional[str] = None
     retailer: Optional[str] = None
+    # When the Set in view was actually run (min created_at of its trends).
+    # The report row's created_at is the WEEK's first run, which is the
+    # wrong date once Sets from many days share a report. (2026-09-28)
+    set_run_at: Optional[datetime] = None
     rising_trends: list[InStoreTrendOut]
     new_trends: list[InStoreTrendOut]
     declining_trends: list[InStoreTrendOut]
@@ -108,23 +112,36 @@ async def get_latest(
         default=None,
         description="Filter trends to a single Set. Omit for the latest Set.",
     ),
+    report_id: Optional[int] = Query(
+        default=None,
+        description="Which weekly report row the Set lives on. Omit for the newest. "
+                    "Sets span many weeks now, so the UI passes the Set's own report_id.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Latest report. When `generation` is provided, only trends from that
-    Set are returned + the report's months_window switches to that Set's
-    horizon (each Set can have been run against a different window)."""
-    result = await db.execute(
-        select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
-    )
-    report = result.scalar_one_or_none()
+    """A report + one of its Sets. Reports are still bucketed by week
+    internally, but since 2026-09-28 the UI treats Sets as living in their
+    (country, retailer, horizon) scope regardless of week — so callers
+    address a Set by (report_id, generation) from /sets rather than
+    assuming the newest report."""
+    if report_id is not None:
+        report = await db.get(InStoreTrendReport, report_id)
+    else:
+        report = (await db.execute(
+            select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
+        )).scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="No reports yet")
     return await _build_report_out(report, db, generation=generation)
 
 
 class InStoreSetOut(BaseModel):
-    """One Set on the latest report — for the Set tab bar."""
+    """One Set — for the Set tab bar. Identity is (report_id, generation):
+    generation numbers restart each week, so on their own they collide
+    across reports."""
+    report_id: int
     generation: int
+    run_at: datetime  # when this Set was run (min created_at of its trends)
     months_window: Optional[int] = None
     country: Optional[str] = None
     retailer: Optional[str] = None  # None = all retailers in scope
@@ -134,43 +151,49 @@ class InStoreSetOut(BaseModel):
 
 @router.get("/sets", response_model=list[InStoreSetOut])
 async def list_sets(db: AsyncSession = Depends(get_db)):
-    """Every Set on the latest report, in generation order. Powers the
-    Set tab bar on the /instore page.
+    """EVERY Set across every report, oldest first. Powers the Set tab bar.
 
-    A Set is homogeneous per (generation, months_window, country) —
-    the engine stamps every trend in a run with the same tuple — so
-    grouping by generation and taking max() over the other two just
-    hoists the shared value into the row.
+    History (2026-09-28): this used to return only the newest report's
+    Sets. Reports are bucketed by ISO week in UTC, so the buyer's Monday-
+    morning per-retailer runs (before 10:00 AEST = 00:00 UTC) landed on
+    the previous week's report, and one afternoon run created a new
+    report that hid all 18 of them. Weekly bucketing suits Product
+    Trends (weekly re-scrapes) but not ad-hoc per-retailer store walks.
+    The UI now filters this full list by scope, so a Set stays visible
+    until deleted.
+
+    A Set is homogeneous per (week, generation, window, country,
+    retailer) — the engine stamps every trend in a run with the same
+    tuple — so max() over those columns just hoists the shared value.
     """
-    latest_report = (await db.execute(
-        select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
-    )).scalar_one_or_none()
-    if not latest_report:
-        return []
-
     rows = await db.execute(
         select(
+            InStoreTrendReport.id.label("report_id"),
             InStoreTrend.generation,
+            func.min(InStoreTrend.created_at).label("run_at"),
             func.max(InStoreTrend.months_window).label("months_window"),
             func.max(InStoreTrend.country).label("country"),
             func.max(InStoreTrend.retailer).label("retailer"),
             func.count(InStoreTrend.id).label("trend_count"),
             func.coalesce(func.sum(InStoreTrend.item_count), 0).label("item_count"),
         )
-        .where(InStoreTrend.week_start == latest_report.week_start)
-        .group_by(InStoreTrend.generation)
-        .order_by(InStoreTrend.generation)
+        .select_from(InStoreTrend)
+        .join(InStoreTrendReport, InStoreTrendReport.week_start == InStoreTrend.week_start)
+        .group_by(InStoreTrendReport.id, InStoreTrend.week_start, InStoreTrend.generation)
+        .order_by(func.min(InStoreTrend.created_at))
     )
     return [
         InStoreSetOut(
+            report_id=int(rid),
             generation=int(gen),
+            run_at=run_at,
             months_window=(int(mw) if mw is not None else None),
             country=(str(ctry) if ctry else None),
             retailer=(str(rt) if rt else None),
             trend_count=int(tc),
             item_count=int(ic),
         )
-        for gen, mw, ctry, rt, tc, ic in rows.all()
+        for rid, gen, run_at, mw, ctry, rt, tc, ic in rows.all()
     ]
 
 
@@ -392,14 +415,11 @@ async def delete_set(
         )
     )
     remaining = remaining_row.scalar_one() or 0
-    if remaining == 0:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Refusing to delete — this is the only remaining Set for "
-                f"report {report_id}. Use /clear if you want a clean slate."
-            ),
-        )
+    # Used to 409 here when this was the report's last Set. Now that Sets
+    # live in their scope rather than "the newest report", one-Set reports
+    # are normal (a lone West Elm run on a fresh week) and must be
+    # deletable — the empty report row is removed below instead. (2026-09-28)
+    last_set_on_report = remaining == 0
 
     id_rows = await db.execute(
         select(InStoreTrend.id).where(
@@ -438,14 +458,20 @@ async def delete_set(
         sa_delete(InStoreTrend).where(InStoreTrend.id.in_(trend_ids))
     )
 
-    report.trend_ids = [tid for tid in (report.trend_ids or []) if tid not in trend_id_set]
-    gen_rows = await db.execute(
-        select(InStoreTrend.generation)
-        .where(InStoreTrend.week_start == report.week_start)
-        .distinct()
-    )
-    remaining_gens = sorted({int(g) for (g,) in gen_rows.all()})
-    report.generation_count = max(remaining_gens) if remaining_gens else 1
+    if last_set_on_report:
+        # Nothing left on this week's report — drop the row so it can't be
+        # picked as "newest" with zero trends.
+        await db.delete(report)
+        remaining_gens: list[int] = []
+    else:
+        report.trend_ids = [tid for tid in (report.trend_ids or []) if tid not in trend_id_set]
+        gen_rows = await db.execute(
+            select(InStoreTrend.generation)
+            .where(InStoreTrend.week_start == report.week_start)
+            .distinct()
+        )
+        remaining_gens = sorted({int(g) for (g,) in gen_rows.all()})
+        report.generation_count = max(remaining_gens) if remaining_gens else 1
 
     await db.commit()
 
@@ -573,6 +599,7 @@ async def _build_report_out(
             id=report.id, week_start=report.week_start, title=report.title,
             summary=report.summary, total_items_analysed=report.total_items_analysed,
             trend_count=0, months_window=report.months_window, country=None, retailer=None,
+            set_run_at=None,
             rising_trends=[], new_trends=[], declining_trends=[],
             all_trends=[], created_at=report.created_at,
         )
@@ -610,6 +637,7 @@ async def _build_report_out(
             active_window = window_from_trends
         active_country = trends[0].country
         active_retailer = trends[0].retailer
+    set_run_at = min((t.created_at for t in trends if t.created_at), default=None)
 
     # Bulk-fetch examples + their items + parent images for retailer/image_id.
     # "Is-a-product" gate — filter to items that Claude Vision actually
@@ -717,7 +745,7 @@ async def _build_report_out(
         id=report.id, week_start=report.week_start, title=report.title,
         summary=report.summary, total_items_analysed=report.total_items_analysed,
         trend_count=len(trends), months_window=active_window, country=active_country,
-        retailer=active_retailer,
+        retailer=active_retailer, set_run_at=set_run_at,
         rising_trends=rising, new_trends=new, declining_trends=declining,
         all_trends=[to_out(t) for t in trends],
         created_at=report.created_at,
