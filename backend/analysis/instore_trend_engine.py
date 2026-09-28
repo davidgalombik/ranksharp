@@ -221,9 +221,9 @@ class InStoreTrendEngine:
         country: Optional[str] = None,
         retailer: Optional[str] = None,
     ) -> Optional[InStoreTrendReport]:
-        """Run a fresh in-store trend analysis. If a report for `week_start`
-        already exists, append a new generation (Try Again) — keeping prior
-        trends and their examples intact.
+        """Run a fresh in-store trend analysis. Every run is its own report
+        row / Set (2026-09-28). Nothing is scheduled — a run only happens
+        when a buyer clicks Run or Try again.
 
         `retailer` scopes to a single store walk (exact match on
         InStoreCatalogueImage.retailer). None = every retailer in scope —
@@ -241,12 +241,15 @@ class InStoreTrendEngine:
         UI defaults to a specific country; None is here for the explicit
         'All countries' pill.
         """
+        # One report row per RUN. `week_start` is a legacy column name — it
+        # now holds the run timestamp, exactly as Fragrance's does. Weekly
+        # bucketing suited Product Trends' weekly scrapes; for ad-hoc
+        # per-retailer store walks it split one Monday morning across two
+        # "weeks" (the boundary is 00:00 UTC = 10:00 AEST) and hid 18 Sets,
+        # and made the report's item count + summary describe whichever
+        # Set ran LAST that week. (2026-09-28)
         if week_start is None:
-            today = datetime.utcnow().date()
-            week_start = datetime.combine(
-                today - timedelta(days=today.weekday()),
-                datetime.min.time(),
-            )
+            week_start = datetime.utcnow()
 
         log.info(
             "instore_trend_run_start",
@@ -257,21 +260,15 @@ class InStoreTrendEngine:
         )
         self._progress(3, "Loading prior trends for exclusion…")
 
-        # Generation numbering is per-week across EVERY country/horizon so
-        # Set numbers never collide — /sets groups by generation alone and
-        # delete-set targets by generation alone.
-        gen_row = await self.db.execute(
-            select(func.max(InStoreTrend.generation))
-            .where(InStoreTrend.week_start == week_start)
-        )
-        max_generation = int(gen_row.scalar_one_or_none() or 0)
-        next_generation = max_generation + 1
+        # Each run is its own report, so it is always Set 1 of that report.
+        # The UI numbers Sets by position within a scope, never by this.
+        next_generation = 1
 
-        # The exclusion list is scoped to the SAME country + horizon: a Try
-        # Again on US · Last 3 mo should find different angles from the
-        # earlier US · Last 3 mo Set, but a run at a different horizon or
-        # country is free to re-find the same trends — that's how the buying
-        # team tracks a trend from visit to visit.
+        # "Try again" should find different angles from the MOST RECENT
+        # prior Set in the same scope (country · retailer · horizon),
+        # whenever it ran — not just within the same week. A run at a
+        # different scope is free to re-find the same trends; that's how
+        # the buying team tracks a trend from visit to visit.
         def _same_scope(q):
             q = (q.where(InStoreTrend.months_window == months_window)
                  if months_window is not None
@@ -284,10 +281,16 @@ class InStoreTrendEngine:
                  else q.where(InStoreTrend.retailer.is_(None)))
             return q
 
-        prev_result = await self.db.execute(_same_scope(
-            select(InStoreTrend.name).where(InStoreTrend.week_start == week_start)
+        prev_ws_row = await self.db.execute(_same_scope(
+            select(func.max(InStoreTrend.week_start))
         ))
-        previously_found = [r[0] for r in prev_result.all()]
+        prev_week_start = prev_ws_row.scalar_one_or_none()
+        previously_found: list[str] = []
+        if prev_week_start is not None:
+            prev_result = await self.db.execute(_same_scope(
+                select(InStoreTrend.name).where(InStoreTrend.week_start == prev_week_start)
+            ))
+            previously_found = [r[0] for r in prev_result.all()]
 
         window_label = (
             f"last {months_window} month{'s' if months_window != 1 else ''}"
@@ -342,16 +345,15 @@ class InStoreTrendEngine:
 
         await self.db.flush()
 
-        # Skip example items already used by earlier Sets in the SAME
-        # country + horizon (same scoping as the exclusion list — a Set at a
-        # different horizon may legitimately re-use the same hero items).
+        # Skip example items already used by the most recent prior Set in
+        # the same scope (same scoping as the exclusion list — a Set at a
+        # different scope may legitimately re-use the same hero items).
         used_ids: set[int] = set()
-        if max_generation > 0:
+        if prev_week_start is not None:
             prior_ex_result = await self.db.execute(_same_scope(
                 select(InStoreTrendExample.item_id)
                 .join(InStoreTrend, InStoreTrendExample.trend_id == InStoreTrend.id)
-                .where(InStoreTrend.week_start == week_start)
-                .where(InStoreTrend.generation < next_generation)
+                .where(InStoreTrend.week_start == prev_week_start)
             ))
             used_ids = set(prior_ex_result.scalars().all())
 
@@ -382,33 +384,14 @@ class InStoreTrendEngine:
 
         self._progress(95, "Writing report…")
 
-        # Upsert the report
-        report_result = await self.db.execute(
-            select(InStoreTrendReport).where(InStoreTrendReport.week_start == week_start)
+        # One report per run — always a fresh row, so its item count and
+        # Claude-written title/summary describe THIS Set and nothing else.
+        report_values = await self._generate_report_meta(
+            week_start, [t for t, _ in new_trends], len(items),
         )
-        report = report_result.scalar_one_or_none()
-        committed_ids = [t.id for t, _ in new_trends]
-
-        if report:
-            report.trend_ids = (report.trend_ids or []) + committed_ids
-            report.generation_count = next_generation
-            report.total_items_analysed = len(items)
-            report.months_window = months_window
-        else:
-            report_values = await self._generate_report_meta(
-                week_start, [t for t, _ in new_trends], len(items),
-            )
-            report_values["generation_count"] = next_generation
-            report_values["months_window"] = months_window
-            upsert_stmt = (
-                pg_insert(InStoreTrendReport)
-                .values(**report_values)
-                .on_conflict_do_update(
-                    constraint="instore_trend_reports_week_start_key",
-                    set_={k: v for k, v in report_values.items() if k != "week_start"},
-                )
-            )
-            await self.db.execute(upsert_stmt)
+        report_values["generation_count"] = next_generation
+        report_values["months_window"] = months_window
+        self.db.add(InStoreTrendReport(**report_values))
 
         await self.db.commit()
 
@@ -830,7 +813,8 @@ class InStoreTrendEngine:
         generated trends. Keeps the report screen readable. Falls back to a
         deterministic title if the call fails."""
         names = ", ".join(t.name for t in trends[:8])
-        fallback_title = f"In-store Trend Report — week of {week_start.strftime('%d %b %Y')}"
+        # `week_start` is the run timestamp (see regenerate_analysis).
+        fallback_title = f"In-store Trend Report — {week_start.strftime('%d %b %Y, %H:%M')} UTC"
 
         try:
             response = await self.client.messages.create(
