@@ -245,24 +245,17 @@ async def scope_counts(
             .order_by(InStoreCatalogueImage.retailer)
     )).all()
 
-    # Which scopes already have a Set on the latest report.
-    have: set[Optional[str]] = set()
-    latest_report = (await db.execute(
-        select(InStoreTrendReport).order_by(desc(InStoreTrendReport.week_start)).limit(1)
-    )).scalar_one_or_none()
-    if latest_report:
-        q = (
-            select(InStoreTrend.retailer)
-            .where(InStoreTrend.week_start == latest_report.week_start)
-            .distinct()
-        )
-        q = (q.where(InStoreTrend.months_window == months_window)
-             if months_window is not None
-             else q.where(InStoreTrend.months_window.is_(None)))
-        q = (q.where(InStoreTrend.country == country)
-             if country
-             else q.where(InStoreTrend.country.is_(None)))
-        have = {r for (r,) in (await db.execute(q)).all()}
+    # Which scopes already have a Set — across EVERY week, matching /sets.
+    # (Used to look only at the newest report, which would tick West Elm
+    # alone while 18 older retailer Sets were live. 2026-09-28)
+    q = select(InStoreTrend.retailer).distinct()
+    q = (q.where(InStoreTrend.months_window == months_window)
+         if months_window is not None
+         else q.where(InStoreTrend.months_window.is_(None)))
+    q = (q.where(InStoreTrend.country == country)
+         if country
+         else q.where(InStoreTrend.country.is_(None)))
+    have: set[Optional[str]] = {r for (r,) in (await db.execute(q)).all()}
 
     retailers = [
         ScopeRetailerOut(name=str(name), item_count=int(n), has_set=(str(name) in have))
