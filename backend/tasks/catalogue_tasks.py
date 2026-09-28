@@ -3,7 +3,7 @@ import asyncio
 import base64 as _b64
 import io
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -288,20 +288,32 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         from analysis.catalogue_vision import CatalogueVision
         analyser = CatalogueVision()
 
+        # Bytes source, in order of preference (2026-09-28):
+        #   1. file_b64 in the message — legacy in-flight tasks only.
+        #   2. vision_payload staged on the row by the API (normal path;
+        #      a downsized JPEG, so src_type comes from the row too).
+        #   3. the original on disk — only works where the upload volume
+        #      is mounted, which is NOT this worker; kept for completeness.
         if file_b64:
             raw_bytes = _b64.b64decode(file_b64)
+            src_type = image.file_type
+        elif image.vision_payload:
+            raw_bytes = bytes(image.vision_payload)
+            src_type = image.vision_payload_type or "jpeg"
         else:
             p = Path(image.file_path)
             if not p.exists():
                 image.status = "failed"
-                image.error_message = "File missing on disk"
+                image.error_message = ("No staged payload and the original isn't on this "
+                                       "host — click Retry to re-stage it")
                 db.commit()
                 return {"error": "file missing"}
             raw_bytes = p.read_bytes()
+            src_type = image.file_type
 
         async def _run():
             try:
-                return await analyser.analyse_image_bytes(raw_bytes, image.file_type)
+                return await analyser.analyse_image_bytes(raw_bytes, src_type)
             finally:
                 await analyser.aclose()
         detected = asyncio.run(_run())
@@ -309,6 +321,9 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         if detected is None:
             image.status = "failed"
             image.error_message = "Vision analysis returned no result"
+            # Terminal — drop the staged payload; Retry re-stages from disk.
+            image.vision_payload = None
+            image.vision_payload_type = None
             db.commit()
             return {"status": "failed", "image_id": image_id}
 
@@ -333,7 +348,7 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
             for e in detected
         )
         if wants_crops:
-            source_img = _open_source_image(raw_bytes, image.file_type)
+            source_img = _open_source_image(raw_bytes, src_type)
 
         crop_count = 0
         for entry in detected:
@@ -369,6 +384,10 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         image.raw_analysis = detected
         image.status = "done"
         image.error_message = None
+        # Terminal — reclaim the staged payload so Postgres only ever holds
+        # in-flight images. The original stays on the upload volume.
+        image.vision_payload = None
+        image.vision_payload_type = None
         db.commit()
         log.info(
             "catalogue_image_analysed",
@@ -388,5 +407,65 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         except Exception:
             pass
         raise self.retry(exc=exc, countdown=60)
+    finally:
+        db.close()
+
+
+@app.task(queue="aldi")
+def requeue_stuck_catalogue_images():
+    """Self-heal for catalogue images whose analysis task never ran or died.
+
+    Runs every 10 minutes via beat (2026-09-28). Two triggers:
+      pending   > 15 min → the message was lost before a worker took it
+                            (this is exactly what happened to 71 images on
+                            25 Sep when Redis stalled mid-publish).
+      analysing > 45 min → a worker died mid-task. acks_late normally
+                            restores these, but not if the message itself
+                            is gone.
+
+    Rows with a staged payload are simply re-queued by id. Rows WITHOUT
+    one (uploads that predate payload staging) can't be rebuilt here — the
+    upload volume isn't mounted on this worker — so they're marked failed
+    with a clear message; the Retry button re-stages from disk on the API.
+    """
+    from database.models import InStoreCatalogueImage as I
+    db = Session()
+    try:
+        now = datetime.utcnow()
+        pending_cutoff = now - timedelta(minutes=15)
+        analysing_cutoff = now - timedelta(minutes=45)
+        rows = db.query(I).filter(
+            ((I.status == "pending") & (I.updated_at < pending_cutoff))
+            | ((I.status == "analysing") & (I.updated_at < analysing_cutoff))
+        ).all()
+
+        requeued: list[int] = []
+        orphaned: list[int] = []
+        for img in rows:
+            if img.vision_payload:
+                img.status = "pending"
+                img.error_message = None
+                img.updated_at = now  # don't re-sweep for another 15 min
+                requeued.append(img.id)
+            else:
+                img.status = "failed"
+                img.error_message = ("Analysis task was lost before the image was staged "
+                                     "for the worker — click Retry")
+                orphaned.append(img.id)
+        db.commit()
+
+        sent = 0
+        for iid in requeued:
+            try:
+                analyse_catalogue_image.delay(iid)
+                sent += 1
+            except Exception as exc:  # noqa: BLE001 — next sweep tries again
+                log.warning("stuck_catalogue_requeue_failed", image_id=iid, error=str(exc))
+
+        if requeued or orphaned:
+            log.warning("stuck_catalogue_images_swept",
+                        requeued=len(requeued), sent=sent, orphaned=len(orphaned),
+                        sample=(requeued + orphaned)[:10])
+        return {"requeued": len(requeued), "sent": sent, "orphaned": len(orphaned)}
     finally:
         db.close()

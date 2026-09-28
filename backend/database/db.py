@@ -291,6 +291,15 @@ async def init_db():
             ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
              "country VARCHAR(2) NOT NULL DEFAULT 'US'",
              _col("instore_catalogue_images", "country")),
+            # Staged vision payload (downsized JPEG) so the worker needn't
+            # read the upload volume and Redis stops carrying image bytes.
+            # Nulled when analysis reaches a terminal state. (2026-09-28)
+            ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
+             "vision_payload BYTEA",
+             _col("instore_catalogue_images", "vision_payload")),
+            ("ALTER TABLE instore_catalogue_images ADD COLUMN IF NOT EXISTS "
+             "vision_payload_type VARCHAR(10)",
+             _col("instore_catalogue_images", "vision_payload_type")),
             # In-store trend reports: months_window records the time
             # horizon the run analysed. NULL = all time. (2026-09-10)
             ("ALTER TABLE instore_trend_reports ADD COLUMN IF NOT EXISTS "

@@ -117,6 +117,36 @@ def instore_search_order(q: str) -> list:
 VALID_COUNTRIES = {"AU", "US"}
 
 
+def _stage_payload(image: InStoreCatalogueImage, raw: bytes) -> None:
+    """Put the downsized vision payload on the row and reset it to pending.
+
+    Must be COMMITTED before _enqueue() publishes the id — the worker reads
+    the payload from the row, so the bytes have to be in Postgres first.
+    See analysis/catalogue_payload.py for why bytes no longer ride in the
+    Celery message. (2026-09-28)
+    """
+    from analysis.catalogue_payload import prepare_vision_payload
+    payload, ptype = prepare_vision_payload(raw, image.file_type)
+    image.vision_payload = payload
+    image.vision_payload_type = ptype
+    image.status = "pending"
+    image.error_message = None
+
+
+def _enqueue(image_id: int) -> bool:
+    """Queue analysis by id. Returns False on a broker failure — the row
+    stays 'pending' with its payload staged and the 10-minute sweeper
+    (tasks.catalogue_tasks.requeue_stuck_catalogue_images) re-queues it,
+    instead of the endpoint 500ing after the commit and stranding rows."""
+    from tasks.catalogue_tasks import analyse_catalogue_image
+    try:
+        analyse_catalogue_image.delay(image_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("catalogue_enqueue_failed", image_id=image_id, error=str(exc))
+        return False
+
+
 @router.post("/upload")
 async def upload_batch(
     files: list[UploadFile] = File(...),
@@ -154,7 +184,6 @@ async def upload_batch(
     existing = {h for (h,) in hash_rows.all()}
 
     added_images: list[InStoreCatalogueImage] = []
-    added_bytes: list[bytes] = []
     skipped_dupe = 0
     skipped_bad = 0
 
@@ -198,9 +227,11 @@ async def upload_batch(
             retailer=retailer_clean,
             country=country_clean,
         )
+        # Stage the vision payload on the row now so the single commit
+        # below persists it before any id is published. (2026-09-28)
+        _stage_payload(image, contents)
         db.add(image)
         added_images.append(image)
-        added_bytes.append(contents)
 
     if not added_images:
         # Nothing new — that's fine, not an error.
@@ -215,22 +246,22 @@ async def upload_batch(
     for img in added_images:
         await db.refresh(img)
 
-    # Dispatch Celery analysis with 200ms pacing (5/sec) — reuses existing pattern
-    from tasks.catalogue_tasks import analyse_catalogue_image
-    import base64 as _b64
-    from datetime import datetime as _dt, timedelta as _td
-    for i, (img, raw) in enumerate(zip(added_images, added_bytes)):
-        eta = _dt.utcnow() + _td(milliseconds=i * 200)
-        analyse_catalogue_image.apply_async(
-            args=[img.id],
-            kwargs={"file_b64": _b64.b64encode(raw).decode()},
-            eta=eta,
-        )
+    # Queue by id only — payloads are already committed on the rows.
+    # No ETA stagger: with prefetch=1 the worker paces itself, and Celery
+    # pulls ETA tasks into worker memory en masse regardless of prefetch,
+    # which is a loss window on every redeploy. A failed publish leaves
+    # the row 'pending' for the sweeper rather than 500ing after the
+    # commit. (2026-09-28)
+    queue_failed = sum(0 if _enqueue(img.id) else 1 for img in added_images)
+    if queue_failed:
+        log.warning("catalogue_upload_partial_enqueue",
+                    added=len(added_images), queue_failed=queue_failed)
 
     return {
         "added": len(added_images),
         "skipped_duplicate": skipped_dupe,
         "skipped_invalid": skipped_bad,
+        "queue_failed": queue_failed,
         "image_ids": [img.id for img in added_images],
     }
 
@@ -1072,18 +1103,13 @@ async def retry_image(image_id: int, db: AsyncSession = Depends(get_db)):
     path = Path(image.file_path)
     if not path.exists():
         raise HTTPException(status_code=410, detail="File missing on disk — cannot retry")
-    image.status = "pending"
-    image.error_message = None
+    # Re-stage from the original on disk (the API can see the volume),
+    # commit, THEN publish the id.
+    _stage_payload(image, path.read_bytes())
     await db.commit()
-
-    from tasks.catalogue_tasks import analyse_catalogue_image
-    import base64 as _b64
-    raw = path.read_bytes()
-    analyse_catalogue_image.apply_async(
-        args=[image_id],
-        kwargs={"file_b64": _b64.b64encode(raw).decode()},
-    )
-    return {"queued": True, "image_id": image_id}
+    queued = _enqueue(image_id)
+    return {"queued": queued, "image_id": image_id,
+            "note": None if queued else "Broker unavailable — the 10-minute sweeper will queue it."}
 
 
 @router.post("/retry-all-pending")
@@ -1095,27 +1121,21 @@ async def retry_all_pending(db: AsyncSession = Depends(get_db)):
             InStoreCatalogueImage.status.in_(["pending", "analysing"])
         )
     )).scalars().all()
-    from tasks.catalogue_tasks import analyse_catalogue_image
-    import base64 as _b64
-    from datetime import datetime as _dt, timedelta as _td
-    queued = 0
+    # Two phases: stage every payload and commit, THEN publish ids — the
+    # worker must find the payload on the row when the message arrives.
+    stageable: list[InStoreCatalogueImage] = []
     missing = 0
-    for i, image in enumerate(rows):
+    for image in rows:
         path = Path(image.file_path)
         if not path.exists():
             missing += 1
             continue
-        image.status = "pending"
-        image.error_message = None
-        eta = _dt.utcnow() + _td(milliseconds=i * 200)
-        analyse_catalogue_image.apply_async(
-            args=[image.id],
-            kwargs={"file_b64": _b64.b64encode(path.read_bytes()).decode()},
-            eta=eta,
-        )
-        queued += 1
+        _stage_payload(image, path.read_bytes())
+        stageable.append(image)
     await db.commit()
-    return {"queued": queued, "missing_files": missing}
+    queued = sum(1 for image in stageable if _enqueue(image.id))
+    return {"queued": queued, "missing_files": missing,
+            "queue_failed": len(stageable) - queued}
 
 
 @router.post("/retry-all-failed")
@@ -1123,27 +1143,19 @@ async def retry_all_failed(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(
         select(InStoreCatalogueImage).where(InStoreCatalogueImage.status == "failed")
     )).scalars().all()
-    from tasks.catalogue_tasks import analyse_catalogue_image
-    import base64 as _b64
-    from datetime import datetime as _dt, timedelta as _td
-    queued = 0
+    stageable: list[InStoreCatalogueImage] = []
     missing = 0
-    for i, image in enumerate(rows):
+    for image in rows:
         path = Path(image.file_path)
         if not path.exists():
             missing += 1
             continue
-        image.status = "pending"
-        image.error_message = None
-        eta = _dt.utcnow() + _td(milliseconds=i * 200)
-        analyse_catalogue_image.apply_async(
-            args=[image.id],
-            kwargs={"file_b64": _b64.b64encode(path.read_bytes()).decode()},
-            eta=eta,
-        )
-        queued += 1
+        _stage_payload(image, path.read_bytes())
+        stageable.append(image)
     await db.commit()
-    return {"queued": queued, "missing_files": missing}
+    queued = sum(1 for image in stageable if _enqueue(image.id))
+    return {"queued": queued, "missing_files": missing,
+            "queue_failed": len(stageable) - queued}
 
 
 @router.delete("/images/{image_id}")

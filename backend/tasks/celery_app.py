@@ -31,6 +31,13 @@ app.conf.update(
             "task": "tasks.analysis_tasks.reset_stuck_analyses",
             "schedule": crontab(minute="*/10"),
         },
+        # Every 10 min, offset from the above — re-queue catalogue images
+        # whose analysis task was lost (pending >15 min / analysing >45 min).
+        # Self-heal for the 25-Sep failure mode. (2026-09-28)
+        "requeue-stuck-catalogue-images": {
+            "task": "tasks.catalogue_tasks.requeue_stuck_catalogue_images",
+            "schedule": crontab(minute="5-59/10"),
+        },
         # Hourly — auto-finalise sessions abandoned in UPLOADING for >24h
         "finalise-stale-instore-sessions": {
             "task": "tasks.instore_tasks.finalise_stale_instore_sessions",

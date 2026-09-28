@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import (
-    String, Text, Float, Integer, Boolean, DateTime, JSON,
+    String, Text, Float, Integer, Boolean, DateTime, JSON, LargeBinary,
     ForeignKey, UniqueConstraint, Index, Enum as SAEnum
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -572,6 +572,13 @@ class InStoreCatalogueImage(Base):
     raw_analysis = mapped_column(JSON, nullable=True)
     created_at = mapped_column(DateTime, default=datetime.utcnow, index=True)
     updated_at = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Downsized JPEG staged for the worker, which can't read the upload
+    # volume. Set at upload / retry; NULLed once analysis reaches a terminal
+    # state so Postgres only ever holds in-flight payloads. The Celery
+    # message carries just the image id. See analysis/catalogue_payload.py.
+    # (2026-09-28)
+    vision_payload = mapped_column(LargeBinary, nullable=True)
+    vision_payload_type = mapped_column(String(10), nullable=True)
     items = relationship("InStoreCatalogueItem", back_populates="image", cascade="all, delete-orphan", lazy="select")
 
 
