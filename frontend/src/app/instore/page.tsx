@@ -197,6 +197,9 @@ const MOMENTUM_BADGE: Record<string, { label: string; cls: string }> = {
 
 function TrendCard({ trend }: { trend: InStoreTrend }) {
   const examples = trend.examples.slice(0, 4);
+  // Buyer-voice descriptions run to 3 sentences and the card clamps at 3
+  // lines; this reveals the full text + the one-line evidence rationale.
+  const [expanded, setExpanded] = useState(false);
   return (
     <article className="bg-white rounded-xl border border-stone-200 overflow-hidden hover:shadow-md transition-shadow flex flex-col">
       {/* Example image strip — uses cropped item thumbnails when available */}
@@ -252,9 +255,21 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
 
         <div>
           <h3 className="text-base font-semibold text-stone-900 leading-snug">{trend.name}</h3>
-          {/* line-clamp-3 not 2: buyer-voice descriptions run to three
-              sentences for palette / seasonal transitions. */}
-          <p className="text-sm text-stone-600 mt-1 line-clamp-3">{trend.description}</p>
+          <p className={clsx("text-sm text-stone-600 mt-1", !expanded && "line-clamp-3")}>
+            {trend.description}
+          </p>
+          {expanded && trend.rationale && (
+            <p className="text-xs text-stone-500 mt-2">
+              <span className="font-medium text-stone-600">Evidence: </span>{trend.rationale}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="mt-1 text-xs font-medium text-stone-500 hover:text-stone-900 underline underline-offset-2"
+          >
+            {expanded ? "Show less" : "Read more"}
+          </button>
         </div>
 
         {trend.dominant_colours.length > 0 && (
