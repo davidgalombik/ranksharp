@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams, usePathname, useRouter } from "next/navigation";
 import clsx from "clsx";
 import InStoreRecommendationsModal from "@/components/InStoreRecommendationsModal";
+import InStoreTrendImageLightbox from "@/components/InStoreTrendImageLightbox";
 
 /** Small client button — opens the paginated recommendations modal. */
 function InStoreViewAllButton({ trend }: { trend: InStoreTrend }) {
@@ -200,19 +201,41 @@ function TrendCard({ trend }: { trend: InStoreTrend }) {
   // Buyer-voice descriptions run to 3 sentences and the card clamps at 3
   // lines; this reveals the full text + the one-line evidence rationale.
   const [expanded, setExpanded] = useState(false);
+  // Index into trend.examples of the item open in the lightbox; null = closed.
+  const [lightbox, setLightbox] = useState<number | null>(null);
   return (
     <article className="bg-white rounded-xl border border-stone-200 overflow-hidden hover:shadow-md transition-shadow flex flex-col">
-      {/* Example image strip — uses cropped item thumbnails when available */}
+      {lightbox !== null && (
+        <InStoreTrendImageLightbox
+          examples={trend.examples}
+          index={lightbox}
+          onClose={() => setLightbox(null)}
+          onNavigate={setLightbox}
+        />
+      )}
+
+      {/* Example image strip — cropped item thumbnails; click one to open
+          the full shelf photo it came from in the lightbox. */}
       <div className="relative grid grid-cols-2 gap-px bg-stone-100 aspect-[3/2]">
         {examples.length > 0 ? (
           examples.map((ex, i) => (
             <div key={`${ex.id}-${i}`} className="relative bg-stone-50 overflow-hidden">
               {ex.has_crop ? (
-                <img
-                  src={`${API_BASE}/api/instore-catalogue/items/${ex.id}/image`}
-                  alt={ex.product_name}
-                  className="w-full h-full object-cover"
-                />
+                // `i` indexes the 4-tile slice, which is the head of
+                // trend.examples — so it's also the lightbox start index.
+                <button
+                  type="button"
+                  onClick={() => setLightbox(i)}
+                  title={`${ex.product_name} — click to view the full shelf photo`}
+                  aria-label={`View full shelf photo for ${ex.product_name}`}
+                  className="block w-full h-full cursor-zoom-in group/tile"
+                >
+                  <img
+                    src={`${API_BASE}/api/instore-catalogue/items/${ex.id}/image`}
+                    alt={ex.product_name}
+                    className="w-full h-full object-cover transition-transform duration-200 group-hover/tile:scale-[1.03]"
+                  />
+                </button>
               ) : (
                 <div className="w-full h-full flex items-center justify-center text-stone-300 text-2xl">⌂</div>
               )}
