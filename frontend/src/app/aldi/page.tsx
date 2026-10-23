@@ -356,6 +356,7 @@ const MATERIAL_FAMILIES: { key: string; label: string }[] = [
   { key: "woven", label: "Woven" },
   { key: "plastic", label: "Plastic" },
   { key: "stone", label: "Stone" },
+  { key: "paper", label: "Paper" },
   { key: "wax", label: "Wax" },
 ];
 const MATERIAL_FAMILY_LABEL: Record<string, string> =

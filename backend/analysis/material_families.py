@@ -27,40 +27,59 @@ import re
 # family key → (label, [regex fragments]). Fragments are joined with | and
 # wrapped in word boundaries. They must be valid in BOTH Python re and
 # Postgres ARE (we only use literals, (?:…) groups, ? and |).
+# Calibrated against the full catalogue on 2026-10-23 (451,700 products,
+# 7,368 distinct tags): the original table covered 88% of tag occurrences;
+# the additions below came from the unmapped tags with >=200 products,
+# each placed by its co-occurring tags and sample product names —
+#   mesh → metal (wire baskets/strainers 5:1 over nylon mesh)
+#   enamel/enamelware → metal (on cast iron / steel)
+#   lacquer → wood (rubberwood boxes, trays)   wheat straw → plastic (PP)
+#   natural fiber → woven (baskets)            cloth/plush/flannel → fabric
+# Deliberately NOT mapped (not materials, or too mixed): nonstick, insulated,
+# magnetic, led, reed (reed diffusers), rope (clotheslines/planters/lights),
+# platinum (a dinnerware rim finish), sponge, oil / essential oil / liquid.
 PATTERNS: dict[str, tuple[str, list[str]]] = {
     "fabric": ("Fabric", [
         "fabric", "textile", "cotton", "linen", "canvas", "felt", "wool", "velvet",
         "polyester", "knit(?:ted)?", "burlap", "hessian", "fleece", "faux fur", "fur",
         "sherpa", "chenille", "microfib(?:er|re)", "nylon", "silk", "suede", "leather",
-        "denim", "twill", "terry", "muslin", "gauze", "lace", "tweed", "boucl[eé]",
+        "denim", "twill", "terry(?:cloth)?", "muslin", "gauze", "lace", "tweed", "boucl[eé]",
         "cashmere", "yarn", "upholster(?:y|ed)", "jacquard", "satin", "cord(?:uroy)?",
+        "cloth", "plush", "flannel", "oxford (?:cloth|fabric)", "cheesecloth",
     ]),
     "metal": ("Metal", [
         "metal(?:lic)?", "stainless[ -]?steel", "steel", "iron", "brass", "alumin(?:i)?um",
         "copper", "tin", "zinc", "gold", "silver", "chrome", "pewter", "bronze", "nickel",
-        "wire", "titanium", "galvani[sz]ed", "enamel(?:ed|led)? cast iron", "carbon steel",
+        "wire", "titanium", "galvani[sz]ed", "enamel(?:ware|ed|led)?", "carbon steel",
+        "mesh", "foil",
     ]),
     "ceramic": ("Ceramic", [
         "ceramic", "porcelain", "stoneware", "earthenware", "terra ?cotta", "clay",
-        "bone china", "china", "dolomite", "majolica", "faience",
+        "bone china", "china", "dolomite", "majolica", "faience", "pottery",
     ]),
-    "glass": ("Glass", ["glass", "crystal", "borosilicate"]),
+    "glass": ("Glass", ["glass", "crystal", "borosilicate", "mirror(?:ed)?"]),
     "wood": ("Wood", [
         "wood(?:en)?", "oak", "walnut", "acacia", "teak", "olive ?wood", "mango ?wood",
         "pine", "birch", "beech", "maple", "mdf", "plywood", "veneer", "cork", "bamboo",
         "rubberwood", "sheesham", "paulownia", "cedar", "mahogany", "timber",
+        "lacquer(?:ed)?",
     ]),
     "woven": ("Woven / natural fibre", [
         "rattan", "wicker", "seagrass", "jute", "sisal", "raffia", "water hyacinth",
         "cane", "abaca", "paper rope", "woven", "hyacinth", "banana leaf", "palm leaf",
+        "natural fib(?:er|re)",
     ]),
     "plastic": ("Plastic / resin", [
         "plastic", "acrylic", "resin", "silicone", "melamine", "polypropylene", "pp",
         "pet", "vinyl", "pvc", "rubber", "foam", "tritan", "polyresin", "abs",
+        "pe", "hdpe", "ldpe", "polyethylene", "polycarbonate", "polystyrene", "wheat straw",
     ]),
     "stone": ("Stone / concrete", [
         "marble", "stone", "granite", "concrete", "cement", "slate", "travertine",
         "soapstone", "quartz", "terrazzo", "onyx", "agate", "alabaster",
+    ]),
+    "paper": ("Paper / card", [
+        "paper", "cardboard", "kraft", "card ?stock", "papier[- ]m[aâ]ch[eé]",
     ]),
     "wax": ("Wax", ["wax", "soy", "paraffin", "beeswax"]),
 }
