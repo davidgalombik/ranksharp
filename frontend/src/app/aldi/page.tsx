@@ -341,7 +341,26 @@ interface ClusterProduct {
   retailer_name: string;
   retailer_slug: string;
   is_best_seller: boolean;
+  materials?: string[];
+  material_families?: string[];
 }
+
+// Material families — mirrors backend analysis/material_families.py
+// (FAMILY_ORDER / FAMILY_LABELS). Keep the two in sync. (2026-10-23)
+const MATERIAL_FAMILIES: { key: string; label: string }[] = [
+  { key: "fabric", label: "Fabric" },
+  { key: "metal", label: "Metal" },
+  { key: "ceramic", label: "Ceramic" },
+  { key: "glass", label: "Glass" },
+  { key: "wood", label: "Wood" },
+  { key: "woven", label: "Woven" },
+  { key: "plastic", label: "Plastic" },
+  { key: "stone", label: "Stone" },
+  { key: "wax", label: "Wax" },
+];
+const MATERIAL_FAMILY_LABEL: Record<string, string> =
+  Object.fromEntries(MATERIAL_FAMILIES.map((f) => [f.key, f.label]));
+type MaterialFacets = Record<string, number>;
 
 /**
  * AldiClusterCard — new sub-theme-of-real-products card. Shape mirrors
@@ -349,14 +368,56 @@ interface ClusterProduct {
  * description + "View all N products" button that opens the paginated
  * modal against the live catalogue.
  */
-function AldiClusterCard({ idea }: { idea: AldiIdea }) {
+function AldiClusterCard({
+  idea,
+  materialFilter = null,
+  onFacets,
+}: {
+  idea: AldiIdea;
+  /** Set-level material family filter; dims the card when it has none. */
+  materialFilter?: string | null;
+  /** Reports this cluster's live material counts up for the Set chip bar. */
+  onFacets?: (ideaId: number, facets: MaterialFacets) => void;
+}) {
   const [modalOpen, setModalOpen] = useState(false);
+  const [facets, setFacets] = useState<MaterialFacets | null>(null);
+  // Ref so the fetch effect depends only on idea.id, not on a callback
+  // identity that changes every parent render.
+  const onFacetsRef = useRef(onFacets);
+  onFacetsRef.current = onFacets;
   const products = idea.inspired_by_products || [];
   const heroes = products.slice(0, 3);
   const bestSellerBadge = products.some((p) => p.is_best_seller);
+
+  // Material-family counts over the cluster's LIVE match set (2026-10-23).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/material-facets`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        const f: MaterialFacets = (d && d.families) || {};
+        setFacets(f);
+        onFacetsRef.current?.(idea.id, f);
+      })
+      .catch(() => { if (!cancelled) setFacets({}); });
+    return () => { cancelled = true; };
+  }, [idea.id]);
+
+  const filterLabel = materialFilter ? (MATERIAL_FAMILY_LABEL[materialFilter] ?? materialFilter) : null;
+  const filterCount = materialFilter && facets ? (facets[materialFilter] ?? 0) : null;
+  const dimmed = materialFilter != null && facets != null && filterCount === 0;
+  const presentFamilies = facets
+    ? MATERIAL_FAMILIES.filter((f) => (facets[f.key] ?? 0) > 0).slice(0, 5)
+    : [];
   return (
     <>
-      <article className="bg-white rounded-xl border border-stone-200 overflow-hidden flex flex-col">
+      <article className={clsx(
+        "bg-white rounded-xl border overflow-hidden flex flex-col transition-opacity",
+        dimmed ? "border-stone-200 opacity-40"
+          : materialFilter && filterCount ? "border-amber-300"
+          : "border-stone-200",
+      )}>
         <div className="h-40 flex gap-0.5 overflow-hidden bg-stone-100">
           {heroes.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-stone-300 text-4xl">📦</div>
@@ -394,17 +455,53 @@ function AldiClusterCard({ idea }: { idea: AldiIdea }) {
             )}
           </div>
           <p className="text-xs text-stone-600 leading-relaxed line-clamp-3">{idea.description}</p>
+          {/* Material families present in this cluster's live match set.
+              A buyer with a materials remit reads these before the name. */}
+          {facets === null ? (
+            <div className="h-4 w-2/3 bg-stone-100 rounded animate-pulse" aria-hidden />
+          ) : presentFamilies.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {presentFamilies.map((f) => (
+                <span
+                  key={f.key}
+                  className={clsx(
+                    "px-1.5 py-0.5 rounded-full text-[10px] border",
+                    f.key === materialFilter
+                      ? "bg-amber-100 text-amber-900 border-amber-300 font-semibold"
+                      : "bg-stone-50 text-stone-600 border-stone-200",
+                  )}
+                >
+                  {f.label} {(facets[f.key] ?? 0).toLocaleString()}
+                </span>
+              ))}
+            </div>
+          ) : null}
           <div className="flex-1" />
           <button
             onClick={() => setModalOpen(true)}
-            className="mt-2 w-full text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg px-3 py-2 transition-colors"
+            disabled={dimmed}
+            className={clsx(
+              "mt-2 w-full text-xs font-medium rounded-lg px-3 py-2 transition-colors border",
+              dimmed
+                ? "text-stone-400 bg-stone-50 border-stone-200 cursor-not-allowed"
+                : "text-amber-800 bg-amber-50 hover:bg-amber-100 border-amber-200",
+            )}
           >
-            View all matching products →
+            {materialFilter && filterCount != null
+              ? filterCount > 0
+                ? `View ${filterCount.toLocaleString()} ${filterLabel} products →`
+                : `No ${filterLabel} products in this cluster`
+              : "View all matching products →"}
           </button>
         </div>
       </article>
       {modalOpen && (
-        <AldiClusterProductsModal idea={idea} onClose={() => setModalOpen(false)} />
+        <AldiClusterProductsModal
+          idea={idea}
+          onClose={() => setModalOpen(false)}
+          initialMaterial={materialFilter}
+          facets={facets}
+        />
       )}
     </>
   );
@@ -429,7 +526,19 @@ function OutOfScopeCard({ idea }: { idea: AldiIdea }) {
  * keywords. Best-sellers first, "Only best sellers" toggle, Load More.
  * Same shape as Product Trends' TrendProductsModal.
  */
-function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: () => void }) {
+function AldiClusterProductsModal({
+  idea,
+  onClose,
+  initialMaterial = null,
+  facets = null,
+}: {
+  idea: AldiIdea;
+  onClose: () => void;
+  /** Pre-select a material family (carried in from the Set chip bar). */
+  initialMaterial?: string | null;
+  /** Live family counts for this cluster, for the in-modal chips. */
+  facets?: MaterialFacets | null;
+}) {
   const PAGE_SIZE = 48;
   const [products, setProducts] = useState<ClusterProduct[]>([]);
   const [total, setTotal] = useState<number | null>(null);
@@ -437,17 +546,21 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [onlyBestSellers, setOnlyBestSellers] = useState(false);
+  const [material, setMaterial] = useState<string | null>(initialMaterial);
+  const materialLabel = material ? (MATERIAL_FAMILY_LABEL[material] ?? material) : null;
+
+  const buildQs = useCallback((off: number) => {
+    const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(off) });
+    if (onlyBestSellers) qs.set("only_best_sellers", "true");
+    if (material) qs.set("material", material);
+    return qs;
+  }, [onlyBestSellers, material]);
 
   const loadFirstPage = useCallback(async () => {
     setLoading(true);
     setOffset(0);
     try {
-      const qs = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: "0",
-        ...(onlyBestSellers ? { only_best_sellers: "true" } : {}),
-      });
-      const res = await fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/products?${qs}`);
+      const res = await fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/products?${buildQs(0)}`);
       const data = await res.json();
       setProducts(data.items || []);
       setTotal(data.total ?? 0);
@@ -457,7 +570,7 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
     } finally {
       setLoading(false);
     }
-  }, [idea.id, onlyBestSellers]);
+  }, [idea.id, buildQs]);
 
   useEffect(() => { loadFirstPage(); }, [loadFirstPage]);
 
@@ -466,11 +579,7 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
     setLoadingMore(true);
     const next = offset + PAGE_SIZE;
     try {
-      const qs = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(next),
-        ...(onlyBestSellers ? { only_best_sellers: "true" } : {}),
-      });
+      const qs = buildQs(next);
       const res = await fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/products?${qs}`);
       const data = await res.json();
       setProducts((prev) => [...prev, ...(data.items || [])]);
@@ -504,18 +613,48 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
                 ? "Loading matching products…"
                 : total === null
                   ? ""
-                  : `Showing ${products.length.toLocaleString()} of ${total.toLocaleString()} matching products`}
+                  : `Showing ${products.length.toLocaleString()} of ${total.toLocaleString()} matching${materialLabel ? ` ${materialLabel.toLowerCase()}` : ""} products`}
             </p>
           </div>
           <button onClick={onClose} className="text-stone-400 hover:text-stone-900 text-2xl leading-none px-2" aria-label="Close">×</button>
         </div>
         <div className="px-6 py-3 border-b border-stone-100 flex items-center gap-4 flex-wrap">
-          <label className="flex items-center gap-2 text-sm text-stone-700 cursor-pointer">
+          {/* Material family filter (2026-10-23). Counts are this cluster's
+              live match set; a product can sit in two families. */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider text-stone-400 font-medium mr-1">Material:</span>
+            <button
+              type="button"
+              onClick={() => setMaterial(null)}
+              className={clsx(
+                "px-2.5 py-1 rounded-full text-xs font-medium border transition-colors",
+                material === null ? "bg-stone-900 text-white border-stone-900" : "bg-white text-stone-600 border-stone-200 hover:border-stone-400",
+              )}
+            >All</button>
+            {MATERIAL_FAMILIES.map((f) => {
+              const n = facets ? (facets[f.key] ?? 0) : null;
+              if (n === 0 && material !== f.key) return null;  // nothing here — hide
+              return (
+                <button
+                  key={f.key}
+                  type="button"
+                  onClick={() => setMaterial(material === f.key ? null : f.key)}
+                  className={clsx(
+                    "px-2.5 py-1 rounded-full text-xs font-medium border transition-colors",
+                    material === f.key ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-white text-stone-600 border-stone-200 hover:border-stone-400",
+                  )}
+                >
+                  {f.label}{n != null ? ` ${n.toLocaleString()}` : ""}
+                </button>
+              );
+            })}
+          </div>
+          <label className="flex items-center gap-2 text-sm text-stone-700 cursor-pointer ml-auto">
             <input type="checkbox" checked={onlyBestSellers} onChange={(e) => setOnlyBestSellers(e.target.checked)} className="rounded" />
             Only best sellers
           </label>
           {onlyBestSellers && (
-            <p className="text-xs text-stone-400">Note: not every retailer publishes best-seller flags.</p>
+            <p className="text-xs text-stone-400 w-full">Note: not every retailer publishes best-seller flags.</p>
           )}
         </div>
         <div className="flex-1 overflow-y-auto p-6">
@@ -523,7 +662,9 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
             <p className="text-center text-stone-400 py-16">Loading products…</p>
           ) : products.length === 0 ? (
             <p className="text-center text-stone-400 py-16">
-              {onlyBestSellers ? "No best-seller products in this cluster." : "No products match this cluster."}
+              {materialLabel
+                ? `No ${materialLabel.toLowerCase()} products in this cluster${onlyBestSellers ? " among best sellers" : ""}.`
+                : onlyBestSellers ? "No best-seller products in this cluster." : "No products match this cluster."}
             </p>
           ) : (
             <>
@@ -552,6 +693,11 @@ function AldiClusterProductsModal({ idea, onClose }: { idea: AldiIdea; onClose: 
                       <p className="text-xs text-stone-500 truncate">{p.retailer_name}</p>
                       <p className="text-xs text-stone-800 leading-snug line-clamp-2">{p.name}</p>
                       {p.price != null && <p className="text-xs text-stone-500">${p.price.toFixed(2)}</p>}
+                      {(p.material_families?.length ?? 0) > 0 && (
+                        <p className="text-[10px] text-stone-400 truncate" title={(p.materials ?? []).join(", ")}>
+                          {p.material_families!.map((k) => MATERIAL_FAMILY_LABEL[k] ?? k).join(" · ")}
+                        </p>
+                      )}
                     </div>
                   </a>
                 ))}
@@ -743,6 +889,15 @@ function SessionDetailView({
   // Generation state
   const latestGen = session.latest_generation ?? (allIdeas.length > 0 ? Math.max(...allIdeas.map((i) => i.generation)) : 1);
   const [activeGen, setActiveGen] = useState<number>(latestGen);
+
+  // Material filter across the Set (2026-10-23). Each cluster card fetches
+  // its own live family counts and reports them up, so the chip bar can
+  // show Set-wide totals without a separate aggregate endpoint.
+  const [materialFilter, setMaterialFilter] = useState<string | null>(null);
+  const [facetsById, setFacetsById] = useState<Record<number, MaterialFacets>>({});
+  const reportFacets = useCallback((id: number, f: MaterialFacets) => {
+    setFacetsById((prev) => ({ ...prev, [id]: f }));
+  }, []);
 
   // When a new generation arrives, auto-switch to it
   useEffect(() => {
@@ -1057,14 +1212,68 @@ function SessionDetailView({
                   .map((idea) => <OutOfScopeCard key={idea.id} idea={idea} />)}
               </div>
             )}
-            {/* New-shape clusters render in a 2-col grid like Product Trends */}
-            {ideas.some((i) => i.kind === "cluster") && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {ideas
-                  .filter((i) => i.kind === "cluster")
-                  .map((idea) => <AldiClusterCard key={idea.id} idea={idea} />)}
-              </div>
-            )}
+            {/* New-shape clusters render in a 2-col grid like Product Trends,
+                under a Set-wide Material filter (2026-10-23). */}
+            {ideas.some((i) => i.kind === "cluster") && (() => {
+              const clusterIdeas = ideas.filter((i) => i.kind === "cluster");
+              const familyTotals: MaterialFacets = {};
+              for (const i of clusterIdeas) {
+                for (const [k, v] of Object.entries(facetsById[i.id] ?? {})) {
+                  familyTotals[k] = (familyTotals[k] ?? 0) + v;
+                }
+              }
+              const facetsLoaded = clusterIdeas.every((i) => facetsById[i.id] != null);
+              const pill = (active: boolean, accent = false) => clsx(
+                "px-2.5 py-1 rounded-full text-xs font-medium border transition-colors",
+                active
+                  ? accent ? "bg-amber-100 text-amber-900 border-amber-300" : "bg-stone-900 text-white border-stone-900"
+                  : "bg-white text-stone-600 border-stone-200 hover:border-stone-400",
+              );
+              return (
+                <>
+                  <div className="flex items-center gap-1.5 flex-wrap mb-3">
+                    <span className="text-[10px] uppercase tracking-wider text-stone-400 font-medium mr-1">Material:</span>
+                    <button type="button" onClick={() => setMaterialFilter(null)} className={pill(materialFilter === null)}>
+                      All
+                    </button>
+                    {MATERIAL_FAMILIES.map((f) => {
+                      const n = familyTotals[f.key] ?? 0;
+                      // Hide families with nothing in this Set once counts are in
+                      // (unless it's the one selected, so it can be un-selected).
+                      if (facetsLoaded && n === 0 && materialFilter !== f.key) return null;
+                      return (
+                        <button
+                          key={f.key}
+                          type="button"
+                          onClick={() => setMaterialFilter(materialFilter === f.key ? null : f.key)}
+                          className={pill(materialFilter === f.key, true)}
+                          title={`Products across these sub-themes tagged ${f.label.toLowerCase()}`}
+                        >
+                          {f.label}{facetsLoaded ? ` ${n.toLocaleString()}` : ""}
+                        </button>
+                      );
+                    })}
+                    {!facetsLoaded && <span className="text-[10px] text-stone-400">counting…</span>}
+                  </div>
+                  {materialFilter && (
+                    <p className="text-[11px] text-stone-400 -mt-1 mb-3">
+                      Showing which sub-themes contain {MATERIAL_FAMILY_LABEL[materialFilter].toLowerCase()} products.
+                      Open a sub-theme to see only those products.
+                    </p>
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {clusterIdeas.map((idea) => (
+                      <AldiClusterCard
+                        key={idea.id}
+                        idea={idea}
+                        materialFilter={materialFilter}
+                        onFacets={reportFacets}
+                      />
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
             {/* Legacy synthesized ideas — historical sessions still work */}
             {ideas.some((i) => !i.kind) && (
               <div className="space-y-3">

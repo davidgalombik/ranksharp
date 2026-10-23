@@ -12,6 +12,10 @@ from pydantic import BaseModel
 from database.db import get_db
 from database.models import AldiUpload, AldiProductIdea, AldiUploadStatus
 from config import settings
+import json
+from analysis.material_families import (
+    FAMILY_ORDER, FAMILY_LABELS, families_for, is_family, sql_regex,
+)
 
 router = APIRouter()
 
@@ -777,6 +781,31 @@ class AldiClusterProductOut(BaseModel):
     retailer_name: str
     retailer_slug: str
     is_best_seller: bool = False
+    # Raw material tags + their buyer-facing families (2026-10-23). Lets
+    # a fabrics/metals buyer find their products inside theme clusters.
+    materials: list[str] = []
+    material_families: list[str] = []
+
+
+class AldiClusterMaterialFacets(BaseModel):
+    """Material-family counts over a cluster's LIVE match set — what the
+    chip bar and card badges show."""
+    total: int
+    families: dict[str, int]
+    labels: dict[str, str]
+
+
+def _as_list(v) -> list:
+    """JSON columns come back as str through raw text() on asyncpg."""
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return v
+    try:
+        parsed = json.loads(v)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:  # noqa: BLE001
+        return []
 
 
 class AldiClusterProductsPage(BaseModel):
@@ -790,10 +819,16 @@ async def get_cluster_products(
     limit: int = 48,
     offset: int = 0,
     only_best_sellers: bool = False,
+    material: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Live paginated query of every catalogue product matching a cluster's
     keywords. Powers the 'View all N products' modal.
+
+    `material` (2026-10-23): a material-family key (fabric, metal, ceramic,
+    glass, wood, woven, plastic, stone, wax — see
+    analysis/material_families.py) restricting results to products whose
+    material tags fall in that family.
 
     Filters:
       - Product is active (is_active = TRUE)
@@ -844,35 +879,51 @@ async def get_cluster_products(
 
     best_seller_clause = "AND p.is_best_seller = TRUE" if only_best_sellers else ""
     image_clause = f"AND {image_ok_sql()}"
+    params: dict = {"kw_pattern": pattern}
+    if material:
+        if not is_family(material):
+            raise HTTPException(status_code=400,
+                                detail=f"material must be one of {', '.join(FAMILY_ORDER)}")
+        material_clause = "AND lower(pa.materials::text) ~ :mat_pattern"
+        params["mat_pattern"] = sql_regex(material)
+    else:
+        material_clause = ""
 
     count_sql = sa_text(f"""
         SELECT COUNT(*) FROM products p
+        LEFT JOIN product_attributes pa ON pa.product_id = p.id
         WHERE p.is_active = TRUE
           AND p.name ~* :kw_pattern
           {best_seller_clause}
           {image_clause}
+          {material_clause}
     """)
-    total = (await db.execute(count_sql, {"kw_pattern": pattern})).scalar() or 0
+    total = (await db.execute(count_sql, params)).scalar() or 0
 
     page_sql = sa_text(f"""
         SELECT p.id, p.name, p.url, p.price, p.primary_image_url,
-               p.is_best_seller, r.name AS retailer_name, r.slug AS retailer_slug
+               p.is_best_seller, r.name AS retailer_name, r.slug AS retailer_slug,
+               pa.materials AS materials
         FROM products p
         JOIN retailers r ON r.id = p.retailer_id
+        LEFT JOIN product_attributes pa ON pa.product_id = p.id
         WHERE p.is_active = TRUE
           AND p.name ~* :kw_pattern
           {best_seller_clause}
           {image_clause}
+          {material_clause}
         ORDER BY p.is_best_seller DESC, p.name ASC
         LIMIT :lim OFFSET :off
     """)
     rows = (await db.execute(
         page_sql,
-        {"kw_pattern": pattern, "lim": limit, "off": offset},
+        {**params, "lim": limit, "off": offset},
     )).all()
 
-    items = [
-        AldiClusterProductOut(
+    items = []
+    for r in rows:
+        mats = [str(m) for m in _as_list(r.materials)]
+        items.append(AldiClusterProductOut(
             id=r.id,
             name=r.name,
             url=r.url,
@@ -881,7 +932,57 @@ async def get_cluster_products(
             retailer_name=r.retailer_name,
             retailer_slug=r.retailer_slug,
             is_best_seller=bool(r.is_best_seller),
-        )
-        for r in rows
-    ]
+            materials=mats,
+            material_families=families_for(mats),
+        ))
     return AldiClusterProductsPage(total=total, items=items)
+
+
+@router.get("/ideas/{idea_id}/material-facets", response_model=AldiClusterMaterialFacets)
+async def get_cluster_material_facets(
+    idea_id: int,
+    only_best_sellers: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Material-family counts across a cluster's LIVE match set (same WHERE
+    as /products). One scan with a COUNT(*) FILTER per family. A product
+    tagged with two materials counts in both families, so the sum can
+    exceed `total`. Keyword-less (legacy / out-of-scope) clusters have no
+    live set → all zeros."""
+    from sqlalchemy import text as sa_text
+    from analysis.image_filter import image_ok_sql
+    import re as _re
+
+    idea = await db.get(AldiProductIdea, idea_id)
+    if not idea:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    keywords = [k for k in (idea.filter_keywords or []) if k]
+    if not keywords:
+        return AldiClusterMaterialFacets(
+            total=len(idea.inspired_by_products or []),
+            families={f: 0 for f in FAMILY_ORDER}, labels=FAMILY_LABELS,
+        )
+
+    pattern = r"\y(?:" + "|".join(_re.escape(k) for k in keywords) + r")\y"
+    best_seller_clause = "AND p.is_best_seller = TRUE" if only_best_sellers else ""
+    cols = ",\n               ".join(
+        f"COUNT(*) FILTER (WHERE lower(pa.materials::text) ~ :pat_{f}) AS n_{f}"
+        for f in FAMILY_ORDER
+    )
+    facet_sql = sa_text(f"""
+        SELECT COUNT(*) AS total,
+               {cols}
+        FROM products p
+        LEFT JOIN product_attributes pa ON pa.product_id = p.id
+        WHERE p.is_active = TRUE
+          AND p.name ~* :kw_pattern
+          {best_seller_clause}
+          AND {image_ok_sql()}
+    """)
+    params = {"kw_pattern": pattern, **{f"pat_{f}": sql_regex(f) for f in FAMILY_ORDER}}
+    row = (await db.execute(facet_sql, params)).one()
+    return AldiClusterMaterialFacets(
+        total=int(row.total or 0),
+        families={f: int(getattr(row, f"n_{f}") or 0) for f in FAMILY_ORDER},
+        labels=FAMILY_LABELS,
+    )

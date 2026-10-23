@@ -1,7 +1,8 @@
 """Product API routes."""
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, desc, or_, func, not_, case, text as sa_text
+from sqlalchemy import select, desc, or_, func, not_, case, cast, Text, text as sa_text
+from analysis.material_families import is_family, sql_regex
 from sqlalchemy.ext.asyncio import AsyncSession
 from database.db import get_db
 from database.models import Product, ProductAttributes, Retailer
@@ -189,6 +190,15 @@ async def search_products(
     else:
         stmt = stmt.order_by(desc(Product.last_seen_at))
 
+    # `material` was accepted but silently ignored until 2026-10-23. Now a
+    # material-family key (fabric, metal, …) filters via the shared regex;
+    # anything else is treated as a raw tag substring (e.g. 'cotton').
+    mat_cond = None
+    if material:
+        mat_expr = func.lower(cast(ProductAttributes.materials, Text))
+        mat_cond = (mat_expr.op("~")(sql_regex(material)) if is_family(material)
+                    else mat_expr.ilike(f"%{material.strip().lower()}%"))
+
     country_clause = country_filter_clause(country)
     if country_clause is not None:
         stmt = stmt.where(country_clause)
@@ -196,6 +206,8 @@ async def search_products(
         stmt = stmt.where(Retailer.slug == retailer)
     if market_segment:
         stmt = stmt.where(Retailer.market_segment == market_segment)
+    if mat_cond is not None:
+        stmt = stmt.where(mat_cond)
     if category:
         stmt = stmt.where(Product.category == category)
     if subcategory:
@@ -233,6 +245,8 @@ async def search_products(
         count_stmt = count_stmt.where(Retailer.slug == retailer)
     if market_segment:
         count_stmt = count_stmt.where(Retailer.market_segment == market_segment)
+    if mat_cond is not None:
+        count_stmt = count_stmt.where(mat_cond)
     if category:
         count_stmt = count_stmt.where(Product.category == category)
     if subcategory:
