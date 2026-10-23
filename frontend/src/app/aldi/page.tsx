@@ -362,6 +362,9 @@ const MATERIAL_FAMILIES: { key: string; label: string }[] = [
 const MATERIAL_FAMILY_LABEL: Record<string, string> =
   Object.fromEntries(MATERIAL_FAMILIES.map((f) => [f.key, f.label]));
 type MaterialFacets = Record<string, number>;
+/** Per-family representative products (same shape as InspiredProduct minus
+ *  url) returned by /material-facets; the card collage follows the chip. */
+type MaterialSamples = Record<string, InspiredProduct[]>;
 
 /**
  * AldiClusterCard — new sub-theme-of-real-products card. Shape mirrors
@@ -382,15 +385,16 @@ function AldiClusterCard({
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [facets, setFacets] = useState<MaterialFacets | null>(null);
+  const [samples, setSamples] = useState<MaterialSamples>({});
   // Ref so the fetch effect depends only on idea.id, not on a callback
   // identity that changes every parent render.
   const onFacetsRef = useRef(onFacets);
   onFacetsRef.current = onFacets;
   const products = idea.inspired_by_products || [];
-  const heroes = products.slice(0, 3);
   const bestSellerBadge = products.some((p) => p.is_best_seller);
 
-  // Material-family counts over the cluster's LIVE match set (2026-10-23).
+  // Material-family counts + per-family sample products over the
+  // cluster's LIVE match set (2026-10-23).
   useEffect(() => {
     let cancelled = false;
     fetch(`${API_BASE}/api/aldi/ideas/${idea.id}/material-facets`)
@@ -399,6 +403,7 @@ function AldiClusterCard({
         if (cancelled) return;
         const f: MaterialFacets = (d && d.families) || {};
         setFacets(f);
+        setSamples((d && d.samples) || {});
         onFacetsRef.current?.(idea.id, f);
       })
       .catch(() => { if (!cancelled) setFacets({}); });
@@ -408,6 +413,11 @@ function AldiClusterCard({
   const filterLabel = materialFilter ? (MATERIAL_FAMILY_LABEL[materialFilter] ?? materialFilter) : null;
   const filterCount = materialFilter && facets ? (facets[materialFilter] ?? 0) : null;
   const dimmed = materialFilter != null && facets != null && filterCount === 0;
+  // Collage follows the active chip: show that family's products when we
+  // have them, otherwise the cluster's own snapshotted top products.
+  const filterSamples = materialFilter ? (samples[materialFilter] ?? []) : [];
+  const collageFiltered = filterSamples.length > 0;
+  const heroes = (collageFiltered ? filterSamples : products).slice(0, 3);
   const presentFamilies = facets
     ? MATERIAL_FAMILIES.filter((f) => (facets[f.key] ?? 0) > 0).slice(0, 5)
     : [];
@@ -419,7 +429,12 @@ function AldiClusterCard({
           : materialFilter && filterCount ? "border-amber-300"
           : "border-stone-200",
       )}>
-        <div className="h-40 flex gap-0.5 overflow-hidden bg-stone-100">
+        <div className="relative h-40 flex gap-0.5 overflow-hidden bg-stone-100">
+          {collageFiltered && filterLabel && (
+            <span className="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100/95 text-amber-900 border border-amber-300 shadow-sm">
+              {filterLabel} picks
+            </span>
+          )}
           {heroes.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-stone-300 text-4xl">📦</div>
           ) : heroes.length === 1 ? (

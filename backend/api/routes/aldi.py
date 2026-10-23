@@ -787,12 +787,30 @@ class AldiClusterProductOut(BaseModel):
     material_families: list[str] = []
 
 
+class AldiFacetSample(BaseModel):
+    """One product chosen to represent a material family on a cluster card.
+    Same field names as the snapshotted `inspired_by_products` entries so
+    the card's hero mosaic can render either without translation."""
+    id: int
+    name: str
+    image_url: Optional[str] = None
+    retailer_name: str = ""
+    is_best_seller: bool = False
+
+
 class AldiClusterMaterialFacets(BaseModel):
     """Material-family counts over a cluster's LIVE match set — what the
-    chip bar and card badges show."""
+    chip bar and card badges show — plus, per family, up to SAMPLE_PER_FAMILY
+    products (best-sellers first) so the card's collage can follow the
+    active material chip (2026-10-23: a Fabric filter was still showing
+    ceramic mugs in the thumbnail)."""
     total: int
     families: dict[str, int]
     labels: dict[str, str]
+    samples: dict[str, list[AldiFacetSample]] = {}
+
+
+SAMPLE_PER_FAMILY = 3
 
 
 def _as_list(v) -> list:
@@ -945,10 +963,18 @@ async def get_cluster_material_facets(
     db: AsyncSession = Depends(get_db),
 ):
     """Material-family counts across a cluster's LIVE match set (same WHERE
-    as /products). One scan with a COUNT(*) FILTER per family. A product
-    tagged with two materials counts in both families, so the sum can
-    exceed `total`. Keyword-less (legacy / out-of-scope) clusters have no
-    live set → all zeros."""
+    as /products), plus up to SAMPLE_PER_FAMILY representative products per
+    family for the card collage.
+
+    One scan: the match set is materialised once (CTE referenced twice →
+    Postgres materialises it), joined to a VALUES list of (family, regex)
+    so each product lands in every family whose pattern its material tags
+    match. Window functions give the per-family count and a best-sellers-
+    first rank; rows with rank <= SAMPLE_PER_FAMILY are the samples. A
+    product tagged with two materials counts in both families, so the sum
+    can exceed `total`. The LEFT JOIN against the total keeps `total`
+    even when no product matches any family. Keyword-less (legacy /
+    out-of-scope) clusters have no live set → all zeros, no samples."""
     from sqlalchemy import text as sa_text
     from analysis.image_filter import image_ok_sql
     import re as _re
@@ -965,24 +991,69 @@ async def get_cluster_material_facets(
 
     pattern = r"\y(?:" + "|".join(_re.escape(k) for k in keywords) + r")\y"
     best_seller_clause = "AND p.is_best_seller = TRUE" if only_best_sellers else ""
-    cols = ",\n               ".join(
-        f"COUNT(*) FILTER (WHERE lower(pa.materials::text) ~ :pat_{f}) AS n_{f}"
-        for f in FAMILY_ORDER
-    )
+    family_values = ",\n                 ".join(f"('{f}', CAST(:pat_{f} AS text))" for f in FAMILY_ORDER)
     facet_sql = sa_text(f"""
-        SELECT COUNT(*) AS total,
-               {cols}
-        FROM products p
-        LEFT JOIN product_attributes pa ON pa.product_id = p.id
-        WHERE p.is_active = TRUE
-          AND p.name ~* :kw_pattern
-          {best_seller_clause}
-          AND {image_ok_sql()}
+        WITH m AS (
+            SELECT p.id, p.name, p.primary_image_url, p.is_best_seller,
+                   r.name AS retailer_name,
+                   lower(pa.materials::text) AS mats
+            FROM products p
+            JOIN retailers r ON r.id = p.retailer_id
+            LEFT JOIN product_attributes pa ON pa.product_id = p.id
+            WHERE p.is_active = TRUE
+              AND p.name ~* :kw_pattern
+              {best_seller_clause}
+              AND {image_ok_sql()}
+        ),
+        fam(family, pat) AS (
+            VALUES {family_values}
+        ),
+        j0 AS (
+            -- rr: rank within (family, retailer) so the collage takes one
+            -- product per retailer before a second from the same one —
+            -- otherwise three colourways of one SKU fill the mosaic.
+            SELECT fam.family, m.id, m.name, m.primary_image_url, m.retailer_name,
+                   m.is_best_seller,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY fam.family, m.retailer_name
+                       ORDER BY m.is_best_seller DESC, m.id
+                   ) AS rr
+            FROM fam
+            JOIN m ON m.mats IS NOT NULL AND m.mats ~ fam.pat
+        ),
+        j AS (
+            SELECT j0.*,
+                   COUNT(*) OVER (PARTITION BY j0.family) AS n,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY j0.family
+                       ORDER BY j0.rr, j0.is_best_seller DESC, j0.id
+                   ) AS rn
+            FROM j0
+        )
+        SELECT t.total, j.family, j.n, j.id, j.name, j.primary_image_url,
+               j.retailer_name, j.is_best_seller, j.rn
+        FROM (SELECT COUNT(*) AS total FROM m) t
+        LEFT JOIN j ON j.rn <= :per_family
+        ORDER BY j.family, j.rn
     """)
-    params = {"kw_pattern": pattern, **{f"pat_{f}": sql_regex(f) for f in FAMILY_ORDER}}
-    row = (await db.execute(facet_sql, params)).one()
+    params = {
+        "kw_pattern": pattern,
+        "per_family": SAMPLE_PER_FAMILY,
+        **{f"pat_{f}": sql_regex(f) for f in FAMILY_ORDER},
+    }
+    rows = (await db.execute(facet_sql, params)).all()
+
+    total = int(rows[0].total or 0) if rows else 0
+    families = {f: 0 for f in FAMILY_ORDER}
+    samples: dict[str, list[AldiFacetSample]] = {f: [] for f in FAMILY_ORDER}
+    for r in rows:
+        if r.family is None:  # the LEFT JOIN placeholder when nothing matched
+            continue
+        families[r.family] = int(r.n or 0)
+        samples[r.family].append(AldiFacetSample(
+            id=int(r.id), name=r.name or "", image_url=r.primary_image_url,
+            retailer_name=r.retailer_name or "", is_best_seller=bool(r.is_best_seller),
+        ))
     return AldiClusterMaterialFacets(
-        total=int(row.total or 0),
-        families={f: int(getattr(row, f"n_{f}") or 0) for f in FAMILY_ORDER},
-        labels=FAMILY_LABELS,
+        total=total, families=families, labels=FAMILY_LABELS, samples=samples,
     )
