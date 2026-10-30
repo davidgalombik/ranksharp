@@ -281,6 +281,16 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         if not image:
             return {"error": "not found"}
 
+        # Stale duplicate guard (2026-10-30). A finished image has had its
+        # payload reclaimed, so a second copy of its message — e.g. a sweeper
+        # re-queue issued while the first copy was still in line — has
+        # nothing to analyse. The old code fell through to "file missing"
+        # and flipped 980 done images to failed. A deliberate re-run always
+        # re-stages the payload first, so "done + no payload" means skip.
+        if image.status == "done" and not file_b64 and not image.vision_payload:
+            log.info("catalogue_image_already_done", image_id=image_id)
+            return {"status": "skipped", "image_id": image_id, "reason": "already done"}
+
         image.status = "analysing"
         image.updated_at = datetime.utcnow()
         db.commit()
@@ -411,6 +421,48 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
         db.close()
 
 
+_ANALYSE_TASK_NAME = "tasks.catalogue_tasks.analyse_catalogue_image"
+_ANALYSE_QUEUE = "aldi"
+
+
+def _broker_catalogue_ids() -> set[int] | None:
+    """Image ids that still have an analyse_catalogue_image message on the
+    broker — waiting in the queue list, or reserved by a worker (kombu's
+    ``unacked`` hash; acks_late keeps a message there until the task
+    finishes). Returns None when the broker can't be read so the caller can
+    refuse to guess rather than re-queue blindly.
+
+    kombu's Redis transport stores each message as JSON with a base64 body
+    of ``[args, kwargs, embed]``; unacked entries wrap that as
+    ``[message, exchange, routing_key]``.
+    """
+    import json
+    import redis as redis_lib
+    try:
+        r = redis_lib.from_url(settings.celery_broker_url)
+        raw = list(r.lrange(_ANALYSE_QUEUE, 0, -1)) + list(r.hvals("unacked"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("catalogue_broker_scan_failed", error=str(exc))
+        return None
+
+    ids: set[int] = set()
+    for item in raw:
+        try:
+            msg = json.loads(item)
+            if isinstance(msg, list):
+                msg = msg[0]
+            if (msg.get("headers") or {}).get("task") != _ANALYSE_TASK_NAME:
+                continue
+            body = msg["body"]
+            if (msg.get("properties") or {}).get("body_encoding") == "base64":
+                body = _b64.b64decode(body)
+            args, kwargs, _embed = json.loads(body)
+            ids.add(int(args[0] if args else kwargs["image_id"]))
+        except Exception:  # noqa: BLE001 — one odd message mustn't abort the sweep
+            continue
+    return ids
+
+
 @app.task(queue="aldi")
 def requeue_stuck_catalogue_images():
     """Self-heal for catalogue images whose analysis task never ran or died.
@@ -422,6 +474,13 @@ def requeue_stuck_catalogue_images():
       analysing > 45 min → a worker died mid-task. acks_late normally
                             restores these, but not if the message itself
                             is gone.
+
+    Both triggers are gated on the broker (2026-10-30): an image whose
+    message is still in the queue, or reserved by a worker, is merely
+    waiting its turn and is left alone. Re-queueing those created a second
+    message that ran after the first had finished, found the payload
+    reclaimed, and marked the done image failed — 980 images on 29 Oct
+    after a 1,400-photo upload took most of a day to drain.
 
     Rows with a staged payload are simply re-queued by id. Rows WITHOUT
     one (uploads that predate payload staging) can't be rebuilt here — the
@@ -438,10 +497,25 @@ def requeue_stuck_catalogue_images():
             ((I.status == "pending") & (I.updated_at < pending_cutoff))
             | ((I.status == "analysing") & (I.updated_at < analysing_cutoff))
         ).all()
+        if not rows:
+            return {"requeued": 0, "sent": 0, "orphaned": 0, "waiting": 0}
+
+        on_broker = _broker_catalogue_ids()
+        if on_broker is None:
+            # Can't tell "lost" from "waiting", and .delay() would fail
+            # against the same broker anyway. The next sweep retries.
+            log.warning("stuck_catalogue_sweep_skipped", reason="broker unreadable",
+                        candidates=len(rows))
+            return {"requeued": 0, "sent": 0, "orphaned": 0, "waiting": len(rows),
+                    "skipped": "broker unreadable"}
 
         requeued: list[int] = []
         orphaned: list[int] = []
+        waiting: list[int] = []
         for img in rows:
+            if img.id in on_broker:
+                waiting.append(img.id)
+                continue
             if img.vision_payload:
                 img.status = "pending"
                 img.error_message = None
@@ -465,7 +539,8 @@ def requeue_stuck_catalogue_images():
         if requeued or orphaned:
             log.warning("stuck_catalogue_images_swept",
                         requeued=len(requeued), sent=sent, orphaned=len(orphaned),
-                        sample=(requeued + orphaned)[:10])
-        return {"requeued": len(requeued), "sent": sent, "orphaned": len(orphaned)}
+                        waiting=len(waiting), sample=(requeued + orphaned)[:10])
+        return {"requeued": len(requeued), "sent": sent, "orphaned": len(orphaned),
+                "waiting": len(waiting)}
     finally:
         db.close()
