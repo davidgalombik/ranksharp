@@ -124,12 +124,23 @@ class CatalogueVision:
         try:
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=8000,   # many products per image → need the headroom
+                # Dense shelf photos (60+ products) overran 8000 tokens and the
+                # JSON was cut mid-array — every one of those failed to parse
+                # (2026-10-29). 16000 is the most the SDK allows without
+                # streaming; the array for a busy wall is ~8-10k tokens.
+                max_tokens=16000,
                 messages=[{
                     "role": "user",
                     "content": content_blocks + [{"type": "text", "text": CATALOGUE_PROMPT}],
                 }],
             )
+            if response.stop_reason == "max_tokens":
+                log.error(
+                    "catalogue_vision_truncated",
+                    output_tokens=response.usage.output_tokens,
+                    hint="JSON cut off at max_tokens — raise the limit or split the photo",
+                )
+                return None
             raw = response.content[0].text.strip() if response.content else ""
             raw = _strip_fences(raw)
             parsed = json.loads(raw)
