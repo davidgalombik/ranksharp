@@ -97,6 +97,8 @@ class AldiUploadSummary(BaseModel):
     season_occasion: Optional[str] = None
     mood_descriptors: list = []
     error_message: Optional[str] = None
+    # Phase 2: per-screenshot element inventory (bbox + description each).
+    elements: list = []
 
     class Config:
         from_attributes = True
@@ -136,6 +138,8 @@ class AldiSessionDetailOut(AldiSessionOut):
     ideas: list[AldiIdeaOut] = []
     generation_count: int = 1
     latest_generation: int = 1
+    # Phase 2: themes T1..Tn with element references (see analysis/aldi_inventory.py).
+    trend_digest: dict = {}
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -570,6 +574,7 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         filter_keywords=sess_obj.filter_keywords or [],
         similar_products_count=sess_obj.similar_products_count,
         error_message=sess_obj.error_message,
+        trend_digest=sess_obj.trend_digest or {},
         uploads=[
             AldiUploadSummary(
                 id=u.id,
@@ -585,6 +590,7 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
                 season_occasion=u.season_occasion,
                 mood_descriptors=u.mood_descriptors or [],
                 error_message=u.error_message,
+                elements=u.elements or [],
             )
             for u in uploads_sorted
         ],
@@ -607,6 +613,65 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         generation_count=generation_count,
         latest_generation=latest_generation,
     )
+
+
+@router.post("/sessions/{session_id}/trend-digest")
+async def rebuild_trend_digest(
+    session_id: int,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Phase 2 (2026-11-01): build (or with force=true, rebuild) the session's
+    screenshot inventories and trend digest. New uploads get this in the
+    worker automatically; this route exists for sessions analysed before
+    Phase 2 and for re-runs after a prompt change. Runs in the API process
+    because only the API can read the upload files; the calls are async so
+    the event loop stays free."""
+    from database.models import AldiSession
+    from analysis.aldi_inventory import AldiInventory
+    from tasks.aldi_tasks import digest_pages_for
+
+    sess_obj = await db.get(AldiSession, session_id)
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+    uploads = (await db.execute(
+        select(AldiUpload).where(AldiUpload.session_id == session_id).order_by(AldiUpload.id)
+    )).scalars().all()
+    done = [u for u in uploads if u.status == AldiUploadStatus.DONE]
+    if not done:
+        raise HTTPException(status_code=409, detail="No analysed uploads in this session yet")
+
+    inv = AldiInventory()
+    inventoried = 0
+    missing_files = 0
+    try:
+        for u in done:
+            if u.elements and not force:
+                continue
+            path = pathlib.Path(u.file_path)
+            if not path.exists():
+                missing_files += 1
+                continue
+            u.elements = await inv.inventory_upload_bytes(path.read_bytes(), u.file_type, ref_id=u.id)
+            inventoried += 1
+        await db.flush()
+        if force or not sess_obj.trend_digest:
+            digest = await inv.build_trend_digest(digest_pages_for(done), ref_id=session_id)
+            if digest is None:
+                await db.commit()
+                raise HTTPException(status_code=502, detail="Digest build failed — see worker logs")
+            sess_obj.trend_digest = digest
+        await db.commit()
+    finally:
+        await inv.aclose()
+
+    return {
+        "session_id": session_id,
+        "inventoried_uploads": inventoried,
+        "missing_files": missing_files,
+        "themes": len((sess_obj.trend_digest or {}).get("themes") or []),
+        "trend_digest": sess_obj.trend_digest,
+    }
 
 
 @router.post("/sessions/{session_id}/kick")

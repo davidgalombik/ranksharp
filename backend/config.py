@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # AI Models
     vision_model: str = "claude-opus-4-6"
     nlp_model: str = "claude-opus-4-6"
+    # ALDI screenshot inventory + session trend digest (Phase 2, 2026-11-01).
+    # Sonnet 5.5: strong vision at a fifth of the Opus 4.6 token price; the
+    # inventory runs once per upload and the digest once per session.
+    aldi_inventory_model: str = "claude-sonnet-5-5"
 
     # LLM cost ledger (2026-11-01) — USD per million tokens, keyed by model
     # id (a dated id like claude-opus-4-6-20260101 matches by prefix). Check

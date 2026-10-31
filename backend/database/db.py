@@ -362,6 +362,11 @@ async def init_db():
              _idx("ix_llm_calls_feature")),
             ("CREATE INDEX IF NOT EXISTS ix_llm_calls_ref ON llm_calls (ref_type, ref_id)",
              _idx("ix_llm_calls_ref")),
+            # ALDI screenshot inventory + session trend digest (Phase 2, 2026-11-01).
+            ("ALTER TABLE aldi_uploads ADD COLUMN IF NOT EXISTS elements JSONB DEFAULT '[]'",
+             _col("aldi_uploads", "elements")),
+            ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS trend_digest JSONB DEFAULT '{}'",
+             _col("aldi_sessions", "trend_digest")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

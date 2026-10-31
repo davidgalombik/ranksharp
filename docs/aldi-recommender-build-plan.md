@@ -1,9 +1,11 @@
 # ALDI web product recommendations — build plan
 
-Status (2026-11-01): approved. Phase 0 done — see `aldi-recommender-spike.md`; it
-recommends building Phase 3 as a controlled pipeline rather than one agentic turn,
-pending David's confirmation, plus a decision on Amazon (Apify fallback in v1 or
-Phase 5). Phase 1 built and verified, committed locally, awaiting push.
+Status (2026-11-01): approved. Phase 0 done — see `aldi-recommender-spike.md`.
+Pipeline approach for Phase 3 confirmed by David; Amazon (Apify fallback in v1 or
+Phase 5) still open. Phase 1 live. Phase 2 built and verified on session 58
+(inventory ≈ $0.03 per screenshot, digest ≈ $0.03 per session, Sonnet 5.5),
+committed locally, awaiting push; back-run over the 28 existing sessions is a
+one-call-per-session job via `POST /api/aldi/sessions/{id}/trend-digest`.
 Prompts: `docs/aldi-recommender-prompts.md`.
 
 ## Decisions taken so far

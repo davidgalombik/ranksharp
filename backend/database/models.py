@@ -289,6 +289,11 @@ class AldiSession(Base):
     # generation. Used by the frontend to show a low-match warning when
     # the mood board falls outside the catalogue's coverage.
     similar_products_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Session trend digest (Phase 2, 2026-11-01): themes T1..Tn as the report
+    # names them, each with element references into the uploads' inventories.
+    # Built once when all uploads are analysed; reused by both teams and every
+    # Try Again of the web recommender. {} = not built (yet).
+    trend_digest: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -336,6 +341,11 @@ class AldiUpload(Base):
     # and later merged onto the session for cross-upload matching.
     filter_keywords: Mapped[list] = mapped_column(JSON, default=list)
     raw_analysis: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per-screenshot element inventory (Phase 2, 2026-11-01): every photo,
+    # swatch strip, label and table row with a normalised bbox, so the web
+    # recommender can cite "page 1, E4" and the UI can draw the box. See
+    # analysis/aldi_inventory.py. Empty list = not inventoried (yet).
+    elements: Mapped[list] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

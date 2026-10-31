@@ -47,6 +47,7 @@ def analyse_aldi_upload(self, upload_id: int, file_b64: str | None = None) -> in
         session.commit()
 
         try:
+            raw_bytes: bytes | None = None
             if file_b64:
                 import base64 as _b64
                 raw_bytes = _b64.b64decode(file_b64)
@@ -55,6 +56,22 @@ def analyse_aldi_upload(self, upload_id: int, file_b64: str | None = None) -> in
                 result = asyncio.run(_vision_analyse(upload.file_path, upload.file_type, ref_id=upload_id))
 
             if result:
+                # Phase 2 (2026-11-01): per-screenshot element inventory for
+                # the web recommender's citations. Non-fatal — an inventory
+                # failure must never fail the upload.
+                try:
+                    from pathlib import Path as _Path
+                    inv_bytes = raw_bytes
+                    if inv_bytes is None and _Path(upload.file_path).exists():
+                        inv_bytes = _Path(upload.file_path).read_bytes()
+                    if inv_bytes:
+                        upload.elements = asyncio.run(
+                            _inventory_upload(inv_bytes, upload.file_type, ref_id=upload_id)
+                        )
+                        log.info("aldi_inventory_done", upload_id=upload_id,
+                                 elements=len(upload.elements or []))
+                except Exception as inv_exc:  # noqa: BLE001
+                    log.warning("aldi_inventory_skipped", upload_id=upload_id, error=str(inv_exc))
                 upload.themes = result.get("themes", [])
                 upload.colour_palette = result.get("colour_palette", [])
                 upload.colour_hex = result.get("colour_hex", [])
@@ -213,6 +230,63 @@ def generate_aldi_ideas(self, upload_id: int) -> dict:
 
 
 # ── Async helpers ─────────────────────────────────────────────────────────────
+
+async def _inventory_upload(data: bytes, file_type: str, ref_id: int | None = None) -> list[dict]:
+    """Phase 2: element inventory for one screenshot (see analysis/aldi_inventory.py)."""
+    from analysis.aldi_inventory import AldiInventory
+    inv = AldiInventory()
+    try:
+        return await inv.inventory_upload_bytes(data, file_type, ref_id=ref_id)
+    finally:
+        await inv.aclose()
+
+
+async def _build_digest(pages: list[dict], ref_id: int | None = None) -> dict | None:
+    """Phase 2: session trend digest over the per-upload inventories."""
+    from analysis.aldi_inventory import AldiInventory
+    inv = AldiInventory()
+    try:
+        return await inv.build_trend_digest(pages, ref_id=ref_id)
+    finally:
+        await inv.aclose()
+
+
+def digest_pages_for(uploads: list[AldiUpload]) -> list[dict]:
+    """Shape the DONE uploads of a session into the digest builder's input,
+    in upload-id order (= page order). Shared with the API rebuild route."""
+    done = sorted((u for u in uploads if u.status == AldiUploadStatus.DONE), key=lambda u: u.id)
+    return [
+        {
+            "upload_id": u.id,
+            "page": n,
+            "filename": u.filename,
+            "analysis": {
+                "themes": u.themes or [], "colour_palette": u.colour_palette or [],
+                "key_materials": u.key_materials or [], "key_prints": u.key_prints or [],
+                "product_categories": u.product_categories or [], "season_occasion": u.season_occasion,
+            },
+            "elements": u.elements or [],
+        }
+        for n, u in enumerate(done, 1)
+    ]
+
+
+def _maybe_build_digest(db_session, sess_obj: AldiSession, uploads: list[AldiUpload]) -> None:
+    """Build and store the session trend digest once. Non-fatal."""
+    if sess_obj.trend_digest:
+        return
+    try:
+        pages = digest_pages_for(uploads)
+        if not pages:
+            return
+        digest = asyncio.run(_build_digest(pages, ref_id=sess_obj.id))
+        if digest:
+            sess_obj.trend_digest = digest
+            db_session.flush()
+            log.info("aldi_digest_built", session_id=sess_obj.id, themes=len(digest.get("themes") or []))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("aldi_digest_skipped", session_id=sess_obj.id, error=str(exc))
+
 
 async def _vision_analyse(file_path: str, file_type: str, ref_id: int | None = None) -> dict | None:
     from analysis.aldi_vision import MoodBoardAnalyser
@@ -639,6 +713,11 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
             sess_obj.season_occasion = merged_season
             sess_obj.filter_keywords = merged_filter_keywords
             db_session.flush()
+
+            # Phase 2 (2026-11-01): the session trend digest the web
+            # recommender cites. Built once; both teams and every Try Again
+            # reuse it. Non-fatal.
+            _maybe_build_digest(db_session, sess_obj, done_uploads)
 
             # Find similar products — fetch 50, sample 20 inside generate_ideas
             similar_products, similar_count = _find_similar_products_for_session(
