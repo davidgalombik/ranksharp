@@ -1,6 +1,10 @@
 # ALDI web product recommendations — build plan
 
-Status: proposed 2026-11-01, awaiting go-ahead. Prompts: `docs/aldi-recommender-prompts.md`.
+Status (2026-11-01): approved. Phase 0 done — see `aldi-recommender-spike.md`; it
+recommends building Phase 3 as a controlled pipeline rather than one agentic turn,
+pending David's confirmation, plus a decision on Amazon (Apify fallback in v1 or
+Phase 5). Phase 1 built and verified, committed locally, awaiting push.
+Prompts: `docs/aldi-recommender-prompts.md`.
 
 ## Decisions taken so far
 
