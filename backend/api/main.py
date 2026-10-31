@@ -3,8 +3,8 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from database.db import init_db, seed_retailers
-from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, instore, instore_catalogue, instore_trends, fragrance_trends, csv_upload, admin, ranksharp, costs
+from database.db import init_db, seed_retailers, seed_aldi_recommender
+from api.routes import trends, products, retailers, reports, scrape_jobs, aldi, aldi_recommend, instore, instore_catalogue, instore_trends, fragrance_trends, csv_upload, admin, ranksharp, costs
 from config import settings
 import structlog
 
@@ -19,6 +19,7 @@ async def lifespan(app: FastAPI):
     log.info("startup_begin")
     await init_db()
     await seed_retailers()
+    await seed_aldi_recommender()
     log.info("startup_complete")
     yield
     log.info("shutdown")
@@ -48,6 +49,7 @@ app.include_router(csv_upload.router, prefix="/api/retailers/csv-upload", tags=[
 app.include_router(reports.router, prefix="/api/reports", tags=["Reports"])
 app.include_router(scrape_jobs.router, prefix="/api/scrape-jobs", tags=["Scrape Jobs"])
 app.include_router(aldi.router, prefix="/api/aldi", tags=["Aldi"])
+app.include_router(aldi_recommend.router, prefix="/api/aldi", tags=["Aldi Recommendations"])
 app.include_router(instore.router, prefix="/api/instore", tags=["In-store"])
 app.include_router(instore_catalogue.router, prefix="/api/instore-catalogue", tags=["In-store Catalogue"])
 app.include_router(instore_trends.router, prefix="/api/instore-trends", tags=["In-store Trends"])

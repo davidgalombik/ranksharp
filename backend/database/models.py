@@ -406,6 +406,152 @@ class AldiProductIdea(Base):
     )
 
 
+# ── ALDI web product recommender (Phase 3, 2026-11-01) ───────────────────────
+# One run = one click of "Product Recommendations" / "Try Again" for one
+# team on one session. Candidates are the per-session, per-team pool the
+# pipeline discovers and verifies; recommendations are the picks a run
+# showed; feedback is the buyer's Good / Bad with a note; preferences hold
+# the team's standing memo and price band; preferred retailers is the
+# tiered list from the prompt.
+
+class AldiRecommendationRun(Base):
+    __tablename__ = "aldi_recommendation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("aldi_sessions.id", ondelete="CASCADE"), nullable=False)
+    team: Mapped[str] = mapped_column(String(20), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="queued")   # queued | running | done | failed
+    stage: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    searches: Mapped[int] = mapped_column(Integer, default=0)
+    fetches: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    search_queries: Mapped[list] = mapped_column(JSON, default=list)
+    near_misses: Mapped[list] = mapped_column(JSON, default=list)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    recommendations: Mapped[list["AldiRecommendation"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", lazy="selectin",
+        order_by="AldiRecommendation.position",
+    )
+
+    __table_args__ = (
+        Index("ix_aldi_rec_runs_session_team", "session_id", "team"),
+    )
+
+
+class AldiCandidate(Base):
+    """A product URL the pipeline found for a session + team. Verified
+    facts live in `facts`; a candidate is reused by every later run of the
+    same team on the same session (Try Again gets cheaper)."""
+    __tablename__ = "aldi_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("aldi_sessions.id", ondelete="CASCADE"), nullable=False)
+    team: Mapped[str] = mapped_column(String(20), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    url_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    domain: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    snippet: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_query: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    theme_id: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    fit_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    first_run_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    verify_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | verified | blocked | dead | not_product | error
+    facts: Mapped[dict] = mapped_column(JSON, default=dict)
+    og_image: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "team", "url_hash", name="uq_aldi_candidates_session_team_url"),
+        Index("ix_aldi_candidates_session_team", "session_id", "team"),
+    )
+
+
+class AldiRecommendation(Base):
+    __tablename__ = "aldi_recommendations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("aldi_recommendation_runs.id", ondelete="CASCADE"), nullable=False)
+    session_id: Mapped[int] = mapped_column(ForeignKey("aldi_sessions.id", ondelete="CASCADE"), nullable=False)
+    team: Mapped[str] = mapped_column(String(20), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    product_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    retailer: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    retailer_tier: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    price_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    material_family: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    theme_id: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    theme_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    evidence: Mapped[list] = mapped_column(JSON, default=list)      # [{upload_id, element_id, page, description}]
+    how_it_matches: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    demand_evidence: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    verification_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    page_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    thumbnail: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    run: Mapped["AldiRecommendationRun"] = relationship(back_populates="recommendations")
+    feedback: Mapped[list["AldiRecommendationFeedback"]] = relationship(
+        back_populates="recommendation", cascade="all, delete-orphan", lazy="selectin",
+        order_by="AldiRecommendationFeedback.created_at",
+    )
+
+    __table_args__ = (
+        Index("ix_aldi_recs_session_team", "session_id", "team"),
+        Index("ix_aldi_recs_run", "run_id"),
+    )
+
+
+class AldiRecommendationFeedback(Base):
+    __tablename__ = "aldi_recommendation_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(ForeignKey("aldi_recommendations.id", ondelete="CASCADE"), nullable=False)
+    verdict: Mapped[str] = mapped_column(String(8), nullable=False)   # good | bad
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    recommendation: Mapped["AldiRecommendation"] = relationship(back_populates="feedback")
+
+    __table_args__ = (
+        Index("ix_aldi_rec_feedback_rec", "recommendation_id"),
+    )
+
+
+class AldiTeamPreference(Base):
+    __tablename__ = "aldi_team_preferences"
+
+    team: Mapped[str] = mapped_column(String(20), primary_key=True)
+    memo: Mapped[str] = mapped_column(Text, default="")
+    price_min: Mapped[float] = mapped_column(Float, default=15.0)
+    price_max: Mapped[float] = mapped_column(Float, default=60.0)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class AldiPreferredRetailer(Base):
+    __tablename__ = "aldi_preferred_retailers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    domain: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    tier: Mapped[str] = mapped_column(String(30), nullable=False)
+    priority: Mapped[str] = mapped_column(String(10), default="normal")   # high | normal | low
+    country: Mapped[str] = mapped_column(String(2), default="US")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class LlmCall(Base):
     """One Claude API call: tokens, server-tool counts and USD cost.
 

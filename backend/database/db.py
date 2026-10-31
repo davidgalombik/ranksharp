@@ -367,6 +367,25 @@ async def init_db():
              _col("aldi_uploads", "elements")),
             ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS trend_digest JSONB DEFAULT '{}'",
              _col("aldi_sessions", "trend_digest")),
+            # ALDI web product recommender (Phase 3, 2026-11-01). Tables are
+            # also created by create_all above; kept here for the record and
+            # for the indexes.
+            "CREATE TABLE IF NOT EXISTS aldi_recommendation_runs (id SERIAL PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES aldi_sessions(id) ON DELETE CASCADE, team VARCHAR(20) NOT NULL, generation INTEGER DEFAULT 1, status VARCHAR(16) DEFAULT 'queued', stage VARCHAR(40), model VARCHAR(80), prompt_version VARCHAR(40), searches INTEGER DEFAULT 0, fetches INTEGER DEFAULT 0, cost_usd FLOAT DEFAULT 0, search_queries JSONB DEFAULT '[]', near_misses JSONB DEFAULT '[]', stats JSONB DEFAULT '{}', error TEXT, started_at TIMESTAMP, finished_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())",
+            ("CREATE INDEX IF NOT EXISTS ix_aldi_rec_runs_session_team ON aldi_recommendation_runs (session_id, team)",
+             _idx("ix_aldi_rec_runs_session_team")),
+            "CREATE TABLE IF NOT EXISTS aldi_candidates (id SERIAL PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES aldi_sessions(id) ON DELETE CASCADE, team VARCHAR(20) NOT NULL, url TEXT NOT NULL, url_hash VARCHAR(64) NOT NULL, domain VARCHAR(160), title TEXT, snippet TEXT, source_query TEXT, theme_id VARCHAR(8), fit_score FLOAT, first_run_id INTEGER, verify_status VARCHAR(20) DEFAULT 'pending', facts JSONB DEFAULT '{}', og_image TEXT, discovered_at TIMESTAMP DEFAULT NOW(), verified_at TIMESTAMP, CONSTRAINT uq_aldi_candidates_session_team_url UNIQUE (session_id, team, url_hash))",
+            ("CREATE INDEX IF NOT EXISTS ix_aldi_candidates_session_team ON aldi_candidates (session_id, team)",
+             _idx("ix_aldi_candidates_session_team")),
+            "CREATE TABLE IF NOT EXISTS aldi_recommendations (id SERIAL PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES aldi_recommendation_runs(id) ON DELETE CASCADE, session_id INTEGER NOT NULL REFERENCES aldi_sessions(id) ON DELETE CASCADE, team VARCHAR(20) NOT NULL, position INTEGER DEFAULT 0, candidate_id INTEGER, product_name VARCHAR(300) NOT NULL, retailer VARCHAR(120), retailer_tier VARCHAR(30), url TEXT NOT NULL, price_usd FLOAT, material_family VARCHAR(20), theme_id VARCHAR(8), theme_name VARCHAR(120), evidence JSONB DEFAULT '[]', how_it_matches TEXT, demand_evidence TEXT, verification_status VARCHAR(20), page_title TEXT, thumbnail BYTEA, thumbnail_url TEXT, created_at TIMESTAMP DEFAULT NOW())",
+            ("CREATE INDEX IF NOT EXISTS ix_aldi_recs_session_team ON aldi_recommendations (session_id, team)",
+             _idx("ix_aldi_recs_session_team")),
+            ("CREATE INDEX IF NOT EXISTS ix_aldi_recs_run ON aldi_recommendations (run_id)",
+             _idx("ix_aldi_recs_run")),
+            "CREATE TABLE IF NOT EXISTS aldi_recommendation_feedback (id SERIAL PRIMARY KEY, recommendation_id INTEGER NOT NULL REFERENCES aldi_recommendations(id) ON DELETE CASCADE, verdict VARCHAR(8) NOT NULL, note TEXT, created_at TIMESTAMP DEFAULT NOW())",
+            ("CREATE INDEX IF NOT EXISTS ix_aldi_rec_feedback_rec ON aldi_recommendation_feedback (recommendation_id)",
+             _idx("ix_aldi_rec_feedback_rec")),
+            "CREATE TABLE IF NOT EXISTS aldi_team_preferences (team VARCHAR(20) PRIMARY KEY, memo TEXT DEFAULT '', price_min FLOAT DEFAULT 15, price_max FLOAT DEFAULT 60, updated_at TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS aldi_preferred_retailers (id SERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, domain VARCHAR(160), tier VARCHAR(30) NOT NULL, priority VARCHAR(10) DEFAULT 'normal', country VARCHAR(2) DEFAULT 'US', active BOOLEAN DEFAULT TRUE)",
         ]
         for item in migrations:
             if isinstance(item, tuple):
@@ -634,6 +653,33 @@ CSV_FED_RETAILERS: list[dict] = [
     dict(slug="dinosaur-designs",  name="Dinosaur Designs",   base_url="https://dinosaurdesigns.com.au",    country="AU", market_segment="luxury"),
     dict(slug="mud-australia",     name="Mud Australia",      base_url="https://mudaustralia.com",          country="AU", market_segment="luxury"),
 ]
+
+
+async def seed_aldi_recommender() -> None:
+    """Seed the ALDI recommender's reference rows (Phase 3, 2026-11-01):
+    the tiered preferred-retailer list from the buying prompt, and one
+    preferences row per team. Idempotent — only missing rows are added, so
+    edits made in the UI survive restarts."""
+    from sqlalchemy import select
+    from analysis.aldi_recommender import PREFERRED_RETAILERS, TEAMS
+    from database.models import AldiPreferredRetailer, AldiTeamPreference
+    async with AsyncSessionLocal() as session:
+        existing = set((await session.execute(select(AldiPreferredRetailer.name))).scalars().all())
+        added = 0
+        for r in PREFERRED_RETAILERS:
+            if r["name"] in existing:
+                continue
+            session.add(AldiPreferredRetailer(name=r["name"], domain=r.get("domain"), tier=r["tier"],
+                                              priority=r.get("priority", "normal"), country=r.get("country", "US"),
+                                              active=True))
+            added += 1
+        for team in TEAMS:
+            if await session.get(AldiTeamPreference, team) is None:
+                session.add(AldiTeamPreference(team=team, memo="", price_min=15.0, price_max=60.0))
+        await session.commit()
+        if added:
+            import structlog
+            structlog.get_logger().info("aldi_recommender_seeded", retailers_added=added)
 
 
 async def seed_csv_retailers() -> None:

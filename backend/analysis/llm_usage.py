@@ -132,6 +132,12 @@ async def _record_off_loop(**kwargs) -> None:
     await loop.run_in_executor(None, functools.partial(record_call, **kwargs))
 
 
+async def record_call_async(**kwargs) -> None:
+    """Public async form of record_call() for callers that talk to the
+    Messages API without the SDK (analysis/claude_raw.py)."""
+    await _record_off_loop(**kwargs)
+
+
 async def tracked_create(
     client: Any,
     feature: str,

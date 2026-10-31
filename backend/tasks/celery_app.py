@@ -21,6 +21,7 @@ app.conf.update(
         "tasks.scrape_tasks.*": {"queue": "scrape"},
         "tasks.analysis_tasks.*": {"queue": "analysis"},
         "tasks.aldi_tasks.*": {"queue": "aldi"},
+        "tasks.aldi_recommend_tasks.*": {"queue": "aldi"},
         "tasks.instore_tasks.*": {"queue": "aldi"},
         "tasks.catalogue_tasks.*": {"queue": "aldi"},
         "tasks.report_tasks.*": {"queue": "reports"},
@@ -59,4 +60,4 @@ app.conf.update(
 )
 
 # Explicitly include task modules so Celery registers them on startup
-app.conf.update(include=["tasks.scrape_tasks", "tasks.analysis_tasks", "tasks.aldi_tasks", "tasks.instore_tasks", "tasks.catalogue_tasks"])
+app.conf.update(include=["tasks.scrape_tasks", "tasks.analysis_tasks", "tasks.aldi_tasks", "tasks.aldi_recommend_tasks", "tasks.instore_tasks", "tasks.catalogue_tasks"])

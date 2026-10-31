@@ -74,6 +74,24 @@ class Settings(BaseSettings):
     # Sonnet 5.5: strong vision at a fifth of the Opus 4.6 token price; the
     # inventory runs once per upload and the digest once per session.
     aldi_inventory_model: str = "claude-sonnet-5-5"
+    # ALDI web product recommender (Phase 3, 2026-11-01). The pipeline runs
+    # query planning, discovery searches, candidate ranking and page
+    # verification on the fast model, and the final selection on the strong
+    # model. Budgets bound cost per run (see docs/aldi-recommender-spike.md).
+    aldi_recommend_model: str = "claude-opus-5-5"
+    aldi_recommend_fast_model: str = "claude-sonnet-5-5"
+    # Discovery only filters a search result list down to product pages —
+    # Haiku does that at a twentieth of Sonnet's token price (first run:
+    # discovery was half of a $1.49 bill).
+    aldi_recommend_search_model: str = "claude-haiku-5-5"
+    aldi_recommend_queries: int = 16        # discovery searches per run
+    aldi_recommend_verify: int = 15         # candidate pages fetched per run
+    aldi_recommend_concurrency: int = 6     # parallel tool calls
+    # A run re-plans around what failed and searches again while it has
+    # fewer than five picks, up to this many rounds (each adds ~$0.8).
+    aldi_recommend_rounds: int = 2
+    aldi_recommend_amazon_fallback: bool = False   # Amazon pages need the Apify fallback (Phase 5)
+    aldi_recommend_prompt_version: str = "2026-11-01.1"
 
     # LLM cost ledger (2026-11-01) — USD per million tokens, keyed by model
     # id (a dated id like claude-opus-4-6-20260101 matches by prefix). Check
