@@ -18,17 +18,17 @@ import clsx from "clsx";
 const PAGE_SIZE = 50;
 
 const FEATURE_LABEL: Record<string, string> = {
-  catalogue_vision: "In-store catalogue — photo analysis",
-  catalogue_reclassify: "In-store catalogue — reclassify",
-  aldi_analysis: "ALDI — mood board analysis",
-  aldi_cluster: "ALDI — product clustering",
-  aldi_ideas: "ALDI — product ideas (legacy)",
-  aldi_inventory: "ALDI — screenshot inventory",
-  aldi_recommend: "ALDI — web recommendations",
-  instore_photo: "In-store sessions — photo analysis",
-  instore_trend_report: "In-store sessions — trend report",
-  instore_trends: "In-store trends — clustering",
-  instore_trend_summary: "In-store trends — report summary",
+  catalogue_vision: "Catalogue · photo analysis",
+  catalogue_reclassify: "Catalogue · reclassify",
+  aldi_analysis: "ALDI · mood board",
+  aldi_cluster: "ALDI · clustering",
+  aldi_ideas: "ALDI · ideas (legacy)",
+  aldi_inventory: "ALDI · screenshot inventory",
+  aldi_recommend: "ALDI · web recommendations",
+  instore_photo: "In-store · photo analysis",
+  instore_trend_report: "In-store · trend report",
+  instore_trends: "In-store trends · clustering",
+  instore_trend_summary: "In-store trends · summary",
 };
 
 const REF_LINK: Record<string, (id: number) => string> = {
@@ -277,8 +277,8 @@ export default function CostsPage() {
           <div className="px-5 py-6 text-sm text-stone-500">No calls in this range.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm whitespace-nowrap">
-              <thead className="text-xs text-stone-500 uppercase tracking-wide">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-stone-500 uppercase tracking-wide whitespace-nowrap">
                 <tr className="border-b border-stone-100">
                   <th className="text-left font-medium px-5 py-2">When (UTC)</th>
                   <th className="text-left font-medium px-3 py-2">Feature</th>
@@ -298,7 +298,7 @@ export default function CostsPage() {
                   const refText = c.ref_type && c.ref_id != null ? `${c.ref_type.replace(/_/g, " ")} #${c.ref_id}` : "";
                   return (
                     <tr key={c.id} className={clsx("border-b border-stone-100 last:border-0", c.status !== "ok" && "bg-rose-50/60")}>
-                      <td className="px-5 py-2 tabular-nums text-stone-700">
+                      <td className="px-5 py-2 tabular-nums text-stone-700 whitespace-nowrap">
                         {c.created_at ? c.created_at.replace("T", " ").slice(0, 19) : ""}
                       </td>
                       <td className="px-3 py-2 text-stone-900">
@@ -309,27 +309,27 @@ export default function CostsPage() {
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-stone-700">
+                      <td className="px-3 py-2 text-stone-700 whitespace-nowrap">
                         {c.model}
                         {c.rates_source && c.rates_source !== "exact" && (
                           <span className="ml-1 text-xs text-amber-700" title={`Rates matched by ${c.rates_source}`}>~</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-stone-700">
+                      <td className="px-3 py-2 text-stone-700 whitespace-nowrap">
                         {link ? <a href={link} className="underline decoration-stone-300 hover:decoration-stone-700">{refText}</a> : refText}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums text-stone-700">{tokens(c.input_tokens)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-stone-700">{tokens(c.output_tokens)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-stone-700">
+                      <td className="px-3 py-2 text-right tabular-nums text-stone-700 whitespace-nowrap">{tokens(c.input_tokens)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-stone-700 whitespace-nowrap">{tokens(c.output_tokens)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-stone-700 whitespace-nowrap">
                         {c.cache_read_tokens || c.cache_write_tokens ? `${tokens(c.cache_read_tokens)} / ${tokens(c.cache_write_tokens)}` : "–"}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums text-stone-700">
+                      <td className="px-3 py-2 text-right tabular-nums text-stone-700 whitespace-nowrap">
                         {c.web_searches || c.web_fetches ? `${c.web_searches} / ${c.web_fetches}` : "–"}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums text-stone-700">
+                      <td className="px-3 py-2 text-right tabular-nums text-stone-700 whitespace-nowrap">
                         {c.duration_ms != null ? `${(c.duration_ms / 1000).toFixed(1)}s` : "–"}
                       </td>
-                      <td className="px-5 py-2 text-right tabular-nums font-medium text-stone-900">
+                      <td className="px-5 py-2 text-right tabular-nums font-medium text-stone-900 whitespace-nowrap">
                         {usd(c.cost_usd, c.cost_usd < 0.01 ? 4 : 2)}
                       </td>
                     </tr>
