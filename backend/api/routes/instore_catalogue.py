@@ -221,18 +221,18 @@ def _enqueue_many(image_ids: list[int]) -> int:
 
 def _heic_to_jpeg(path: Path, quality: int, progressive: bool = False, optimize: bool = False) -> bytes:
     """Blocking HEIC → JPEG transcode for the file-serving routes. Worker
-    thread only — a 12 MP HEIC takes ~0.3 s to decode and re-encode."""
+    thread only — a 12 MP HEIC takes ~0.3 s to decode and re-encode. The
+    encode goes through encode_jpeg so it releases the GIL (see there)."""
     import io
     from PIL import Image
+    from analysis.catalogue_payload import encode_jpeg
     try:
         import pillow_heif
         pillow_heif.register_heif_opener()
     except ImportError:
         pass
     img = Image.open(io.BytesIO(path.read_bytes()))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=quality, progressive=progressive, optimize=optimize)
-    return buf.getvalue()
+    return encode_jpeg(img.convert("RGB"), quality=quality, progressive=progressive, optimize=optimize)
 
 
 @router.post("/upload")

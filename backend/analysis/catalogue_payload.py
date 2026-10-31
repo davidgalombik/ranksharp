@@ -16,6 +16,7 @@ read the row, so retries and the stuck-image sweeper work from either
 side, and Redis holds kilobytes instead of gigabytes.
 """
 import io
+import tempfile
 
 import structlog
 
@@ -27,6 +28,27 @@ log = structlog.get_logger()
 # than 1600 to work with. ~500–700 KB per photo at q85 vs 2–3 MB originals.
 MAX_EDGE = 2400
 JPEG_QUALITY = 85
+
+
+def encode_jpeg(img, **save_kwargs) -> bytes:
+    """JPEG-encode a PIL image and return the bytes — through a real temp
+    file, deliberately not a BytesIO.
+
+    Pillow only releases the GIL when the encoder writes to a file
+    descriptor. Into a BytesIO it drives the encoder from Python a chunk at
+    a time, and with optimize/progressive set (which make libjpeg buffer the
+    whole image) the first chunk is the entire encode as one GIL-holding C
+    call — every other thread, the API's event loop included, stops for its
+    duration. Measured on the API container (2026-10-31), four concurrent
+    12 MP encodes at q92 progressive+optimize: 903 ms wall and a 422 ms
+    event-loop stall into BytesIO, vs 302 ms wall and a 24 ms stall into a
+    temp file. The file is unlinked on creation and lives in the page
+    cache, so there is no disk cost.
+    """
+    with tempfile.TemporaryFile() as f:
+        img.save(f, format="JPEG", **save_kwargs)
+        f.seek(0)
+        return f.read()
 
 
 def prepare_vision_payload(raw: bytes, file_type: str) -> tuple[bytes, str]:
@@ -53,9 +75,7 @@ def prepare_vision_payload(raw: bytes, file_type: str) -> tuple[bytes, str]:
         img = Image.open(io.BytesIO(raw))
         img = ImageOps.exif_transpose(img) or img
         img.thumbnail((MAX_EDGE, MAX_EDGE))  # in place; keeps aspect; no upscale
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
-        out = buf.getvalue()
+        out = encode_jpeg(img.convert("RGB"), quality=JPEG_QUALITY, optimize=True)
         log.debug("vision_payload_staged", src=ft, in_bytes=len(raw), out_bytes=len(out))
         return out, "jpeg"
     except Exception as exc:  # noqa: BLE001 — never block an upload on transcode
