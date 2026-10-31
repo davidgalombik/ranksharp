@@ -396,6 +396,40 @@ class AldiProductIdea(Base):
     )
 
 
+class LlmCall(Base):
+    """One Claude API call: tokens, server-tool counts and USD cost.
+
+    Written by analysis/llm_usage.py for every tracked call (2026-11-01).
+    `rates` holds the per-MTok prices the row was costed with; `ref_type`
+    / `ref_id` point at the row the call served (catalogue_image, aldi_upload,
+    aldi_session, …) so the Costs page can link back to it."""
+    __tablename__ = "llm_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    feature: Mapped[str] = mapped_column(String(60), nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    ref_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    ref_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    web_searches: Mapped[int] = mapped_column(Integer, default=0)
+    web_fetches: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(10), default="ok")
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    rates: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_llm_calls_created_at", "created_at"),
+        Index("ix_llm_calls_feature", "feature"),
+        Index("ix_llm_calls_ref", "ref_type", "ref_id"),
+    )
+
+
 class FragranceTrend(Base):
     """An identified candle/fragrance trend."""
     __tablename__ = "fragrance_trends"

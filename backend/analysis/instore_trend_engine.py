@@ -550,7 +550,9 @@ class InStoreTrendEngine:
         )
 
         try:
-            response = await self.client.messages.create(
+            from analysis.llm_usage import tracked_create
+            response = await tracked_create(
+                self.client, "instore_trends",
                 model=settings.nlp_model,
                 # Buyer-voice descriptions run to 3 sentences for palette /
                 # seasonal transitions, and we ask for up to 14 trends.
@@ -817,7 +819,9 @@ class InStoreTrendEngine:
         fallback_title = f"In-store Trend Report — {week_start.strftime('%d %b %Y, %H:%M')} UTC"
 
         try:
-            response = await self.client.messages.create(
+            from analysis.llm_usage import tracked_create
+            response = await tracked_create(
+                self.client, "instore_trend_summary",
                 model=settings.nlp_model,
                 max_tokens=400,
                 messages=[{

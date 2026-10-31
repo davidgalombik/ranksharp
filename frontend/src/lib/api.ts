@@ -335,6 +335,29 @@ export const api = {
     getImageUrl: (sessionId: number, productId: number) =>
       `${API_BASE}/api/instore/sessions/${sessionId}/products/${productId}/image`,
   },
+  // Claude usage ledger (2026-11-01) — see backend/api/routes/costs.py.
+  costs: {
+    summary: async (params: { from?: string; to?: string } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.from) qs.set("from", params.from);
+      if (params.to) qs.set("to", params.to);
+      const res = await fetch(`${API_BASE}/api/costs/summary?${qs}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<CostSummary>;
+    },
+    calls: async (params: { from?: string; to?: string; feature?: string; status?: string; limit?: number; offset?: number } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.from) qs.set("from", params.from);
+      if (params.to) qs.set("to", params.to);
+      if (params.feature) qs.set("feature", params.feature);
+      if (params.status) qs.set("status", params.status);
+      qs.set("limit", String(params.limit ?? 50));
+      qs.set("offset", String(params.offset ?? 0));
+      const res = await fetch(`${API_BASE}/api/costs/calls?${qs}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<CostCallsPage>;
+    },
+  },
   instoreCatalogue: {
     upload: async (files: File[], hashes: string[], retailer?: string, country?: string) => {
       const formData = new FormData();
@@ -836,4 +859,52 @@ export interface RanksharpImageUploadSummary {
   uploaded: number;
   skipped_no_matching_sku: string[];
   failed: { filename: string; sku: string | null; reason: string }[];
+}
+
+// ── Claude usage ledger ───────────────────────────────────────────────────────
+
+export interface CostBucket {
+  calls: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  web_searches: number;
+  web_fetches: number;
+  errors: number;
+}
+
+export interface CostSummary {
+  timezone: string;
+  range: { from: string | null; to: string | null };
+  totals: { today: CostBucket; this_month: CostBucket; all_time: CostBucket; range: CostBucket };
+  by_feature: (CostBucket & { feature: string })[];
+  by_model: (CostBucket & { model: string })[];
+  by_day: { day: string; calls: number; cost_usd: number }[];
+}
+
+export interface CostCall {
+  id: number;
+  created_at: string | null;
+  feature: string;
+  model: string;
+  ref_type: string | null;
+  ref_id: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  web_searches: number;
+  web_fetches: number;
+  duration_ms: number | null;
+  status: string;
+  error: string | null;
+  cost_usd: number;
+  rates_source: string | null;
+}
+
+export interface CostCallsPage {
+  total: number;
+  rows: CostCall[];
 }

@@ -14,6 +14,7 @@ from typing import Optional
 import structlog
 from anthropic import AsyncAnthropic
 from config import settings
+from analysis.llm_usage import tracked_create
 from scraper import category_catalog as cc
 
 log = structlog.get_logger()
@@ -115,14 +116,18 @@ class CatalogueVision:
         except Exception:
             pass
 
-    async def analyse_image_bytes(self, data: bytes, file_type: str) -> Optional[list[dict]]:
-        """Analyse an image/PDF's raw bytes and return a list of detected products."""
+    async def analyse_image_bytes(
+        self, data: bytes, file_type: str, *, ref_id: Optional[int] = None,
+    ) -> Optional[list[dict]]:
+        """Analyse an image/PDF's raw bytes and return a list of detected
+        products. `ref_id` is the catalogue image id, for the cost ledger."""
         content_blocks = self._content_blocks(data, file_type)
         if not content_blocks:
             return None
 
         try:
-            response = await self.client.messages.create(
+            response = await tracked_create(
+                self.client, "catalogue_vision", ref_type="catalogue_image", ref_id=ref_id,
                 model=self.model,
                 # Dense shelf photos (60+ products) overran 8000 tokens and the
                 # JSON was cut mid-array — every one of those failed to parse

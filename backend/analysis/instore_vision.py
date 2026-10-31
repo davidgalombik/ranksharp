@@ -80,7 +80,9 @@ class InStoreProductAnalyser:
             return None
 
         try:
-            response = await self._client.messages.create(
+            from analysis.llm_usage import tracked_create
+            response = await tracked_create(
+                self._client, "instore_photo",
                 model=settings.vision_model,
                 max_tokens=1000,
                 messages=[{
@@ -126,7 +128,9 @@ class InStoreProductAnalyser:
             exclusion_block=exclusion_block,
         )
         try:
-            response = await self._client.messages.create(
+            from analysis.llm_usage import tracked_create
+            response = await tracked_create(
+                self._client, "instore_trend_report",
                 model=settings.vision_model,
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
@@ -190,7 +194,9 @@ class InStoreProductAnalyser:
         if not content_blocks:
             return None
         try:
-            response = await self._client.messages.create(
+            from analysis.llm_usage import tracked_create
+            response = await tracked_create(
+                self._client, "instore_photo",
                 model=settings.vision_model,
                 max_tokens=1000,
                 messages=[{

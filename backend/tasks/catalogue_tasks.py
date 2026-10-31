@@ -323,7 +323,7 @@ def analyse_catalogue_image(self, image_id: int, file_b64: str | None = None):
 
         async def _run():
             try:
-                return await analyser.analyse_image_bytes(raw_bytes, src_type)
+                return await analyser.analyse_image_bytes(raw_bytes, src_type, ref_id=image_id)
             finally:
                 await analyser.aclose()
         detected = asyncio.run(_run())

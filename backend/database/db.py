@@ -346,6 +346,22 @@ async def init_db():
             ("DROP INDEX IF EXISTS ix_product_attributes_embedding_hnsw",
              "SELECT 1 WHERE NOT EXISTS ("
              "SELECT 1 FROM pg_class WHERE relname='ix_product_attributes_embedding_hnsw')"),
+            # LLM cost ledger (2026-11-01) — see analysis/llm_usage.py.
+            "CREATE TABLE IF NOT EXISTS llm_calls ("
+            "id SERIAL PRIMARY KEY, created_at TIMESTAMP DEFAULT NOW(), "
+            "feature VARCHAR(60) NOT NULL, model VARCHAR(80) NOT NULL, "
+            "ref_type VARCHAR(40), ref_id INTEGER, "
+            "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
+            "cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0, "
+            "web_searches INTEGER DEFAULT 0, web_fetches INTEGER DEFAULT 0, "
+            "duration_ms INTEGER, status VARCHAR(10) DEFAULT 'ok', error TEXT, "
+            "cost_usd FLOAT DEFAULT 0, rates JSONB DEFAULT '{}')",
+            ("CREATE INDEX IF NOT EXISTS ix_llm_calls_created_at ON llm_calls (created_at)",
+             _idx("ix_llm_calls_created_at")),
+            ("CREATE INDEX IF NOT EXISTS ix_llm_calls_feature ON llm_calls (feature)",
+             _idx("ix_llm_calls_feature")),
+            ("CREATE INDEX IF NOT EXISTS ix_llm_calls_ref ON llm_calls (ref_type, ref_id)",
+             _idx("ix_llm_calls_ref")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

@@ -158,6 +158,19 @@ export default function Navigation() {
           >
             Historical Products
           </Link>
+
+          {/* Costs — the Claude usage ledger (2026-11-01). */}
+          <Link
+            href="/costs"
+            className={clsx(
+              "px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
+              path === "/costs" || path.startsWith("/costs/")
+                ? "bg-stone-900 text-white"
+                : "text-stone-600 hover:bg-stone-100"
+            )}
+          >
+            Costs
+          </Link>
         </nav>
       </div>
     </header>

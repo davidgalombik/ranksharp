@@ -50,9 +50,9 @@ def analyse_aldi_upload(self, upload_id: int, file_b64: str | None = None) -> in
             if file_b64:
                 import base64 as _b64
                 raw_bytes = _b64.b64decode(file_b64)
-                result = asyncio.run(_vision_analyse_bytes(raw_bytes, upload.file_type))
+                result = asyncio.run(_vision_analyse_bytes(raw_bytes, upload.file_type, ref_id=upload_id))
             else:
-                result = asyncio.run(_vision_analyse(upload.file_path, upload.file_type))
+                result = asyncio.run(_vision_analyse(upload.file_path, upload.file_type, ref_id=upload_id))
 
             if result:
                 upload.themes = result.get("themes", [])
@@ -214,14 +214,14 @@ def generate_aldi_ideas(self, upload_id: int) -> dict:
 
 # ── Async helpers ─────────────────────────────────────────────────────────────
 
-async def _vision_analyse(file_path: str, file_type: str) -> dict | None:
+async def _vision_analyse(file_path: str, file_type: str, ref_id: int | None = None) -> dict | None:
     from analysis.aldi_vision import MoodBoardAnalyser
-    return await MoodBoardAnalyser().analyse_file(file_path, file_type)
+    return await MoodBoardAnalyser().analyse_file(file_path, file_type, ref_id=ref_id)
 
 
-async def _vision_analyse_bytes(data: bytes, file_type: str) -> dict | None:
+async def _vision_analyse_bytes(data: bytes, file_type: str, ref_id: int | None = None) -> dict | None:
     from analysis.aldi_vision import MoodBoardAnalyser
-    return await MoodBoardAnalyser().analyse_file_bytes(data, file_type)
+    return await MoodBoardAnalyser().analyse_file_bytes(data, file_type, ref_id=ref_id)
 
 
 async def _generate_ideas(trend_data: dict, similar_products: list, previous_idea_names: list[str] | None = None) -> list | None:
@@ -229,13 +229,17 @@ async def _generate_ideas(trend_data: dict, similar_products: list, previous_ide
     return await MoodBoardAnalyser().generate_ideas(trend_data, similar_products, n=10, previous_idea_names=previous_idea_names)
 
 
-async def _cluster_products(trend_data: dict, similar_products: list, previous_cluster_names: list[str] | None = None) -> list | None:
+async def _cluster_products(trend_data: dict, similar_products: list,
+                            previous_cluster_names: list[str] | None = None,
+                            ref_id: int | None = None) -> list | None:
     """New (2026-08-06) shape: ask Claude to cluster real catalogue products
     into buyable sub-themes. Returns [{name, description, category,
-    product_ids, filter_keywords}, ...] or None on failure."""
+    product_ids, filter_keywords}, ...] or None on failure. `ref_id` is the
+    session id, for the cost ledger."""
     from analysis.aldi_vision import MoodBoardAnalyser
     return await MoodBoardAnalyser().cluster_products(
         trend_data, similar_products, previous_cluster_names=previous_cluster_names,
+        ref_id=ref_id,
     )
 
 
@@ -686,7 +690,7 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
                 ideas = [None]  # so the return dict says 'ideas: 1' rather than 'ideas: 0'
             else:
                 # Clustering path — group the semantic sample into buyable sub-themes
-                clusters = asyncio.run(_cluster_products(trend_data, similar_products))
+                clusters = asyncio.run(_cluster_products(trend_data, similar_products, ref_id=session_id))
                 if clusters:
                     _persist_clusters_as_ideas(
                         db_session, session_id, generation=1,
@@ -815,6 +819,7 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
                     _cluster_products(
                         trend_data, similar_products,
                         previous_cluster_names=previous_idea_names,
+                        ref_id=session_id,
                     )
                 )
                 log.info("aldi_regen_step", session_id=session_id,

@@ -12,6 +12,7 @@ import structlog
 from typing import Optional
 from anthropic import AsyncAnthropic
 from config import settings
+from analysis.llm_usage import tracked_create
 
 log = structlog.get_logger()
 
@@ -272,18 +273,21 @@ class MoodBoardAnalyser:
         self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.model = settings.vision_model
 
-    async def analyse_file(self, file_path: str, file_type: str) -> Optional[dict]:
+    async def analyse_file(self, file_path: str, file_type: str,
+                           ref_id: Optional[int] = None) -> Optional[dict]:
         """
         Analyse a mood board file and return extracted trend attributes as a dict.
+        `ref_id` is the AldiUpload id, for the cost ledger.
         """
         content_blocks = self._load_content_blocks(file_path, file_type)
         if not content_blocks:
             log.error("no_content_blocks_loaded", file_path=file_path)
             return None
 
-        return await self._analyse_with_blocks(content_blocks, context=file_path)
+        return await self._analyse_with_blocks(content_blocks, context=file_path, ref_id=ref_id)
 
-    async def analyse_file_bytes(self, data: bytes, file_type: str) -> Optional[dict]:
+    async def analyse_file_bytes(self, data: bytes, file_type: str,
+                                 ref_id: Optional[int] = None) -> Optional[dict]:
         """
         Analyse a mood board file from raw bytes (no filesystem dependency).
 
@@ -297,13 +301,15 @@ class MoodBoardAnalyser:
                       size=len(data) if data else 0)
             return None
 
-        return await self._analyse_with_blocks(content_blocks, context=f"bytes:{file_type}")
+        return await self._analyse_with_blocks(content_blocks, context=f"bytes:{file_type}", ref_id=ref_id)
 
-    async def _analyse_with_blocks(self, content_blocks: list[dict], context: str) -> Optional[dict]:
+    async def _analyse_with_blocks(self, content_blocks: list[dict], context: str,
+                                   ref_id: Optional[int] = None) -> Optional[dict]:
         content = content_blocks + [{"type": "text", "text": MOOD_BOARD_PROMPT}]
 
         try:
-            response = await self.client.messages.create(
+            response = await tracked_create(
+                self.client, "aldi_analysis", ref_type="aldi_upload", ref_id=ref_id,
                 model=self.model,
                 max_tokens=1600,  # bumped from 1200 to fit filter_keywords
                 messages=[{"role": "user", "content": content}],
@@ -320,6 +326,7 @@ class MoodBoardAnalyser:
         trend_data: dict,
         similar_products: list[dict],
         previous_cluster_names: list[str] | None = None,
+        ref_id: Optional[int] = None,
     ) -> Optional[list[dict]]:
         """New (2026-08-06) shape: cluster real catalogue products into
         buyable sub-themes instead of inventing new product concepts.
@@ -399,7 +406,8 @@ class MoodBoardAnalyser:
 
         raw = ""
         try:
-            response = await self.client.messages.create(
+            response = await tracked_create(
+                self.client, "aldi_cluster", ref_type="aldi_session", ref_id=ref_id,
                 model=self.model,
                 # Bumped 4000 -> 8000: with 5-8 clusters × ~30 IDs each,
                 # 4000 was tight enough that Claude occasionally truncated
@@ -556,7 +564,8 @@ class MoodBoardAnalyser:
         )
 
         try:
-            response = await self.client.messages.create(
+            response = await tracked_create(
+                self.client, "aldi_ideas",
                 model=self.model,
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],

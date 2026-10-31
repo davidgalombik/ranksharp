@@ -89,7 +89,9 @@ class CatalogueReclassifier:
         prompt = _PROMPT_TEMPLATE + "\n".join(product_lines)
 
         try:
-            response = await self.client.messages.create(
+            from analysis.llm_usage import tracked_create
+            response = await tracked_create(
+                self.client, "catalogue_reclassify",
                 model=self.model,
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],

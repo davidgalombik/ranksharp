@@ -71,6 +71,28 @@ class Settings(BaseSettings):
     vision_model: str = "claude-opus-4-6"
     nlp_model: str = "claude-opus-4-6"
 
+    # LLM cost ledger (2026-11-01) — USD per million tokens, keyed by model
+    # id (a dated id like claude-opus-4-6-20260101 matches by prefix). Check
+    # against anthropic.com/pricing when a model changes. Every llm_calls
+    # row stores the rates it was costed with, so edits here never rewrite
+    # history. Cache write = 5-minute cache (1.25x input); cache read = 0.1x
+    # input except where the pricing page says otherwise.
+    llm_rates: dict = {
+        "claude-opus-5-5":   {"input": 4.0,  "output": 20.0, "cache_read": 0.20, "cache_write": 5.0},
+        "claude-opus-5":     {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+        "claude-opus-4-6":   {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+        "claude-sonnet-5-5": {"input": 2.0,  "output": 10.0, "cache_read": 0.20, "cache_write": 2.50},
+        "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "claude-haiku-5-5":  {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+    }
+    # Used when a model id is not in llm_rates; the row is marked source=family.
+    llm_rate_fallbacks: dict = {
+        "opus":   {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+        "sonnet": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+        "haiku":  {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+    }
+    llm_web_search_rate_usd: float = 0.01   # $10 per 1,000 web searches; fetches are token-only
+
     # Trend engine
     trend_cluster_min_size: int = 5
 
