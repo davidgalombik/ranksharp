@@ -504,7 +504,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
   }, [load]);
 
   return (
-    <div className="mt-6 bg-stone-50 border border-stone-200 rounded-2xl p-5">
+    <div className="mt-4 bg-stone-50 border border-stone-200 rounded-2xl p-5">
       <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
         <div>
           <h3 className="font-semibold text-stone-900 text-lg">Product Recommendations</h3>

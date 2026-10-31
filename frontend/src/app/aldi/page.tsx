@@ -967,6 +967,18 @@ function SessionDetailView({
           onFinalise={onFinalise}
         />
       )}
+
+    {/* Web product recommendations — two reels, one per buying team
+        (Phase 4, 2026-11-01). First thing under the session header: this is
+        the main output; the document preview and catalogue sets follow. */}
+    {!isUploadingMode && (
+      <AldiRecommendationsPanel
+        sessionId={session.id}
+        uploads={uploads.map((u) => ({ id: u.id, filename: u.filename, file_type: u.file_type, elements: u.elements }))}
+        ready={uploads.some((u) => u.status === "done")}
+      />
+    )}
+
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
       {/* Left: document tabs + per-doc analysis */}
       <div className="space-y-4">
@@ -1308,16 +1320,6 @@ function SessionDetailView({
         )}
       </div>
     </div>
-
-    {/* Web product recommendations — two reels, one per buying team
-        (Phase 4, 2026-11-01). Full width under the catalogue sets. */}
-    {!isUploadingMode && (
-      <AldiRecommendationsPanel
-        sessionId={session.id}
-        uploads={uploads.map((u) => ({ id: u.id, filename: u.filename, file_type: u.file_type, elements: u.elements }))}
-        ready={uploads.some((u) => u.status === "done")}
-      />
-    )}
     </>
   );
 }
