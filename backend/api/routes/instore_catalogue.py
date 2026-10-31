@@ -1,4 +1,5 @@
 """API routes for the In-store Products catalogue (standalone — no sessions)."""
+import asyncio
 import os
 import uuid
 from datetime import datetime
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, desc, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.concurrency import run_in_threadpool
 from database.db import AsyncSessionLocal
 
 
@@ -117,27 +119,91 @@ def instore_search_order(q: str) -> list:
 VALID_COUNTRIES = {"AU", "US"}
 
 
-def _stage_payload(image: InStoreCatalogueImage, raw: bytes) -> None:
-    """Put the downsized vision payload on the row and reset it to pending.
+# Everything below that touches image bytes runs in worker threads, never on
+# the event loop. Until 2026-10-31 the upload endpoint decoded, downsized and
+# re-encoded every photo inline: ~0.24 s per HEIC on the API container, so a
+# 200-photo batch froze the whole API for ~50 s (every other request — the
+# catalogue page's 4 s poll included — just queued behind it). PIL releases
+# the GIL for decode / resize / encode, so threads also run these in
+# parallel: 8 HEICs took 1.9 s sequentially vs 0.65 s on 4 threads.
+#
+# _stage_slots caps how many photos are in flight at once across ALL
+# requests. A decoded 12 MP photo is ~50–100 MB of pixels, so this is the
+# memory bound; it also leaves Starlette's default 40-thread pool free for
+# everything else.
+_STAGE_PARALLELISM = 4
+_stage_slots = asyncio.Semaphore(_STAGE_PARALLELISM)
+
+
+def _apply_payload(image: InStoreCatalogueImage, payload: bytes, ptype: str) -> None:
+    """Put a prepared vision payload on the row and reset it to pending.
 
     Must be COMMITTED before _enqueue() publishes the id — the worker reads
     the payload from the row, so the bytes have to be in Postgres first.
     See analysis/catalogue_payload.py for why bytes no longer ride in the
     Celery message. (2026-09-28)
     """
-    from analysis.catalogue_payload import prepare_vision_payload
-    payload, ptype = prepare_vision_payload(raw, image.file_type)
     image.vision_payload = payload
     image.vision_payload_type = ptype
     image.status = "pending"
     image.error_message = None
 
 
+def _persist_and_prepare(upload_dir: Path, file_type: str, contents: bytes) -> tuple[Path, bytes, str]:
+    """Blocking half of an upload: write the original to the volume and build
+    its vision payload. Worker thread only — see _ingest_upload."""
+    from analysis.catalogue_payload import prepare_vision_payload
+    fpath = upload_dir / f"{uuid.uuid4()}.{file_type}"
+    fpath.write_bytes(contents)
+    payload, ptype = prepare_vision_payload(contents, file_type)
+    return fpath, payload, ptype
+
+
+def _prepare_from_disk(path: Path, file_type: str) -> Optional[tuple[bytes, str]]:
+    """Blocking: read an original off the volume and build its vision
+    payload. None when the file is gone. Worker thread only."""
+    from analysis.catalogue_payload import prepare_vision_payload
+    if not path.exists():
+        return None
+    return prepare_vision_payload(path.read_bytes(), file_type)
+
+
+async def _ingest_upload(
+    file: UploadFile, file_type: str, upload_dir: Path,
+) -> Optional[tuple[Path, bytes, str]]:
+    """Read one upload, write the original and build its payload, all off
+    the event loop. Returns None when the file is empty, oversize, or could
+    not be written (logged) — the caller counts it as invalid. The read sits
+    inside the slot too, so a 200-file batch never holds more than a few
+    originals in memory at once."""
+    async with _stage_slots:
+        contents = await file.read()
+        if not contents or len(contents) > MAX_FILE_SIZE:
+            return None
+        try:
+            return await run_in_threadpool(_persist_and_prepare, upload_dir, file_type, contents)
+        except Exception as exc:  # noqa: BLE001 — one bad file must not fail the batch
+            log.error("catalogue_write_failed", filename=file.filename, error=str(exc))
+            return None
+
+
+async def _stage_from_disk(image: InStoreCatalogueImage) -> bool:
+    """Re-stage a row's payload from the original on the volume (the API can
+    see it; the worker cannot). False when the file is missing."""
+    async with _stage_slots:
+        result = await run_in_threadpool(_prepare_from_disk, Path(image.file_path), image.file_type)
+    if result is None:
+        return False
+    _apply_payload(image, *result)
+    return True
+
+
 def _enqueue(image_id: int) -> bool:
     """Queue analysis by id. Returns False on a broker failure — the row
     stays 'pending' with its payload staged and the 10-minute sweeper
     (tasks.catalogue_tasks.requeue_stuck_catalogue_images) re-queues it,
-    instead of the endpoint 500ing after the commit and stranding rows."""
+    instead of the endpoint 500ing after the commit and stranding rows.
+    Sync Redis round trip — call through run_in_threadpool / _enqueue_many."""
     from tasks.catalogue_tasks import analyse_catalogue_image
     try:
         analyse_catalogue_image.delay(image_id)
@@ -145,6 +211,28 @@ def _enqueue(image_id: int) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.warning("catalogue_enqueue_failed", image_id=image_id, error=str(exc))
         return False
+
+
+def _enqueue_many(image_ids: list[int]) -> int:
+    """Publish one analyse task per id from a worker thread (200 publishes
+    is ~a second of Redis round trips). Returns how many publishes failed."""
+    return sum(0 if _enqueue(i) else 1 for i in image_ids)
+
+
+def _heic_to_jpeg(path: Path, quality: int, progressive: bool = False, optimize: bool = False) -> bytes:
+    """Blocking HEIC → JPEG transcode for the file-serving routes. Worker
+    thread only — a 12 MP HEIC takes ~0.3 s to decode and re-encode."""
+    import io
+    from PIL import Image
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except ImportError:
+        pass
+    img = Image.open(io.BytesIO(path.read_bytes()))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality, progressive=progressive, optimize=optimize)
+    return buf.getvalue()
 
 
 @router.post("/upload")
@@ -187,6 +275,9 @@ async def upload_batch(
     skipped_dupe = 0
     skipped_bad = 0
 
+    # Cheap checks first (hash shape, duplicates, file type) — these need no
+    # bytes. Everything that does is handed to _ingest_upload below.
+    candidates: list[tuple[UploadFile, str, str]] = []
     for file, h in zip(files, hashes):
         if not h or len(h) != 64:
             skipped_bad += 1
@@ -203,23 +294,21 @@ async def upload_batch(
         if not file_type:
             skipped_bad += 1
             continue
+        candidates.append((file, h, file_type))
 
-        contents = await file.read()
-        if len(contents) > MAX_FILE_SIZE or not contents:
+    # Write originals and build vision payloads in worker threads, a few at
+    # a time (_stage_slots). The event loop stays free to serve everything
+    # else while a batch is in flight. (2026-10-31)
+    staged = await asyncio.gather(
+        *(_ingest_upload(file, file_type, upload_dir) for file, _h, file_type in candidates)
+    )
+    for (file, h, file_type), result in zip(candidates, staged):
+        if result is None:
             skipped_bad += 1
             continue
-
-        fname = f"{uuid.uuid4()}.{file_type}"
-        fpath = upload_dir / fname
-        try:
-            fpath.write_bytes(contents)
-        except Exception as exc:
-            log.error("catalogue_write_failed", error=str(exc))
-            skipped_bad += 1
-            continue
-
+        fpath, payload, ptype = result
         image = InStoreCatalogueImage(
-            filename=file.filename or fname,
+            filename=file.filename or fpath.name,
             file_path=str(fpath),
             file_type=file_type,
             sha256_hash=h,
@@ -229,7 +318,7 @@ async def upload_batch(
         )
         # Stage the vision payload on the row now so the single commit
         # below persists it before any id is published. (2026-09-28)
-        _stage_payload(image, contents)
+        _apply_payload(image, payload, ptype)
         db.add(image)
         added_images.append(image)
 
@@ -242,9 +331,9 @@ async def upload_batch(
             "image_ids": [],
         }
 
+    # Ids come back from the INSERT ... RETURNING at commit, and the session
+    # has expire_on_commit=False, so no per-row refresh round trip is needed.
     await db.commit()
-    for img in added_images:
-        await db.refresh(img)
 
     # Queue by id only — payloads are already committed on the rows.
     # No ETA stagger: with prefetch=1 the worker paces itself, and Celery
@@ -252,7 +341,7 @@ async def upload_batch(
     # which is a loss window on every redeploy. A failed publish leaves
     # the row 'pending' for the sweeper rather than 500ing after the
     # commit. (2026-09-28)
-    queue_failed = sum(0 if _enqueue(img.id) else 1 for img in added_images)
+    queue_failed = await run_in_threadpool(_enqueue_many, [img.id for img in added_images])
     if queue_failed:
         log.warning("catalogue_upload_partial_enqueue",
                     added=len(added_images), queue_failed=queue_failed)
@@ -596,18 +685,8 @@ async def get_item_image(item_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="File missing on disk")
 
     if image.file_type == "heic":
-        import io
-        from PIL import Image
-        try:
-            import pillow_heif
-            pillow_heif.register_heif_opener()
-        except ImportError:
-            pass
-        data = path.read_bytes()
-        img = Image.open(io.BytesIO(data))
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=85)
-        return Response(content=buf.getvalue(), media_type="image/jpeg",
+        data = await run_in_threadpool(_heic_to_jpeg, path, 85)
+        return Response(content=data, media_type="image/jpeg",
                         headers={"Content-Disposition": "inline",
                                  "Cache-Control": "public, max-age=86400"})
 
@@ -916,24 +995,14 @@ async def get_image_file(image_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="File missing on disk")
 
     if image.file_type == "heic":
-        import io
-        from PIL import Image
-        try:
-            import pillow_heif
-            pillow_heif.register_heif_opener()
-        except ImportError:
-            pass
-        data = path.read_bytes()
-        img = Image.open(io.BytesIO(data))
-        buf = io.BytesIO()
         # Quality bumped 88 -> 92 (2026-08-07). Buyers zoom into these
         # shelf photos to read price stickers — the JPEG artifacting at
         # 88 was visibly softening small text. 92 keeps text crisp at
         # ~30% file-size cost. Progressive=True lets the browser start
         # rendering the low-frequency layers before the full download,
         # so first-open of a large photo feels snappier.
-        img.convert("RGB").save(buf, format="JPEG", quality=92, progressive=True, optimize=True)
-        return Response(content=buf.getvalue(), media_type="image/jpeg",
+        data = await run_in_threadpool(_heic_to_jpeg, path, 92, True, True)
+        return Response(content=data, media_type="image/jpeg",
                         headers={"Content-Disposition": "inline",
                                  "Cache-Control": "public, max-age=86400"})
 
@@ -1100,16 +1169,28 @@ async def retry_image(image_id: int, db: AsyncSession = Depends(get_db)):
     image = await db.get(InStoreCatalogueImage, image_id)
     if not image:
         raise HTTPException(status_code=404, detail="Not found")
-    path = Path(image.file_path)
-    if not path.exists():
-        raise HTTPException(status_code=410, detail="File missing on disk — cannot retry")
     # Re-stage from the original on disk (the API can see the volume),
     # commit, THEN publish the id.
-    _stage_payload(image, path.read_bytes())
+    if not await _stage_from_disk(image):
+        raise HTTPException(status_code=410, detail="File missing on disk — cannot retry")
     await db.commit()
-    queued = _enqueue(image_id)
+    queued = await run_in_threadpool(_enqueue, image_id)
     return {"queued": queued, "image_id": image_id,
             "note": None if queued else "Broker unavailable — the 10-minute sweeper will queue it."}
+
+
+async def _restage_and_queue(rows: list[InStoreCatalogueImage], db: AsyncSession) -> dict:
+    """Shared body of the retry-all endpoints. Two phases: stage every
+    payload (in worker threads, a few at a time) and commit, THEN publish
+    ids — the worker must find the payload on the row when the message
+    arrives."""
+    staged = await asyncio.gather(*(_stage_from_disk(image) for image in rows))
+    stageable = [image for image, ok in zip(rows, staged) if ok]
+    missing = len(rows) - len(stageable)
+    await db.commit()
+    queue_failed = await run_in_threadpool(_enqueue_many, [image.id for image in stageable])
+    return {"queued": len(stageable) - queue_failed, "missing_files": missing,
+            "queue_failed": queue_failed}
 
 
 @router.post("/retry-all-pending")
@@ -1121,21 +1202,7 @@ async def retry_all_pending(db: AsyncSession = Depends(get_db)):
             InStoreCatalogueImage.status.in_(["pending", "analysing"])
         )
     )).scalars().all()
-    # Two phases: stage every payload and commit, THEN publish ids — the
-    # worker must find the payload on the row when the message arrives.
-    stageable: list[InStoreCatalogueImage] = []
-    missing = 0
-    for image in rows:
-        path = Path(image.file_path)
-        if not path.exists():
-            missing += 1
-            continue
-        _stage_payload(image, path.read_bytes())
-        stageable.append(image)
-    await db.commit()
-    queued = sum(1 for image in stageable if _enqueue(image.id))
-    return {"queued": queued, "missing_files": missing,
-            "queue_failed": len(stageable) - queued}
+    return await _restage_and_queue(list(rows), db)
 
 
 @router.post("/retry-all-failed")
@@ -1143,19 +1210,7 @@ async def retry_all_failed(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(
         select(InStoreCatalogueImage).where(InStoreCatalogueImage.status == "failed")
     )).scalars().all()
-    stageable: list[InStoreCatalogueImage] = []
-    missing = 0
-    for image in rows:
-        path = Path(image.file_path)
-        if not path.exists():
-            missing += 1
-            continue
-        _stage_payload(image, path.read_bytes())
-        stageable.append(image)
-    await db.commit()
-    queued = sum(1 for image in stageable if _enqueue(image.id))
-    return {"queued": queued, "missing_files": missing,
-            "queue_failed": len(stageable) - queued}
+    return await _restage_and_queue(list(rows), db)
 
 
 @router.delete("/images/{image_id}")
