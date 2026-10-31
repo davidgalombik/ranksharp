@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import clsx from "clsx";
+import AldiRecommendationsPanel, { type RecElement } from "@/components/AldiRecommendationsPanel";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -50,6 +51,8 @@ interface AldiUploadDoc {
   season_occasion: string | null;
   mood_descriptors: string[];
   error_message: string | null;
+  // Phase 2: per-screenshot element inventory (bbox + description).
+  elements?: RecElement[];
 }
 
 interface AldiSession {
@@ -1305,6 +1308,16 @@ function SessionDetailView({
         )}
       </div>
     </div>
+
+    {/* Web product recommendations — two reels, one per buying team
+        (Phase 4, 2026-11-01). Full width under the catalogue sets. */}
+    {!isUploadingMode && (
+      <AldiRecommendationsPanel
+        sessionId={session.id}
+        uploads={uploads.map((u) => ({ id: u.id, filename: u.filename, file_type: u.file_type, elements: u.elements }))}
+        ready={uploads.some((u) => u.status === "done")}
+      />
+    )}
     </>
   );
 }
