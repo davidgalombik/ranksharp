@@ -12,6 +12,10 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // longer runs the clustering (settings.aldi_legacy_clusters_enabled).
 // Flip both to bring it back.
 const SHOW_LEGACY_CLUSTERS: boolean = false;
+// Per-document trend summary card and the combined trend summary. Hidden
+// since 2026-11-04 at David's request; the analysis behind them still runs
+// because the trend digest and the web recommender read it.
+const SHOW_TREND_SUMMARIES: boolean = false;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -282,7 +286,7 @@ function DocAnalysisPanel({ doc }: { doc: AldiUploadDoc }) {
         </div>
       )}
 
-      {!isProcessing && doc.status !== "failed" && (
+      {SHOW_TREND_SUMMARIES && !isProcessing && doc.status !== "failed" && (
         <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
           {doc.season_occasion && (
             <span className="inline-block px-2.5 py-1 bg-amber-100 text-amber-800 rounded-full text-xs font-semibold">
@@ -1042,8 +1046,8 @@ function SessionDetailView({
           <div className="text-center py-8 text-stone-400 text-sm animate-pulse">Loading documents…</div>
         )}
 
-        {/* Combined trend summary (shown once all docs analysed) */}
-        {session.status === "done" && (session.themes || []).length > 0 && (
+        {/* Combined trend summary (shown once all docs analysed) — hidden 2026-11-04 */}
+        {SHOW_TREND_SUMMARIES && session.status === "done" && (session.themes || []).length > 0 && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
             <p className="text-xs font-semibold text-amber-800 uppercase tracking-wide">Combined Trend Summary</p>
             {session.season_occasion && (
