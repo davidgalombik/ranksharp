@@ -48,7 +48,18 @@ interface Rec {
   thumbnail_url: string | null;
   feedback: Feedback[];
 }
-interface NearMiss { product_name?: string; retailer?: string; url?: string; fails?: string; note?: string }
+// Since 2026-11-04 near misses are rows with an id and feedback; older runs
+// still serve the plain JSON list (no id, so no feedback controls).
+interface NearMiss {
+  id?: number;
+  product_name?: string;
+  retailer?: string;
+  url?: string;
+  fails?: string;
+  note?: string;
+  thumbnail_url?: string | null;
+  feedback?: Feedback[];
+}
 interface Run {
   id: number;
   team: string;
@@ -141,40 +152,82 @@ function EvidenceViewer({
   );
 }
 
-// ── Card ──────────────────────────────────────────────────────────────────────
+// ── Feedback row (shared by picks and near misses) ─────────────────────────────
 
-function RecCard({
-  rec, uploads, onFeedback, onShowEvidence,
+function FeedbackRow({
+  feedback, onSubmit, placeholder,
 }: {
-  rec: Rec;
-  uploads: RecUpload[];
-  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
-  onShowEvidence: (ev: Evidence) => void;
+  feedback: Feedback[];
+  onSubmit: (verdict: "good" | "bad", note: string) => Promise<void>;
+  placeholder: string;
 }) {
-  const latest = rec.feedback.length ? rec.feedback[rec.feedback.length - 1] : null;
+  const latest = feedback.length ? feedback[feedback.length - 1] : null;
   const [verdict, setVerdict] = useState<"good" | "bad" | null>((latest?.verdict as "good" | "bad") ?? null);
   const [note, setNote] = useState(latest?.note ?? "");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const src = thumbSrc(rec);
 
   useEffect(() => {
-    const l = rec.feedback.length ? rec.feedback[rec.feedback.length - 1] : null;
+    const l = feedback.length ? feedback[feedback.length - 1] : null;
     setVerdict((l?.verdict as "good" | "bad") ?? null);
     setNote(l?.note ?? "");
     setDirty(false);
-  }, [rec.feedback]);
+  }, [feedback]);
 
   async function submit(v: "good" | "bad") {
     setSaving(true);
     try {
-      await onFeedback(rec.id, v, note);
+      await onSubmit(v, note);
       setVerdict(v);
       setDirty(false);
     } finally {
       setSaving(false);
     }
   }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button type="button" disabled={saving} onClick={() => submit("good")}
+              className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
+                verdict === "good" ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-emerald-50")}>
+        👍 Good
+      </button>
+      <button type="button" disabled={saving} onClick={() => submit("bad")}
+              className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
+                verdict === "bad" ? "bg-rose-600 border-rose-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-rose-50")}>
+        👎 Bad
+      </button>
+      <input
+        value={note}
+        onChange={(e) => { setNote(e.target.value); setDirty(true); }}
+        placeholder={placeholder}
+        className="flex-1 min-w-[12rem] text-xs border border-stone-300 rounded-md px-2 py-1 bg-white"
+      />
+      {dirty && verdict && (
+        <button type="button" disabled={saving} onClick={() => submit(verdict)}
+                className="px-2.5 py-1 rounded-md text-xs font-medium bg-stone-900 text-white hover:bg-stone-700">
+          Save note
+        </button>
+      )}
+    </div>
+  );
+}
+
+function latestVerdict(feedback: Feedback[] | undefined): string | null {
+  return feedback && feedback.length ? feedback[feedback.length - 1].verdict : null;
+}
+
+// ── Card ──────────────────────────────────────────────────────────────────────
+
+function RecCard({
+  rec, onFeedback, onShowEvidence,
+}: {
+  rec: Rec;
+  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
+  onShowEvidence: (ev: Evidence) => void;
+}) {
+  const verdict = latestVerdict(rec.feedback);
+  const src = thumbSrc(rec);
 
   return (
     <div className={clsx(
@@ -192,7 +245,7 @@ function RecCard({
       <div className="flex-1 min-w-0">
         <div className="min-w-0">
           <a href={rec.url} target="_blank" rel="noopener noreferrer"
-             className="font-semibold text-stone-900 hover:underline decoration-stone-400 break-words">
+             className="font-semibold text-blue-700 hover:underline break-words">
             {rec.position}. {rec.product_name}
           </a>
           <div className="text-sm font-bold text-stone-800 mt-1">
@@ -212,32 +265,48 @@ function RecCard({
           </div>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button type="button" disabled={saving} onClick={() => submit("good")}
-                  className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
-                    verdict === "good" ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-emerald-50")}>
-            👍 Good
-          </button>
-          <button type="button" disabled={saving} onClick={() => submit("bad")}
-                  className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
-                    verdict === "bad" ? "bg-rose-600 border-rose-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-rose-50")}>
-            👎 Bad
-          </button>
-          <input
-            value={note}
-            onChange={(e) => { setNote(e.target.value); setDirty(true); }}
-            placeholder="Why? e.g. not functional enough, focus on needlepoint…"
-            className="flex-1 min-w-[12rem] text-xs border border-stone-300 rounded-md px-2 py-1 bg-white"
-          />
-          {dirty && verdict && (
-            <button type="button" disabled={saving} onClick={() => submit(verdict)}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-stone-900 text-white hover:bg-stone-700">
-              Save note
-            </button>
-          )}
+        <div className="mt-3">
+          <FeedbackRow feedback={rec.feedback} onSubmit={(v, n) => onFeedback(rec.id, v, n)}
+                       placeholder="Why? e.g. not functional enough, focus on needlepoint…" />
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Near miss ─────────────────────────────────────────────────────────────────
+
+function NearMissRow({
+  miss, onFeedback,
+}: {
+  miss: NearMiss;
+  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
+}) {
+  const verdict = latestVerdict(miss.feedback);
+  return (
+    <li className={clsx(
+      "bg-white rounded-xl border px-4 py-3 space-y-2",
+      verdict === "good" ? "border-emerald-300" : verdict === "bad" ? "border-rose-300" : "border-stone-200",
+    )}>
+      <div className="text-sm">
+        {miss.url ? (
+          <a href={miss.url} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-700 hover:underline break-words">
+            {miss.product_name ?? miss.url}
+          </a>
+        ) : (
+          <span className="font-semibold text-stone-900">{miss.product_name}</span>
+        )}
+        {miss.retailer && <span className="ml-2 font-bold text-stone-800">{miss.retailer}</span>}
+      </div>
+      <div className="text-xs">
+        <span className="text-rose-700 font-medium">Failed: {miss.fails}</span>
+        {miss.note && <span className="text-stone-500"> — {miss.note}</span>}
+      </div>
+      {miss.id != null && (
+        <FeedbackRow feedback={miss.feedback ?? []} onSubmit={(v, n) => onFeedback(miss.id!, v, n)}
+                     placeholder="Would you take it anyway? Say why, and the next set learns from it…" />
+      )}
+    </li>
   );
 }
 
@@ -259,7 +328,6 @@ function TeamReel({
   const inFlight = latest && (latest.status === "queued" || latest.status === "running");
   const doneRuns = runs.filter((r) => r.status === "done");
   const [activeRunId, setActiveRunId] = useState<number | null>(doneRuns[0]?.id ?? null);
-  const [showMisses, setShowMisses] = useState(false);
   const [showPrefs, setShowPrefs] = useState(false);
   const [starting, setStarting] = useState(false);
   const [prefs, setPrefs] = useState(block.preferences);
@@ -380,7 +448,7 @@ function TeamReel({
           ) : (
             <div className="space-y-3">
               {active.recommendations.map((rec) => (
-                <RecCard key={rec.id} rec={rec} uploads={uploads} onFeedback={onFeedback} onShowEvidence={onShowEvidence} />
+                <RecCard key={rec.id} rec={rec} onFeedback={onFeedback} onShowEvidence={onShowEvidence} />
               ))}
             </div>
           )}
@@ -388,22 +456,18 @@ function TeamReel({
             <p className="text-xs text-stone-500">Only {active.recommendations.length} of 5 met every criterion; the bar was not lowered.</p>
           )}
           {active.near_misses.length > 0 && (
-            <div>
-              <button type="button" onClick={() => setShowMisses((v) => !v)} className="text-xs font-medium text-stone-600 hover:text-stone-900">
-                {showMisses ? "▾" : "▸"} {active.near_misses.length} near miss{active.near_misses.length === 1 ? "" : "es"}
-              </button>
-              {showMisses && (
-                <ul className="mt-2 space-y-1">
-                  {active.near_misses.map((m, i) => (
-                    <li key={i} className="text-xs text-stone-600 bg-white border border-stone-200 rounded-md px-3 py-2">
-                      {m.url ? <a href={m.url} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline">{m.product_name ?? m.url}</a> : <span className="font-medium">{m.product_name}</span>}
-                      {m.retailer && <span className="text-stone-400"> · {m.retailer}</span>}
-                      <span className="text-rose-700"> — {m.fails}</span>
-                      {m.note && <span className="text-stone-500"> ({m.note})</span>}
-                    </li>
-                  ))}
-                </ul>
-              )}
+            <div className="space-y-2">
+              <div className="text-sm font-semibold text-stone-800">
+                {active.near_misses.length} near miss{active.near_misses.length === 1 ? "" : "es"}
+                <span className="ml-2 font-normal text-stone-500">
+                  Products that failed one criterion. Mark them too — a Good tells the next set you&apos;d take it anyway.
+                </span>
+              </div>
+              <ul className="space-y-2">
+                {active.near_misses.map((m, i) => (
+                  <NearMissRow key={m.id ?? i} miss={m} onFeedback={onFeedback} />
+                ))}
+              </ul>
             </div>
           )}
         </>

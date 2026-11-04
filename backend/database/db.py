@@ -386,6 +386,11 @@ async def init_db():
              _idx("ix_aldi_rec_feedback_rec")),
             "CREATE TABLE IF NOT EXISTS aldi_team_preferences (team VARCHAR(20) PRIMARY KEY, memo TEXT DEFAULT '', price_min FLOAT DEFAULT 15, price_max FLOAT DEFAULT 60, updated_at TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS aldi_preferred_retailers (id SERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, domain VARCHAR(160), tier VARCHAR(30) NOT NULL, priority VARCHAR(10) DEFAULT 'normal', country VARCHAR(2) DEFAULT 'US', active BOOLEAN DEFAULT TRUE)",
+            # Near misses as feedback-able rows (2026-11-04).
+            ("ALTER TABLE aldi_recommendations ADD COLUMN IF NOT EXISTS kind VARCHAR(12) DEFAULT 'pick'",
+             _col("aldi_recommendations", "kind")),
+            ("ALTER TABLE aldi_recommendations ADD COLUMN IF NOT EXISTS fails TEXT",
+             _col("aldi_recommendations", "fails")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

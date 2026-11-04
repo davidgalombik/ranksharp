@@ -483,6 +483,11 @@ class AldiRecommendation(Base):
     run_id: Mapped[int] = mapped_column(ForeignKey("aldi_recommendation_runs.id", ondelete="CASCADE"), nullable=False)
     session_id: Mapped[int] = mapped_column(ForeignKey("aldi_sessions.id", ondelete="CASCADE"), nullable=False)
     team: Mapped[str] = mapped_column(String(20), nullable=False)
+    # "pick" (one of the five) or "near_miss" (listed with the criterion it
+    # failed). Near misses carry feedback too: a Good on one tells the next
+    # run the buyer would accept it despite that criterion. (2026-11-04)
+    kind: Mapped[str] = mapped_column(String(12), default="pick")
+    fails: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
     candidate_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_name: Mapped[str] = mapped_column(String(300), nullable=False)

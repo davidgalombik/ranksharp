@@ -55,12 +55,26 @@ def load_context(db, run: AldiRecommendationRun) -> rec.RunContext:
                                             AldiRecommendation.team == run.team)
         .order_by(AldiRecommendation.id)
     ).scalars().all()
+    # Picks are "shown" (never repeated). Near misses are not — a Good on one
+    # pre-approves it for the next run, a Bad excludes it. (2026-11-04)
     shown = [{"product_name": s.product_name, "url": s.url, "url_hash": rec.url_hash(s.url), "retailer": s.retailer}
-             for s in shown_rows]
-    feedback = []
+             for s in shown_rows if (s.kind or "pick") == "pick"]
+    feedback: list[dict] = []
+    approved: list[dict] = []
+    rejected: list[dict] = []
     for s in shown_rows:
-        for fb in s.feedback or []:
-            feedback.append({"verdict": fb.verdict, "note": fb.note, "product_name": s.product_name, "retailer": s.retailer})
+        fbs = list(s.feedback or [])
+        for fb in fbs:
+            feedback.append({"verdict": fb.verdict, "note": fb.note, "product_name": s.product_name,
+                             "retailer": s.retailer, "kind": s.kind or "pick", "fails": s.fails})
+        if s.kind == "near_miss" and fbs:
+            latest = fbs[-1]
+            if latest.verdict == "good" and s.candidate_id:
+                approved.append({"candidate_id": int(s.candidate_id), "product_name": s.product_name,
+                                 "retailer": s.retailer, "fails": s.fails or "a criterion", "note": latest.note})
+            elif latest.verdict == "bad":
+                rejected.append({"product_name": s.product_name, "retailer": s.retailer, "url": s.url,
+                                 "url_hash": rec.url_hash(s.url)})
     previous_queries = [
         q.get("query") for r in db.execute(
             sa_select(AldiRecommendationRun).where(AldiRecommendationRun.session_id == run.session_id,
@@ -69,7 +83,8 @@ def load_context(db, run: AldiRecommendationRun) -> rec.RunContext:
         ).scalars().all() for q in (r.search_queries or []) if isinstance(q, dict) and q.get("query")
     ]
     return rec.RunContext(run_id=run.id, session_id=run.session_id, team=run.team, digest=digest, prefs=prefs,
-                          retailers=retailers, shown=shown, feedback=feedback, previous_queries=previous_queries)
+                          retailers=retailers, shown=shown, feedback=feedback, previous_queries=previous_queries,
+                          approved=approved, rejected=rejected)
 
 
 def _upsert_candidates(db, run: AldiRecommendationRun, found: list[dict]) -> None:
@@ -133,7 +148,7 @@ async def _select_round(db, run, ctx, shown_hashes: set[str]) -> tuple[list[dict
 
 async def run_pipeline(db, run: AldiRecommendationRun) -> None:
     ctx = load_context(db, run)
-    shown_hashes = {s["url_hash"] for s in ctx.shown}
+    shown_hashes = {s["url_hash"] for s in ctx.shown} | {r["url_hash"] for r in ctx.rejected}
     stats: dict = {"rounds": 0, "queries": 0, "found": 0, "to_verify": 0, "verified_now": 0, "blocked_now": 0}
     all_queries: list[dict] = []
     picks_out: list[dict] = []
@@ -238,6 +253,21 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         named.append({"candidate_id": cid, "product_name": (c.facts or {}).get("product_name") or c.title,
                       "retailer": (c.facts or {}).get("retailer") or c.domain, "url": c.url,
                       "fails": str(m.get("fails") or "")[:120], "note": str(m.get("note") or "")[:200]})
+    # Near misses as rows of their own, so the buyer can mark them too.
+    for pos, m in enumerate(named, 1):
+        c = pool_by_id[m["candidate_id"]]
+        f = c.facts or {}
+        name, tier = rec.retailer_for_domain(c.domain or "", ctx.retailers)
+        thumb = await rec.fetch_thumbnail(c.og_image or f.get("image_url"))
+        db.add(AldiRecommendation(
+            run_id=run.id, session_id=run.session_id, team=run.team, kind="near_miss", position=pos,
+            candidate_id=c.id, product_name=(m["product_name"] or c.url)[:300],
+            retailer=(m["retailer"] or name)[:120] if (m["retailer"] or name) else None, retailer_tier=tier,
+            url=c.url, price_usd=f.get("price_usd"), material_family=f.get("primary_family"),
+            fails=m["fails"] or None, how_it_matches=m["note"] or None,
+            verification_status=c.verify_status, page_title=f.get("product_name"),
+            thumbnail=thumb, thumbnail_url=(c.og_image or f.get("image_url")),
+        ))
     run.near_misses = named
     run.stats = stats
     row = db.execute(text(

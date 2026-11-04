@@ -61,7 +61,8 @@ def _team(team: str) -> str:
 
 def _rec_out(r: AldiRecommendation) -> dict:
     return {
-        "id": r.id, "position": r.position, "product_name": r.product_name, "retailer": r.retailer,
+        "id": r.id, "kind": r.kind or "pick", "fails": r.fails, "note": r.how_it_matches if (r.kind == "near_miss") else None,
+        "position": r.position, "product_name": r.product_name, "retailer": r.retailer,
         "retailer_tier": r.retailer_tier, "url": r.url, "material_family": r.material_family,
         "theme_id": r.theme_id, "theme_name": r.theme_name, "evidence": r.evidence or [],
         "how_it_matches": r.how_it_matches, "verification_status": r.verification_status,
@@ -78,8 +79,13 @@ def _run_out(run: AldiRecommendationRun) -> dict:
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "cost_usd": round(float(run.cost_usd or 0.0), 4), "searches": run.searches, "fetches": run.fetches,
-        "error": run.error, "near_misses": run.near_misses or [], "stats": run.stats or {},
-        "recommendations": [_rec_out(r) for r in sorted(run.recommendations or [], key=lambda x: x.position)],
+        "error": run.error, "stats": run.stats or {},
+        "recommendations": [_rec_out(r) for r in sorted(run.recommendations or [], key=lambda x: x.position)
+                            if (r.kind or "pick") == "pick"],
+        # Near misses are rows since 2026-11-04 (feedback-able); older runs
+        # only have the JSON list, served as-is without ids.
+        "near_misses": ([_rec_out(r) for r in sorted(run.recommendations or [], key=lambda x: x.position)
+                         if r.kind == "near_miss"] or (run.near_misses or [])),
     }
 
 

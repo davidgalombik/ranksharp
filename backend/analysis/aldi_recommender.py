@@ -280,7 +280,7 @@ SELECT_USER = """TREND DIGEST (themes with the screenshot elements that show the
 VERIFIED CANDIDATES (each page was opened; facts are from the page)
 {candidate_block}
 
-{exclusion_block}{feedback_block}{fixed_block}TASK: choose {n} products{gap_note}. Return ONLY JSON:
+{exclusion_block}{feedback_block}{approved_block}{fixed_block}TASK: choose {n} products{gap_note}. Return ONLY JSON:
 {{
   "picks": [
     {{
@@ -365,7 +365,8 @@ class RunContext:
     """Everything the stages need, loaded once by the orchestrator."""
 
     def __init__(self, *, run_id: int, session_id: int, team: str, digest: dict, prefs: dict,
-                 retailers: list[dict], shown: list[dict], feedback: list[dict], previous_queries: list[str]):
+                 retailers: list[dict], shown: list[dict], feedback: list[dict], previous_queries: list[str],
+                 approved: Optional[list[dict]] = None, rejected: Optional[list[dict]] = None):
         self.run_id = run_id
         self.session_id = session_id
         self.team = team
@@ -374,7 +375,12 @@ class RunContext:
         self.prefs = prefs                     # {memo, price_min, price_max}
         self.retailers = [r for r in retailers if r.get("active", True)]
         self.shown = shown                     # [{product_name, url, url_hash, retailer}] already shown to this team
-        self.feedback = feedback               # [{verdict, note, product_name, retailer}]
+        self.feedback = feedback               # [{verdict, note, product_name, retailer, kind, fails}]
+        # Near misses the buyer marked Good (pre-approved despite the failed
+        # criterion) and Bad (excluded). (2026-11-04)
+        self.approved = approved or []         # [{candidate_id, product_name, retailer, fails, note}]
+        self.rejected = rejected or []         # [{product_name, retailer, url, url_hash}]
+        self.approved_overrides = {a["candidate_id"]: a["fails"] for a in self.approved}
         self.previous_queries = previous_queries
         self.fast_model = settings.aldi_recommend_fast_model
         self.search_model = settings.aldi_recommend_search_model
@@ -444,15 +450,30 @@ class RunContext:
             for f in self.feedback[-40:]:
                 tag = "GOOD" if f["verdict"] == "good" else "BAD"
                 note = f" — {f['note']}" if f.get("note") else ""
-                lines.append(f"- {tag}: {f.get('product_name')} ({f.get('retailer') or '?'}){note}")
-            parts.append("BUYER FEEDBACK ON EARLIER PICKS for this report (BAD = do not repeat the mistake; GOOD = more like this):\n" + "\n".join(lines))
+                if f.get("kind") == "near_miss":
+                    lines.append(f"- {tag} on a near miss that failed '{f.get('fails') or '?'}': "
+                                 f"{f.get('product_name')} ({f.get('retailer') or '?'}){note}")
+                else:
+                    lines.append(f"- {tag}: {f.get('product_name')} ({f.get('retailer') or '?'}){note}")
+            parts.append("BUYER FEEDBACK ON EARLIER PICKS AND NEAR MISSES for this report (BAD = do not repeat the mistake; "
+                         "GOOD = more like this; GOOD on a near miss = the buyer would accept it despite that criterion, "
+                         "so weigh that criterion more softly for this team):\n" + "\n".join(lines))
         return ("\n\n".join(parts) + "\n\n") if parts else ""
 
     def exclusion_block(self) -> str:
-        if not self.shown:
+        if not self.shown and not self.rejected:
             return ""
         lines = [f"- {s.get('product_name')} ({s.get('retailer') or '?'}) {s.get('url')}" for s in self.shown[-60:]]
-        return "DO NOT REPEAT — already shown to this team for this report:\n" + "\n".join(lines) + "\n\n"
+        lines += [f"- {r.get('product_name')} ({r.get('retailer') or '?'}) {r.get('url')} — buyer rejected it" for r in self.rejected[-30:]]
+        return "DO NOT REPEAT — already shown to this team for this report, or rejected by the buyer:\n" + "\n".join(lines) + "\n\n"
+
+    def approved_block(self) -> str:
+        if not self.approved:
+            return ""
+        lines = [f"- [{a['candidate_id']}] {a.get('product_name')} ({a.get('retailer') or '?'}) — failed: {a.get('fails')}"
+                 + (f" — buyer: {a['note']}" if a.get("note") else "") for a in self.approved[-20:]]
+        return ("PRE-APPROVED BY THE BUYER — near misses they said they would accept. You may pick these; treat the "
+                "named criterion as satisfied for this team:\n" + "\n".join(lines) + "\n\n")
 
 
 # ── Stage 1: plan ────────────────────────────────────────────────────────────
@@ -721,7 +742,8 @@ async def select(ctx: RunContext, verified: list[dict], n: int, fixed: Optional[
         fixed_block = "ALREADY CHOSEN (keep; do not repeat): " + ", ".join(f"[{p['candidate_id']}]" for p in fixed) + "\n\n"
     user = SELECT_USER.format(
         digest_block=ctx.digest_block(with_elements=True), candidate_block=_candidate_block(ctx, verified),
-        exclusion_block=ctx.exclusion_block(), feedback_block=ctx.feedback_block(), fixed_block=fixed_block,
+        exclusion_block=ctx.exclusion_block(), feedback_block=ctx.feedback_block(), approved_block=ctx.approved_block(),
+        fixed_block=fixed_block,
         n=n, gap_note=gap_note,
     )
     data = await messages_create(
@@ -764,6 +786,9 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
         f = c["facts"]
         name, tier = retailer_for_domain(c["domain"], ctx.retailers)
         rkey = name or c["domain"]
+        # A near miss the buyer marked Good is exempt from the price and
+        # stacking rules it failed on (never from IP, stock or scope).
+        override = ctx.approved_overrides.get(cid)
         reason = None
         if c.get("status") != "verified" or not f.get("is_product_page"):
             reason = "page could not be verified"
@@ -771,13 +796,13 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
             reason = "already shown"
         elif f.get("licensed_ip"):
             reason = "licensed character / branded IP"
-        elif f.get("price_usd") is None:
+        elif f.get("price_usd") is None and not override:
             reason = "price not listed"
-        elif not (pmin <= float(f["price_usd"]) <= pmax):
+        elif f.get("price_usd") is not None and not (pmin <= float(f["price_usd"]) <= pmax) and not override:
             reason = f"price ${f['price_usd']:.2f} outside ${pmin:.0f}–{pmax:.0f}"
         elif f.get("in_stock") is False:
             reason = "out of stock"
-        elif (f.get("stacks_nests_collapses") or {}).get("claim") in ("none",):
+        elif (f.get("stacks_nests_collapses") or {}).get("claim") in ("none",) and not override:
             reason = "does not stack, nest or collapse"
         else:
             pf = f.get("primary_family")
