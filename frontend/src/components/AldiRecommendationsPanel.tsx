@@ -312,10 +312,6 @@ function NearMissRow({
         {miss.retailer && <span className="ml-2 font-bold text-stone-800">{miss.retailer}</span>}
         {miss.link_status === "gone" && <span className="ml-2 text-xs font-medium text-rose-700">link no longer works</span>}
       </div>
-      <div className="text-xs">
-        <span className="text-rose-700 font-medium">Failed: {miss.fails}</span>
-        {miss.note && <span className="text-stone-500"> — {miss.note}</span>}
-      </div>
       {miss.id != null && (
         <FeedbackRow feedback={miss.feedback ?? []} onSubmit={(v, n) => onFeedback(miss.id!, v, n)}
                      placeholder="Would you take it anyway? Say why, and the next set learns from it…" />
@@ -494,7 +490,7 @@ function TeamReel({
               <div className="text-sm font-semibold text-stone-800">
                 {active.near_misses.length} near miss{active.near_misses.length === 1 ? "" : "es"}
                 <span className="ml-2 font-normal text-stone-500">
-                  Products that failed one criterion. Mark them too — a Good tells the next set you&apos;d take it anyway.
+                  Close calls. Mark them too — a Good tells the next set you&apos;d take it anyway.
                 </span>
               </div>
               <ul className="space-y-2">
