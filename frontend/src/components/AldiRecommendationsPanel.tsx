@@ -163,6 +163,9 @@ function EvidenceViewer({
 }
 
 // ── Feedback row (shared by picks and near misses) ─────────────────────────────
+// Choose Good or Bad, add an optional note, press Submit (2026-11-04). A Bad
+// hides the card (the parent derives that from the saved verdict); the parent
+// shows an undo for a few seconds and a "hidden" toggle afterwards.
 
 function FeedbackRow({
   feedback, onSubmit, placeholder,
@@ -175,21 +178,22 @@ function FeedbackRow({
   const [verdict, setVerdict] = useState<"good" | "bad" | null>((latest?.verdict as "good" | "bad") ?? null);
   const [note, setNote] = useState(latest?.note ?? "");
   const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     const l = feedback.length ? feedback[feedback.length - 1] : null;
     setVerdict((l?.verdict as "good" | "bad") ?? null);
     setNote(l?.note ?? "");
-    setDirty(false);
   }, [feedback]);
 
-  async function submit(v: "good" | "bad") {
+  const savedVerdict = (latest?.verdict as "good" | "bad" | undefined) ?? null;
+  const savedNote = latest?.note ?? "";
+  const changed = verdict !== null && (verdict !== savedVerdict || note.trim() !== savedNote.trim());
+
+  async function submit() {
+    if (!verdict) return;
     setSaving(true);
     try {
-      await onSubmit(v, note);
-      setVerdict(v);
-      setDirty(false);
+      await onSubmit(verdict, note);
     } finally {
       setSaving(false);
     }
@@ -197,28 +201,28 @@ function FeedbackRow({
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <button type="button" disabled={saving} onClick={() => submit("good")}
+      <button type="button" disabled={saving} onClick={() => setVerdict("good")}
               className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
                 verdict === "good" ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-emerald-50")}>
         👍 Good
       </button>
-      <button type="button" disabled={saving} onClick={() => submit("bad")}
+      <button type="button" disabled={saving} onClick={() => setVerdict("bad")}
               className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
                 verdict === "bad" ? "bg-rose-600 border-rose-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-rose-50")}>
         👎 Bad
       </button>
       <input
         value={note}
-        onChange={(e) => { setNote(e.target.value); setDirty(true); }}
+        onChange={(e) => setNote(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && changed) submit(); }}
         placeholder={placeholder}
         className="flex-1 min-w-[12rem] text-xs border border-stone-300 rounded-md px-2 py-1 bg-white"
       />
-      {dirty && verdict && (
-        <button type="button" disabled={saving} onClick={() => submit(verdict)}
-                className="px-2.5 py-1 rounded-md text-xs font-medium bg-stone-900 text-white hover:bg-stone-700">
-          Save note
-        </button>
-      )}
+      <button type="button" disabled={saving || !changed} onClick={submit}
+              className={clsx("px-3 py-1 rounded-md text-xs font-semibold transition-colors",
+                changed ? "bg-stone-900 text-white hover:bg-stone-700" : "bg-stone-200 text-stone-400 cursor-not-allowed")}>
+        {saving ? "Saving…" : savedVerdict && !changed ? "Saved" : "Submit"}
+      </button>
     </div>
   );
 }
@@ -227,13 +231,25 @@ function latestVerdict(feedback: Feedback[] | undefined): string | null {
   return feedback && feedback.length ? feedback[feedback.length - 1].verdict : null;
 }
 
+function UndoLine({ feedback, onUndo }: { feedback: Feedback[]; onUndo: (feedbackId: number) => Promise<void> }) {
+  const latest = feedback.length ? feedback[feedback.length - 1] : null;
+  if (!latest) return null;
+  return (
+    <div className="text-xs text-stone-500 pl-1">
+      Hidden{latest.note ? ` — “${latest.note}”` : ""} ·{" "}
+      <button type="button" onClick={() => onUndo(latest.id)} className="font-semibold text-blue-700 hover:underline">Undo</button>
+    </div>
+  );
+}
+
 // ── Card ──────────────────────────────────────────────────────────────────────
 
 function RecCard({
-  rec, onFeedback, onShowEvidence,
+  rec, onFeedback, onShowEvidence, hidden,
 }: {
   rec: Rec;
-  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
+  onFeedback: (recId: number, verdict: "good" | "bad", note: string, name: string) => Promise<void>;
+  hidden?: boolean;
   onShowEvidence: (ev: Evidence) => void;
 }) {
   const verdict = latestVerdict(rec.feedback);
@@ -243,6 +259,7 @@ function RecCard({
     <div className={clsx(
       "bg-white rounded-xl border p-4 flex gap-4",
       verdict === "good" ? "border-emerald-300" : verdict === "bad" ? "border-rose-300" : "border-stone-200",
+      hidden && "opacity-60",
     )}>
       <div className="w-28 h-28 flex-shrink-0 rounded-lg bg-stone-100 overflow-hidden flex items-center justify-center">
         {src ? (
@@ -279,7 +296,7 @@ function RecCard({
         )}
 
         <div className="mt-3">
-          <FeedbackRow feedback={rec.feedback} onSubmit={(v, n) => onFeedback(rec.id, v, n)}
+          <FeedbackRow feedback={rec.feedback} onSubmit={(v, n) => onFeedback(rec.id, v, n, rec.product_name)}
                        placeholder="Why? e.g. not functional enough, focus on needlepoint…" />
         </div>
       </div>
@@ -290,16 +307,18 @@ function RecCard({
 // ── Near miss ─────────────────────────────────────────────────────────────────
 
 function NearMissRow({
-  miss, onFeedback,
+  miss, onFeedback, hidden,
 }: {
   miss: NearMiss;
-  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
+  onFeedback: (recId: number, verdict: "good" | "bad", note: string, name: string) => Promise<void>;
+  hidden?: boolean;
 }) {
   const verdict = latestVerdict(miss.feedback);
   return (
     <li className={clsx(
       "bg-white rounded-xl border px-4 py-3 space-y-2",
       verdict === "good" ? "border-emerald-300" : verdict === "bad" ? "border-rose-300" : "border-stone-200",
+      hidden && "opacity-60",
     )}>
       <div className="text-sm">
         {miss.url ? (
@@ -313,7 +332,7 @@ function NearMissRow({
         {miss.link_status === "gone" && <span className="ml-2 text-xs font-medium text-rose-700">link no longer works</span>}
       </div>
       {miss.id != null && (
-        <FeedbackRow feedback={miss.feedback ?? []} onSubmit={(v, n) => onFeedback(miss.id!, v, n)}
+        <FeedbackRow feedback={miss.feedback ?? []} onSubmit={(v, n) => onFeedback(miss.id!, v, n, miss.product_name ?? miss.url ?? "product")}
                      placeholder="Would you take it anyway? Say why, and the next set learns from it…" />
       )}
     </li>
@@ -323,13 +342,14 @@ function NearMissRow({
 // ── Team reel ─────────────────────────────────────────────────────────────────
 
 function TeamReel({
-  teamKey, block, uploads, onStart, onFeedback, onSavePrefs, onDistill, onShowEvidence,
+  teamKey, block, uploads, onStart, onFeedback, onUndoFeedback, onSavePrefs, onDistill, onShowEvidence,
 }: {
   teamKey: string;
   block: TeamBlock;
   uploads: RecUpload[];
   onStart: (team: string) => Promise<void>;
-  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
+  onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<Feedback | null>;
+  onUndoFeedback: (feedbackId: number) => Promise<void>;
   onSavePrefs: (team: string, prefs: Prefs) => Promise<void>;
   onDistill: (team: string) => Promise<void>;
   onShowEvidence: (ev: Evidence) => void;
@@ -343,6 +363,18 @@ function TeamReel({
   const [starting, setStarting] = useState(false);
   const [prefs, setPrefs] = useState(block.preferences);
   const [tick, setTick] = useState(0);
+  // Bad hides a card: a short undo line first, then a "hidden" toggle.
+  const [showHidden, setShowHidden] = useState(false);
+  const [justHidden, setJustHidden] = useState<{ name: string; feedbackId: number } | null>(null);
+  useEffect(() => {
+    if (!justHidden) return;
+    const t = setTimeout(() => setJustHidden(null), 10000);
+    return () => clearTimeout(t);
+  }, [justHidden]);
+  const handleFeedback = useCallback(async (recId: number, verdict: "good" | "bad", note: string, name: string) => {
+    const saved = await onFeedback(recId, verdict, note);
+    if (saved && verdict === "bad") setJustHidden({ name, feedbackId: saved.id });
+  }, [onFeedback]);
 
   useEffect(() => { setPrefs(block.preferences); }, [block.preferences]);
   useEffect(() => {
@@ -460,48 +492,95 @@ function TeamReel({
         </div>
       )}
 
-      {active && (
+      {active && (() => {
+        const isHidden = (fb: Feedback[] | undefined) => latestVerdict(fb) === "bad";
+        const visiblePicks = active.recommendations.filter((r) => !isHidden(r.feedback));
+        const hiddenPicks = active.recommendations.filter((r) => isHidden(r.feedback));
+        const visibleMisses = active.near_misses.filter((m) => !isHidden(m.feedback));
+        const hiddenMisses = active.near_misses.filter((m) => isHidden(m.feedback));
+        const hiddenCount = hiddenPicks.length + hiddenMisses.length;
+        return (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
             <span>
               Set {active.generation} · {active.recommendations.length} product{active.recommendations.length === 1 ? "" : "s"}
+              {hiddenPicks.length > 0 && ` · ${hiddenPicks.length} hidden`}
               {active.finished_at && ` · ${new Date(active.finished_at + "Z").toLocaleString()}`}
             </span>
             <span className="tabular-nums">
               ${active.cost_usd.toFixed(2)} · {active.searches} searches · {active.fetches} pages opened
             </span>
           </div>
+
+          {justHidden && (
+            <div className="flex items-center justify-between gap-3 text-sm bg-stone-100 border border-stone-200 rounded-xl px-4 py-2">
+              <span className="text-stone-700 truncate">Hidden: {justHidden.name}</span>
+              <button type="button" onClick={() => { onUndoFeedback(justHidden.feedbackId); setJustHidden(null); }}
+                      className="text-xs font-semibold text-blue-700 hover:underline flex-shrink-0">Undo</button>
+            </div>
+          )}
+
           {active.recommendations.length === 0 ? (
             <p className="text-sm text-stone-500 bg-white border border-stone-200 rounded-xl p-4">
               No product met every criterion this time. The closest misses are listed below — Try Again searches different angles.
             </p>
+          ) : visiblePicks.length === 0 ? (
+            <p className="text-sm text-stone-500 bg-white border border-stone-200 rounded-xl p-4">
+              Every product in this set is hidden. Try Again for a fresh set.
+            </p>
           ) : (
             <div className="space-y-3">
-              {active.recommendations.map((rec) => (
-                <RecCard key={rec.id} rec={rec} onFeedback={onFeedback} onShowEvidence={onShowEvidence} />
+              {visiblePicks.map((rec) => (
+                <RecCard key={rec.id} rec={rec} onFeedback={handleFeedback} onShowEvidence={onShowEvidence} />
               ))}
             </div>
           )}
           {active.recommendations.length < 5 && active.recommendations.length > 0 && (
             <p className="text-xs text-stone-500">Only {active.recommendations.length} of 5 met every criterion; the bar was not lowered.</p>
           )}
-          {active.near_misses.length > 0 && (
+          {visibleMisses.length > 0 && (
             <div className="space-y-2">
               <div className="text-sm font-semibold text-stone-800">
-                {active.near_misses.length} near miss{active.near_misses.length === 1 ? "" : "es"}
+                {visibleMisses.length} near miss{visibleMisses.length === 1 ? "" : "es"}
                 <span className="ml-2 font-normal text-stone-500">
                   Close calls. Mark them too — a Good tells the next set you&apos;d take it anyway.
                 </span>
               </div>
               <ul className="space-y-2">
-                {active.near_misses.map((m, i) => (
-                  <NearMissRow key={m.id ?? i} miss={m} onFeedback={onFeedback} />
+                {visibleMisses.map((m, i) => (
+                  <NearMissRow key={m.id ?? i} miss={m} onFeedback={handleFeedback} />
                 ))}
               </ul>
             </div>
           )}
+
+          {hiddenCount > 0 && (
+            <div className="space-y-2">
+              <button type="button" onClick={() => setShowHidden((v) => !v)}
+                      className="text-xs font-medium text-stone-600 hover:text-stone-900">
+                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{showHidden ? "" : " · show"}
+              </button>
+              {showHidden && (
+                <ul className="space-y-2">
+                  {hiddenPicks.map((rec) => (
+                    <li key={`p${rec.id}`} className="space-y-1">
+                      <RecCard rec={rec} onFeedback={handleFeedback} onShowEvidence={onShowEvidence} hidden />
+                      <UndoLine feedback={rec.feedback} onUndo={onUndoFeedback} />
+                    </li>
+                  ))}
+                  {hiddenMisses.map((m, i) => (
+                    <li key={`m${m.id ?? i}`} className="space-y-1">
+                      <ul><NearMissRow miss={m} onFeedback={handleFeedback} hidden /></ul>
+                      <UndoLine feedback={m.feedback ?? []} onUndo={onUndoFeedback} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </>
-      )}
+        );
+      })()}
 
       {!active && !inFlight && runs.length === 0 && (
         <p className="text-sm text-stone-500">
@@ -566,11 +645,19 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
     await load();
   }, [sessionId, load]);
 
-  const onFeedback = useCallback(async (recId: number, verdict: "good" | "bad", note: string) => {
+  const onFeedback = useCallback(async (recId: number, verdict: "good" | "bad", note: string): Promise<Feedback | null> => {
     const res = await fetch(`${API_BASE}/api/aldi/recommendations/${recId}/feedback`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict, note }),
     });
-    if (!res.ok) { alert("Could not save feedback"); return; }
+    if (!res.ok) { alert("Could not save feedback"); return null; }
+    const rec: Rec = await res.json();
+    await load();
+    return rec.feedback.length ? rec.feedback[rec.feedback.length - 1] : null;
+  }, [load]);
+
+  const onUndoFeedback = useCallback(async (feedbackId: number) => {
+    const res = await fetch(`${API_BASE}/api/aldi/recommendation-feedback/${feedbackId}`, { method: "DELETE" });
+    if (!res.ok) { alert("Could not undo"); return; }
     await load();
   }, [load]);
 
@@ -635,6 +722,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
             uploads={uploads}
             onStart={onStart}
             onFeedback={onFeedback}
+            onUndoFeedback={onUndoFeedback}
             onSavePrefs={onSavePrefs}
             onDistill={onDistill}
             onShowEvidence={setEvidence}
