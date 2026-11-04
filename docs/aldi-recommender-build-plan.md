@@ -1,12 +1,10 @@
 # ALDI web product recommendations — build plan
 
-Status (2026-11-01): Phases 0–2 live. Phase 3 (pipeline) and Phase 4 (panel) built
-and verified on session 37, committed locally, awaiting push. Three real runs on
-that baking board: 93 s / $1.49, 95 s / $0.87 (Haiku discovery), 198 s / $1.58
-(two rounds) — zero qualifying picks because the board is bakeware, with honest
-near misses. Amazon stays off until the Apify fallback (Phase 5). The 27 other
-sessions that existed when the plan was written have since been deleted, so there
-is nothing to back-run. Prompts: `docs/aldi-recommender-prompts.md`.
+Status (2026-11-04): Phases 0–4 live. Legacy catalogue clustering switched off
+(settings.aldi_legacy_clusters_enabled) and hidden; near misses are feedback-able
+rows; Phase 5 built (distillation into learned_rules, retailer rotation, weekly
+link re-check), committed locally, awaiting push. Amazon stays off until an Apify
+fallback. Prompts: `docs/aldi-recommender-prompts.md`.
 
 ## Decisions taken so far
 

@@ -505,6 +505,9 @@ class AldiRecommendation(Base):
     page_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     thumbnail: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     thumbnail_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase 5: weekly link re-check (ok | gone | blocked) — see recheck_aldi_links.
+    link_status: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    link_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped["AldiRecommendationRun"] = relationship(back_populates="recommendations")
@@ -543,6 +546,12 @@ class AldiTeamPreference(Base):
     price_min: Mapped[float] = mapped_column(Float, default=15.0)
     price_max: Mapped[float] = mapped_column(Float, default=60.0)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Phase 5 (2026-11-04): standing rules distilled from all of the team's
+    # feedback across reports (tasks.aldi_recommend_tasks.distill_team_feedback).
+    # Editable by the buyer; read by every run alongside `memo`.
+    learned_rules: Mapped[str] = mapped_column(Text, default="")
+    distilled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    distilled_count: Mapped[int] = mapped_column(Integer, default=0)   # feedback rows at last distillation
 
 
 class AldiPreferredRetailer(Base):

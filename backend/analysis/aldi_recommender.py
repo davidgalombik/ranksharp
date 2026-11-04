@@ -206,7 +206,7 @@ TREND DIGEST
 RETAILERS TO SPREAD ACROSS (search these by name, e.g. "Target stackable glass canister wood lid")
 {retailer_block}
 
-{avoid_block}{feedback_block}{hints_block}RULES
+{avoid_block}{feedback_block}{hints_block}{rotation_block}RULES
 - Return exactly {n} queries as a JSON array: [{{"query": "...", "theme_id": "T1", "tier": "mass_value|marketplace|mid_market|premium|brand|open", "material": "..."}}]
 - Every theme gets at least one query; weight queries toward themes with product imagery.
 - Each query names a concrete product type + a material from the scope + a distinctive attribute from the theme (colour, finish, print, form), and is 4–12 words. Include "stackable", "nesting" or "collapsible" where natural.
@@ -366,7 +366,8 @@ class RunContext:
 
     def __init__(self, *, run_id: int, session_id: int, team: str, digest: dict, prefs: dict,
                  retailers: list[dict], shown: list[dict], feedback: list[dict], previous_queries: list[str],
-                 approved: Optional[list[dict]] = None, rejected: Optional[list[dict]] = None):
+                 approved: Optional[list[dict]] = None, rejected: Optional[list[dict]] = None,
+                 searched_retailers: Optional[dict] = None):
         self.run_id = run_id
         self.session_id = session_id
         self.team = team
@@ -381,6 +382,9 @@ class RunContext:
         self.approved = approved or []         # [{candidate_id, product_name, retailer, fails, note}]
         self.rejected = rejected or []         # [{product_name, retailer, url, url_hash}]
         self.approved_overrides = {a["candidate_id"]: a["fails"] for a in self.approved}
+        # Retailer name -> how many earlier queries for this report targeted it
+        # (Phase 5 rotation: Try Again widens the search instead of circling).
+        self.searched_retailers = searched_retailers or {}
         self.previous_queries = previous_queries
         self.fast_model = settings.aldi_recommend_fast_model
         self.search_model = settings.aldi_recommend_search_model
@@ -444,7 +448,11 @@ class RunContext:
         parts = []
         memo = (self.prefs.get("memo") or "").strip()
         if memo:
-            parts.append(f"TEAM PREFERENCES (standing, from past feedback):\n{memo}")
+            parts.append(f"TEAM PREFERENCES (written by the team):\n{memo}")
+        learned = (self.prefs.get("learned_rules") or "").strip()
+        if learned:
+            parts.append("LEARNED FROM THIS TEAM'S FEEDBACK ACROSS REPORTS (standing rules, distilled from every Good / Bad "
+                         "they have given — follow these unless the feedback below for this report says otherwise):\n" + learned)
         if self.feedback:
             lines = []
             for f in self.feedback[-40:]:
@@ -491,10 +499,17 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
                        "'stackable' / 'set of' / 'lidded', target the price band, prefer retailers that show ratings):\n"
                        + "\n".join(f"- {h}" for h in hints[:12]) + "\n\n")
     amazon_note = "" if settings.aldi_recommend_amazon_fallback else " (its product pages cannot be opened)"
+    rotation_block = ""
+    if ctx.searched_retailers:
+        top = sorted(ctx.searched_retailers.items(), key=lambda kv: -kv[1])[:20]
+        rotation_block = ("RETAILERS ALREADY SEARCHED for this report and team (query counts): "
+                          + ", ".join(f"{name} ×{count}" for name, count in top)
+                          + ". For the retailer-named queries this time, prefer retailers NOT in this list while "
+                            "keeping the tier spread, so the pool widens instead of circling.\n\n")
     prompt = PLAN_PROMPT.format(
         role=ROLE, material_scope=ctx.material_scope, digest_block=ctx.digest_block(with_elements=False),
         retailer_block=ctx.retailer_block(), avoid_block=avoid, feedback_block=ctx.feedback_block(),
-        hints_block=hints_block, n=n, amazon_note=amazon_note,
+        hints_block=hints_block, rotation_block=rotation_block, n=n, amazon_note=amazon_note,
     )
     data = await messages_create(
         {"model": ctx.fast_model, "max_tokens": 4000, "messages": [{"role": "user", "content": prompt}]},
@@ -833,6 +848,102 @@ def spread_gap(ctx: RunContext, accepted: list[dict], n: int) -> str:
     if sum(1 for t in tiers if t in MID_OR_PREMIUM) < 2 and len(accepted) >= n:
         need.append("at least 2 from mid-market or premium retailers")
     return "; ".join(need)
+
+
+# ── Phase 5: distillation and link re-check ──────────────────────────────────
+
+DISTILL_PROMPT = """You maintain the standing preferences of {team_label}'s buying team for a product recommender. 
+The recommender finds stackable / nesting home storage and organisation products on the web that express a trend report, 
+restricted to these primary materials: {families}. The team marks each recommended product Good or Bad, often with a note, 
+and also marks "near misses" (products that failed one criterion) — a Good on a near miss means they would accept it despite 
+that criterion.
+
+THE TEAM'S OWN WRITTEN PREFERENCES (do not restate these):
+{memo}
+
+CURRENT DISTILLED RULES (revise: keep what the log still supports, drop what newer feedback contradicts):
+{current_rules}
+
+FEEDBACK LOG (oldest first; {n} items):
+{log}
+
+Write the standing rules this team's recommender should follow from now on. Rules must generalise beyond a single product 
+(what to prefer, what to avoid, which criteria the team treats as soft and when, retailers or looks they favour, price 
+signals). Phrase each as an instruction ("Prefer …", "Avoid …", "Treat … as acceptable when …"). Do not invent preferences 
+the log does not support; where the log is thin, say less. At most 12 rules, each under 30 words.
+Return ONLY JSON: {{"rules": ["…", "…"], "summary": "<one sentence on what changed since the current rules, or 'no change'>"}}"""
+
+
+async def distill_rules(team: str, items: list[dict], current_rules: str, memo: str, *, ref_id: Optional[int] = None) -> Optional[dict]:
+    """One fast call that turns a team's whole feedback log into standing rules."""
+    cfg = TEAMS[team]
+    lines = []
+    for it in items[-200:]:
+        tag = "GOOD" if it.get("verdict") == "good" else "BAD"
+        kind = f"near miss (failed: {it.get('fails')})" if it.get("kind") == "near_miss" else "pick"
+        price = f" ${it['price_usd']:.0f}" if it.get("price_usd") is not None else ""
+        fam = f" [{it['material_family']}]" if it.get("material_family") else ""
+        theme = f" theme: {it['theme_name']};" if it.get("theme_name") else ""
+        note = f" — \"{it['note']}\"" if it.get("note") else ""
+        lines.append(f"- {tag} {kind}: {it.get('product_name')} ({it.get('retailer') or '?'}{price}){fam};{theme}{note}")
+    prompt = DISTILL_PROMPT.format(
+        team_label=cfg["label"], families=", ".join(cfg["families"]), memo=memo.strip() or "(none)",
+        current_rules=current_rules.strip() or "(none yet)", n=len(lines), log="\n".join(lines) or "(empty)",
+    )
+    try:
+        data = await messages_create(
+            {"model": settings.aldi_distill_model, "max_tokens": 3000, "messages": [{"role": "user", "content": prompt}]},
+            feature="aldi_distill", ref_type="aldi_team", ref_id=ref_id,
+        )
+        out = parse_json(response_text(data))
+    except Exception as exc:  # noqa: BLE001
+        log.error("aldi_distill_failed", team=team, error=str(exc))
+        return None
+    if not isinstance(out, dict):
+        return None
+    rules = [str(r).strip()[:240] for r in (out.get("rules") or []) if str(r).strip()][:12]
+    return {"rules": rules, "summary": str(out.get("summary") or "")[:300]}
+
+
+LINKCHECK_PROMPT = """Open this URL once with web_fetch (one fetch only): {url}
+Return ONLY JSON: {{"reachable": true/false, "is_product_page": true/false, "in_stock": true/false/null, "title": "<page title or null>"}}.
+If the fetch fails return {{"reachable": false}}."""
+
+
+async def check_link(url: str, *, ref_id: Optional[int] = None) -> dict:
+    """{status: ok | gone | blocked, title, in_stock}. 'blocked' means the
+    fetch was refused, which says nothing about the product."""
+    data = None
+    for tool_type in ("web_fetch_20250910", "web_fetch_20260209"):
+        body = {"model": settings.aldi_linkcheck_model, "max_tokens": 400,
+                "tools": [{"type": tool_type, "name": "web_fetch", "max_uses": 1}],
+                "messages": [{"role": "user", "content": LINKCHECK_PROMPT.format(url=url)}]}
+        try:
+            data = await messages_create(body, feature="aldi_linkcheck", ref_type="aldi_recommendation", ref_id=ref_id)
+            break
+        except ClaudeRawError as exc:
+            if exc.status == 400 and "web_fetch" in exc.body:
+                continue
+            return {"status": "blocked", "error": str(exc)[:120]}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "blocked", "error": str(exc)[:120]}
+    if data is None:
+        return {"status": "blocked", "error": "no fetch tool accepted"}
+    fetched = fetch_results(data)
+    ok = [f for f in fetched if f["ok"]]
+    if not ok:
+        code = (fetched[0]["error_code"] if fetched else None) or "unknown"
+        return {"status": "gone" if code in ("not_found",) else "blocked", "error": code}
+    try:
+        facts = parse_json(response_text(data))
+    except Exception:  # noqa: BLE001
+        facts = {}
+    if isinstance(facts, dict) and facts.get("reachable") is False:
+        return {"status": "gone"}
+    if isinstance(facts, dict) and facts.get("is_product_page") is False:
+        return {"status": "gone", "title": facts.get("title")}
+    return {"status": "ok", "title": (facts or {}).get("title") if isinstance(facts, dict) else None,
+            "in_stock": (facts or {}).get("in_stock") if isinstance(facts, dict) else None}
 
 
 # ── Thumbnails ───────────────────────────────────────────────────────────────

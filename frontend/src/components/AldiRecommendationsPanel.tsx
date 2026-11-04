@@ -47,6 +47,7 @@ interface Rec {
   verification_status: string | null;
   thumbnail_url: string | null;
   feedback: Feedback[];
+  link_status?: string | null;
 }
 // Since 2026-11-04 near misses are rows with an id and feedback; older runs
 // still serve the plain JSON list (no id, so no feedback controls).
@@ -59,6 +60,7 @@ interface NearMiss {
   note?: string;
   thumbnail_url?: string | null;
   feedback?: Feedback[];
+  link_status?: string | null;
 }
 interface Run {
   id: number;
@@ -77,10 +79,18 @@ interface Run {
   stats: Record<string, number>;
   recommendations: Rec[];
 }
+interface Prefs {
+  memo: string;
+  price_min: number;
+  price_max: number;
+  learned_rules: string;
+  distilled_at: string | null;
+  distilled_count: number;
+}
 interface TeamBlock {
   label: string;
   families: string[];
-  preferences: { memo: string; price_min: number; price_max: number };
+  preferences: Prefs;
   runs: Run[];
   latest: Run | null;
 }
@@ -250,6 +260,9 @@ function RecCard({
           </a>
           <div className="text-sm font-bold text-stone-800 mt-1">
             {rec.retailer ?? new URL(rec.url).hostname}
+            {rec.link_status === "gone" && (
+              <span className="ml-2 text-xs font-medium text-rose-700">link no longer works</span>
+            )}
           </div>
         </div>
 
@@ -297,6 +310,7 @@ function NearMissRow({
           <span className="font-semibold text-stone-900">{miss.product_name}</span>
         )}
         {miss.retailer && <span className="ml-2 font-bold text-stone-800">{miss.retailer}</span>}
+        {miss.link_status === "gone" && <span className="ml-2 text-xs font-medium text-rose-700">link no longer works</span>}
       </div>
       <div className="text-xs">
         <span className="text-rose-700 font-medium">Failed: {miss.fails}</span>
@@ -313,14 +327,15 @@ function NearMissRow({
 // ── Team reel ─────────────────────────────────────────────────────────────────
 
 function TeamReel({
-  teamKey, block, uploads, onStart, onFeedback, onSavePrefs, onShowEvidence,
+  teamKey, block, uploads, onStart, onFeedback, onSavePrefs, onDistill, onShowEvidence,
 }: {
   teamKey: string;
   block: TeamBlock;
   uploads: RecUpload[];
   onStart: (team: string) => Promise<void>;
   onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<void>;
-  onSavePrefs: (team: string, prefs: { memo: string; price_min: number; price_max: number }) => Promise<void>;
+  onSavePrefs: (team: string, prefs: Prefs) => Promise<void>;
+  onDistill: (team: string) => Promise<void>;
   onShowEvidence: (ev: Evidence) => void;
 }) {
   const runs = block.runs;
@@ -393,6 +408,25 @@ function TeamReel({
             <textarea value={prefs.memo} onChange={(e) => setPrefs({ ...prefs, memo: e.target.value })} rows={3}
                       placeholder="e.g. Prefer products with a clear functional story; avoid purely decorative pieces."
                       className="mt-1 w-full text-sm border border-stone-300 rounded-md px-2 py-1.5 bg-white" />
+          </div>
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="text-sm text-stone-600">
+                Learned from feedback
+                <span className="ml-2 text-xs text-stone-400">
+                  {prefs.distilled_at
+                    ? `updated ${new Date(prefs.distilled_at + "Z").toLocaleString()} from ${prefs.distilled_count} judgment${prefs.distilled_count === 1 ? "" : "s"}`
+                    : "nothing distilled yet — it updates itself after a few Good / Bad marks"}
+                </span>
+              </label>
+              <button type="button" onClick={() => onDistill(teamKey)}
+                      className="text-xs px-2.5 py-1 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100">
+                Update now
+              </button>
+            </div>
+            <textarea value={prefs.learned_rules} onChange={(e) => setPrefs({ ...prefs, learned_rules: e.target.value })} rows={5}
+                      placeholder="Standing rules the recommender has distilled from this team's Good / Bad marks appear here. You can edit them."
+                      className="mt-1 w-full text-sm border border-stone-300 rounded-md px-2 py-1.5 bg-white font-mono" />
           </div>
           <div className="flex justify-end">
             <button type="button" onClick={() => onSavePrefs(teamKey, prefs)}
@@ -544,7 +578,18 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
     await load();
   }, [load]);
 
-  const onSavePrefs = useCallback(async (team: string, prefs: { memo: string; price_min: number; price_max: number }) => {
+  const onDistill = useCallback(async (team: string) => {
+    const res = await fetch(`${API_BASE}/api/aldi/teams/${team}/distill`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || `Could not queue (${res.status})`);
+      return;
+    }
+    alert("Queued. The rules rewrite themselves within a minute — close and reopen Team settings to see them.");
+    setTimeout(load, 45000);
+  }, [load]);
+
+  const onSavePrefs = useCallback(async (team: string, prefs: Prefs) => {
     const res = await fetch(`${API_BASE}/api/aldi/teams/${team}/preferences`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(prefs),
     });
@@ -595,6 +640,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
             onStart={onStart}
             onFeedback={onFeedback}
             onSavePrefs={onSavePrefs}
+            onDistill={onDistill}
             onShowEvidence={setEvidence}
           />
         )

@@ -391,6 +391,17 @@ async def init_db():
              _col("aldi_recommendations", "kind")),
             ("ALTER TABLE aldi_recommendations ADD COLUMN IF NOT EXISTS fails TEXT",
              _col("aldi_recommendations", "fails")),
+            # Phase 5 (2026-11-04): distilled team rules + link re-check.
+            ("ALTER TABLE aldi_team_preferences ADD COLUMN IF NOT EXISTS learned_rules TEXT DEFAULT ''",
+             _col("aldi_team_preferences", "learned_rules")),
+            ("ALTER TABLE aldi_team_preferences ADD COLUMN IF NOT EXISTS distilled_at TIMESTAMP",
+             _col("aldi_team_preferences", "distilled_at")),
+            ("ALTER TABLE aldi_team_preferences ADD COLUMN IF NOT EXISTS distilled_count INTEGER DEFAULT 0",
+             _col("aldi_team_preferences", "distilled_count")),
+            ("ALTER TABLE aldi_recommendations ADD COLUMN IF NOT EXISTS link_status VARCHAR(12)",
+             _col("aldi_recommendations", "link_status")),
+            ("ALTER TABLE aldi_recommendations ADD COLUMN IF NOT EXISTS link_checked_at TIMESTAMP",
+             _col("aldi_recommendations", "link_checked_at")),
         ]
         for item in migrations:
             if isinstance(item, tuple):

@@ -48,6 +48,17 @@ app.conf.update(
             "task": "tasks.aldi_tasks.finalise_stale_aldi_sessions",
             "schedule": crontab(minute=23),
         },
+        # Phase 5 (2026-11-04): daily backstop that distils any new ALDI
+        # recommendation feedback into each team's learned rules, and a
+        # weekly re-check of pick links (Monday 03:05 UTC).
+        "distill-aldi-feedback": {
+            "task": "tasks.aldi_recommend_tasks.distill_all_teams",
+            "schedule": crontab(minute=10, hour=2),
+        },
+        "recheck-aldi-links": {
+            "task": "tasks.aldi_recommend_tasks.recheck_aldi_links",
+            "schedule": crontab(minute=5, hour=3, day_of_week=1),
+        },
     },
     worker_prefetch_multiplier=1,
     task_acks_late=True,

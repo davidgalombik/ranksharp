@@ -45,7 +45,8 @@ def load_context(db, run: AldiRecommendationRun) -> rec.RunContext:
     ]
     prefs_row = db.get(AldiTeamPreference, run.team)
     prefs = {"memo": prefs_row.memo if prefs_row else "", "price_min": float(prefs_row.price_min if prefs_row else 15.0),
-             "price_max": float(prefs_row.price_max if prefs_row else 60.0)}
+             "price_max": float(prefs_row.price_max if prefs_row else 60.0),
+             "learned_rules": (prefs_row.learned_rules if prefs_row else "") or ""}
     retailers = [
         {"name": r.name, "domain": r.domain, "tier": r.tier, "priority": r.priority, "active": r.active}
         for r in db.execute(sa_select(AldiPreferredRetailer)).scalars().all()
@@ -82,9 +83,18 @@ def load_context(db, run: AldiRecommendationRun) -> rec.RunContext:
                                                    AldiRecommendationRun.id != run.id)
         ).scalars().all() for q in (r.search_queries or []) if isinstance(q, dict) and q.get("query")
     ]
+    # Phase 5 rotation: which retailers earlier queries for this report targeted.
+    searched: dict[str, int] = {}
+    if previous_queries:
+        import re as _re
+        for r in retailers:
+            pat = _re.compile(r"\b" + _re.escape(r["name"]) + r"\b", _re.I)
+            n = sum(1 for q in previous_queries if pat.search(q))
+            if n:
+                searched[r["name"]] = n
     return rec.RunContext(run_id=run.id, session_id=run.session_id, team=run.team, digest=digest, prefs=prefs,
                           retailers=retailers, shown=shown, feedback=feedback, previous_queries=previous_queries,
-                          approved=approved, rejected=rejected)
+                          approved=approved, rejected=rejected, searched_retailers=searched)
 
 
 def _upsert_candidates(db, run: AldiRecommendationRun, found: list[dict]) -> None:
@@ -312,5 +322,107 @@ def recommend_aldi_products(self, run_id: int) -> dict:
             db.commit()
             return {"status": "failed", "run_id": run_id}
         return {"status": "done", "run_id": run_id}
+    finally:
+        db.close()
+
+
+# ── Phase 5: distillation ────────────────────────────────────────────────────
+
+def feedback_items_for_team(db, team: str) -> list[dict]:
+    """Every Good / Bad this team has ever given, oldest first, with the
+    product facts the distiller needs."""
+    rows = db.execute(
+        sa_select(AldiRecommendationFeedback, AldiRecommendation)
+        .join(AldiRecommendation, AldiRecommendation.id == AldiRecommendationFeedback.recommendation_id)
+        .where(AldiRecommendation.team == team)
+        .order_by(AldiRecommendationFeedback.created_at, AldiRecommendationFeedback.id)
+    ).all()
+    return [{
+        "verdict": fb.verdict, "note": fb.note, "created_at": fb.created_at.isoformat() if fb.created_at else None,
+        "product_name": r.product_name, "retailer": r.retailer, "price_usd": r.price_usd,
+        "material_family": r.material_family, "kind": r.kind or "pick", "fails": r.fails, "theme_name": r.theme_name,
+    } for fb, r in rows]
+
+
+@app.task(bind=True, max_retries=0)
+def distill_team_feedback(self, team: str, force: bool = False) -> dict:
+    """Rewrite a team's learned_rules from its whole feedback log. Runs when
+    enough new feedback has arrived (settings.aldi_distill_min_new), from
+    the daily backstop, or on demand from Team settings."""
+    if team not in rec.TEAMS:
+        return {"status": "unknown_team", "team": team}
+    db = _get_session()
+    try:
+        prefs = db.get(AldiTeamPreference, team)
+        if prefs is None:
+            prefs = AldiTeamPreference(team=team, memo="", price_min=15.0, price_max=60.0)
+            db.add(prefs)
+            db.commit()
+        items = feedback_items_for_team(db, team)
+        if not items:
+            return {"status": "no_feedback", "team": team}
+        if not force and len(items) - (prefs.distilled_count or 0) < 1:
+            return {"status": "nothing_new", "team": team, "count": len(items)}
+        result = asyncio.run(rec.distill_rules(team, items, prefs.learned_rules or "", prefs.memo or ""))
+        if result is None:
+            return {"status": "failed", "team": team}
+        prefs.learned_rules = "\n".join(f"- {r}" for r in result["rules"])
+        prefs.distilled_at = datetime.utcnow()
+        prefs.distilled_count = len(items)
+        db.commit()
+        log.info("aldi_distilled", team=team, items=len(items), rules=len(result["rules"]), summary=result["summary"])
+        return {"status": "done", "team": team, "items": len(items), "rules": len(result["rules"]), "summary": result["summary"]}
+    finally:
+        db.close()
+
+
+@app.task
+def distill_all_teams() -> dict:
+    """Daily backstop: distil any team with new feedback since its last run."""
+    out = {}
+    for team in rec.TEAMS:
+        out[team] = distill_team_feedback.delay(team).id   # bound task: queue it, never call it directly
+    return out
+
+
+# ── Phase 5: link re-check ───────────────────────────────────────────────────
+
+@app.task
+def recheck_aldi_links() -> dict:
+    """Weekly: re-open the links of recent picks (newest first, up to
+    settings.aldi_linkcheck_batch) and mark the ones that have gone, so the
+    card can warn the buyer before they click."""
+    from datetime import timedelta
+    db = _get_session()
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=settings.aldi_linkcheck_days)
+        since = datetime.utcnow() - timedelta(days=90)
+        rows = db.execute(
+            sa_select(AldiRecommendation)
+            .where(AldiRecommendation.kind == "pick", AldiRecommendation.created_at >= since,
+                   (AldiRecommendation.link_checked_at.is_(None)) | (AldiRecommendation.link_checked_at < cutoff))
+            .order_by(AldiRecommendation.created_at.desc())
+            .limit(settings.aldi_linkcheck_batch)
+        ).scalars().all()
+        if not rows:
+            return {"checked": 0}
+
+        async def run_all():
+            sem = asyncio.Semaphore(settings.aldi_recommend_concurrency)
+            async def one(r):
+                async with sem:
+                    return r.id, await rec.check_link(r.url, ref_id=r.id)
+            return await asyncio.gather(*(one(r) for r in rows))
+
+        results = dict(asyncio.run(run_all()))
+        counts: dict[str, int] = {}
+        for r in rows:
+            res = results.get(r.id) or {"status": "blocked"}
+            r.link_status = res["status"]
+            r.link_checked_at = datetime.utcnow()
+            counts[res["status"]] = counts.get(res["status"], 0) + 1
+        db.commit()
+        log.info("aldi_links_rechecked", checked=len(rows), **counts)
+        return {"checked": len(rows), **counts}
     finally:
         db.close()

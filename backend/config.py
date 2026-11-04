@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # A run re-plans around what failed and searches again while it has
     # fewer than five picks, up to this many rounds (each adds ~$0.8).
     aldi_recommend_rounds: int = 2
+    # Phase 5 (2026-11-04): learning across reports and upkeep.
+    aldi_distill_model: str = "claude-sonnet-5-5"
+    aldi_distill_min_new: int = 5          # new feedback items before a team's rules are re-distilled
+    aldi_linkcheck_model: str = "claude-haiku-5-5"
+    aldi_linkcheck_days: int = 7           # re-verify a pick's link this often
+    aldi_linkcheck_batch: int = 40         # links per weekly run
     aldi_recommend_amazon_fallback: bool = False   # Amazon pages need the Apify fallback (Phase 5)
     aldi_recommend_prompt_version: str = "2026-11-01.1"
     # Legacy catalogue clustering on ALDI sessions (the old "Recommendations"

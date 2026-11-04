@@ -41,6 +41,7 @@ class PreferencesBody(BaseModel):
     memo: Optional[str] = None
     price_min: Optional[float] = None
     price_max: Optional[float] = None
+    learned_rules: Optional[str] = None   # the buyer may correct the distilled rules
 
 
 class RetailerBody(BaseModel):
@@ -62,6 +63,7 @@ def _team(team: str) -> str:
 def _rec_out(r: AldiRecommendation) -> dict:
     return {
         "id": r.id, "kind": r.kind or "pick", "fails": r.fails, "note": r.how_it_matches if (r.kind == "near_miss") else None,
+        "link_status": r.link_status, "link_checked_at": r.link_checked_at.isoformat() if r.link_checked_at else None,
         "position": r.position, "product_name": r.product_name, "retailer": r.retailer,
         "retailer_tier": r.retailer_tier, "url": r.url, "material_family": r.material_family,
         "theme_id": r.theme_id, "theme_name": r.theme_name, "evidence": r.evidence or [],
@@ -166,7 +168,7 @@ async def list_runs(session_id: int, db: AsyncSession = Depends(get_db)):
         team_runs = [r for r in runs if r.team == key]
         out[key] = {
             "label": cfg["label"], "families": cfg["families"],
-            "preferences": {"memo": prefs.memo, "price_min": prefs.price_min, "price_max": prefs.price_max},
+            "preferences": _prefs_out(prefs),
             "runs": [_run_out(r) for r in team_runs],
             "latest": _run_out(team_runs[0]) if team_runs else None,
         }
@@ -213,7 +215,36 @@ async def add_feedback(rec_id: int, body: FeedbackBody, db: AsyncSession = Depen
     db.add(fb)
     await db.commit()
     await db.refresh(r)
+    await _maybe_distill(db, r.team)
     return _rec_out(r)
+
+
+async def _feedback_count(db: AsyncSession, team: str) -> int:
+    return int((await db.execute(
+        select(func.count(AldiRecommendationFeedback.id))
+        .join(AldiRecommendation, AldiRecommendation.id == AldiRecommendationFeedback.recommendation_id)
+        .where(AldiRecommendation.team == team)
+    )).scalar_one())
+
+
+async def _maybe_distill(db: AsyncSession, team: str) -> None:
+    """Queue a re-distillation once enough new feedback has arrived (Phase 5)."""
+    from config import settings
+    try:
+        p = await _prefs(db, team)
+        count = await _feedback_count(db, team)
+        if count - (p.distilled_count or 0) >= settings.aldi_distill_min_new:
+            from tasks.aldi_recommend_tasks import distill_team_feedback
+            distill_team_feedback.delay(team)
+    except Exception:  # noqa: BLE001 — never fail a feedback save over this
+        pass
+
+
+def _prefs_out(p: AldiTeamPreference) -> dict:
+    return {"memo": p.memo, "price_min": p.price_min, "price_max": p.price_max,
+            "learned_rules": p.learned_rules or "",
+            "distilled_at": p.distilled_at.isoformat() if p.distilled_at else None,
+            "distilled_count": p.distilled_count or 0}
 
 
 @router.delete("/recommendation-feedback/{feedback_id}")
@@ -232,10 +263,26 @@ async def delete_feedback(feedback_id: int, db: AsyncSession = Depends(get_db)):
 async def get_preferences(team: str, db: AsyncSession = Depends(get_db)):
     t = _team(team)
     p = await _prefs(db, t)
+    count = await _feedback_count(db, t)
     await db.commit()
     return {"team": t, "label": TEAMS[t]["label"], "families": TEAMS[t]["families"],
-            "memo": p.memo, "price_min": p.price_min, "price_max": p.price_max,
+            **_prefs_out(p), "feedback_count": count,
             "updated_at": p.updated_at.isoformat() if p.updated_at else None}
+
+
+@router.post("/teams/{team}/distill", status_code=202)
+async def distill_now(team: str, db: AsyncSession = Depends(get_db)):
+    """Queue a re-distillation of the team's feedback into its learned rules."""
+    t = _team(team)
+    count = await _feedback_count(db, t)
+    if count == 0:
+        raise HTTPException(status_code=409, detail="No feedback yet for this team")
+    from tasks.aldi_recommend_tasks import distill_team_feedback
+    try:
+        distill_team_feedback.delay(t, True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Worker queue unavailable — try again in a minute")
+    return {"queued": True, "team": t, "feedback_count": count}
 
 
 @router.put("/teams/{team}/preferences")
@@ -244,6 +291,8 @@ async def put_preferences(team: str, body: PreferencesBody, db: AsyncSession = D
     p = await _prefs(db, t)
     if body.memo is not None:
         p.memo = body.memo.strip()[:4000]
+    if body.learned_rules is not None:
+        p.learned_rules = body.learned_rules.strip()[:6000]
     if body.price_min is not None:
         p.price_min = max(0.0, float(body.price_min))
     if body.price_max is not None:
