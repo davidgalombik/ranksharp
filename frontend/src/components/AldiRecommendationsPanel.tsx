@@ -527,7 +527,7 @@ function TeamReel({
           ) : visiblePicks.length === 0 ? (
             <p className="text-sm text-stone-500 bg-white border border-stone-200 rounded-xl p-4">
               {hiddenPicks.length === 1 ? "The product in this set was marked Bad and is hidden." : `All ${hiddenPicks.length} products in this set were marked Bad and are hidden.`}{" "}
-              <button type="button" onClick={() => setShowHidden(true)} className="font-semibold text-blue-700 hover:underline">Show hidden</button>
+              <button type="button" onClick={() => setShowHidden((v) => !v)} className="font-semibold text-blue-700 hover:underline">{showHidden ? "Hide hidden" : "Show hidden"}</button>
               {" "}· Try Again for a fresh set.
             </p>
           ) : (
@@ -544,7 +544,7 @@ function TeamReel({
             <div className="space-y-2">
               <button type="button" onClick={() => setShowHidden((v) => !v)}
                       className="text-xs font-medium text-stone-600 hover:text-stone-900">
-                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{hiddenPicks.length ? ` (${hiddenPicks.length} product${hiddenPicks.length === 1 ? "" : "s"}${hiddenMisses.length ? `, ${hiddenMisses.length} near miss${hiddenMisses.length === 1 ? "" : "es"}` : ""})` : ""}{showHidden ? "" : " · show"}
+                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{hiddenPicks.length ? ` (${hiddenPicks.length} product${hiddenPicks.length === 1 ? "" : "s"}${hiddenMisses.length ? `, ${hiddenMisses.length} near miss${hiddenMisses.length === 1 ? "" : "es"}` : ""})` : ""}{showHidden ? " · hide" : " · show"}
               </button>
               {showHidden && (
                 <ul className="space-y-2">
@@ -560,6 +560,9 @@ function TeamReel({
                       <UndoLine feedback={m.feedback ?? []} onUndo={onUndoFeedback} />
                     </li>
                   ))}
+                  <li>
+                    <button type="button" onClick={() => setShowHidden(false)} className="text-xs font-semibold text-blue-700 hover:underline">▴ Hide these again</button>
+                  </li>
                 </ul>
               )}
             </div>
