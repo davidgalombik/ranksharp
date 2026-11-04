@@ -210,8 +210,13 @@ async def add_feedback(rec_id: int, body: FeedbackBody, db: AsyncSession = Depen
     )).scalar_one_or_none()
     if not r:
         raise HTTPException(status_code=404, detail="Recommendation not found")
-    fb = AldiRecommendationFeedback(recommendation_id=rec_id, verdict=verdict,
-                                    note=(body.note or "").strip()[:1000] or None)
+    fb = AldiRecommendationFeedback(
+        recommendation_id=rec_id, verdict=verdict, note=(body.note or "").strip()[:1000] or None,
+        # Denormalised so the judgment outlives the report it came from.
+        team=r.team, session_id=r.session_id, product_name=r.product_name, retailer=r.retailer, url=r.url,
+        price_usd=r.price_usd, material_family=r.material_family, kind=r.kind or "pick", fails=r.fails,
+        theme_name=r.theme_name,
+    )
     db.add(fb)
     await db.commit()
     await db.refresh(r)
@@ -221,9 +226,7 @@ async def add_feedback(rec_id: int, body: FeedbackBody, db: AsyncSession = Depen
 
 async def _feedback_count(db: AsyncSession, team: str) -> int:
     return int((await db.execute(
-        select(func.count(AldiRecommendationFeedback.id))
-        .join(AldiRecommendation, AldiRecommendation.id == AldiRecommendationFeedback.recommendation_id)
-        .where(AldiRecommendation.team == team)
+        select(func.count(AldiRecommendationFeedback.id)).where(AldiRecommendationFeedback.team == team)
     )).scalar_one())
 
 

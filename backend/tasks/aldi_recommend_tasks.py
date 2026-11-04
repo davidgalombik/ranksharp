@@ -331,17 +331,18 @@ def recommend_aldi_products(self, run_id: int) -> dict:
 def feedback_items_for_team(db, team: str) -> list[dict]:
     """Every Good / Bad this team has ever given, oldest first, with the
     product facts the distiller needs."""
+    # Read from the feedback rows alone — they carry the product details and
+    # survive the deletion of the report, run or recommendation (2026-11-04).
     rows = db.execute(
-        sa_select(AldiRecommendationFeedback, AldiRecommendation)
-        .join(AldiRecommendation, AldiRecommendation.id == AldiRecommendationFeedback.recommendation_id)
-        .where(AldiRecommendation.team == team)
+        sa_select(AldiRecommendationFeedback)
+        .where(AldiRecommendationFeedback.team == team)
         .order_by(AldiRecommendationFeedback.created_at, AldiRecommendationFeedback.id)
-    ).all()
+    ).scalars().all()
     return [{
         "verdict": fb.verdict, "note": fb.note, "created_at": fb.created_at.isoformat() if fb.created_at else None,
-        "product_name": r.product_name, "retailer": r.retailer, "price_usd": r.price_usd,
-        "material_family": r.material_family, "kind": r.kind or "pick", "fails": r.fails, "theme_name": r.theme_name,
-    } for fb, r in rows]
+        "product_name": fb.product_name, "retailer": fb.retailer, "price_usd": fb.price_usd,
+        "material_family": fb.material_family, "kind": fb.kind or "pick", "fails": fb.fails, "theme_name": fb.theme_name,
+    } for fb in rows]
 
 
 @app.task(bind=True, max_retries=0)

@@ -523,15 +523,30 @@ class AldiRecommendation(Base):
 
 
 class AldiRecommendationFeedback(Base):
+    """One Good / Bad from a buyer. Durable (2026-11-04): it carries the
+    product details the distiller needs, and deleting the report, run or
+    recommendation it came from only nulls the references — the judgment
+    itself is never lost."""
     __tablename__ = "aldi_recommendation_feedback"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    recommendation_id: Mapped[int] = mapped_column(ForeignKey("aldi_recommendations.id", ondelete="CASCADE"), nullable=False)
+    recommendation_id: Mapped[Optional[int]] = mapped_column(ForeignKey("aldi_recommendations.id", ondelete="SET NULL"), nullable=True)
     verdict: Mapped[str] = mapped_column(String(8), nullable=False)   # good | bad
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Denormalised at insert so the row stands on its own.
+    team: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    retailer: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    price_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    material_family: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    kind: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)      # pick | near_miss
+    fails: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    theme_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
 
-    recommendation: Mapped["AldiRecommendation"] = relationship(back_populates="feedback")
+    recommendation: Mapped[Optional["AldiRecommendation"]] = relationship(back_populates="feedback")
 
     __table_args__ = (
         Index("ix_aldi_rec_feedback_rec", "recommendation_id"),

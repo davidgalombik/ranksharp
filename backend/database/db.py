@@ -402,6 +402,43 @@ async def init_db():
              _col("aldi_recommendations", "link_status")),
             ("ALTER TABLE aldi_recommendations ADD COLUMN IF NOT EXISTS link_checked_at TIMESTAMP",
              _col("aldi_recommendations", "link_checked_at")),
+            # Durable feedback (2026-11-04): survives deleting the report / run /
+            # recommendation it came from. Denormalised columns + FK SET NULL.
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS team VARCHAR(20)",
+             _col("aldi_recommendation_feedback", "team")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS session_id INTEGER",
+             _col("aldi_recommendation_feedback", "session_id")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS product_name VARCHAR(300)",
+             _col("aldi_recommendation_feedback", "product_name")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS retailer VARCHAR(120)",
+             _col("aldi_recommendation_feedback", "retailer")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS url TEXT",
+             _col("aldi_recommendation_feedback", "url")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS price_usd FLOAT",
+             _col("aldi_recommendation_feedback", "price_usd")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS material_family VARCHAR(20)",
+             _col("aldi_recommendation_feedback", "material_family")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS kind VARCHAR(12)",
+             _col("aldi_recommendation_feedback", "kind")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS fails TEXT",
+             _col("aldi_recommendation_feedback", "fails")),
+            ("ALTER TABLE aldi_recommendation_feedback ADD COLUMN IF NOT EXISTS theme_name VARCHAR(120)",
+             _col("aldi_recommendation_feedback", "theme_name")),
+            ("ALTER TABLE aldi_recommendation_feedback ALTER COLUMN recommendation_id DROP NOT NULL",
+             "SELECT 1 FROM information_schema.columns WHERE table_name='aldi_recommendation_feedback' "
+             "AND column_name='recommendation_id' AND is_nullable='YES'"),
+            ("ALTER TABLE aldi_recommendation_feedback DROP CONSTRAINT IF EXISTS aldi_recommendation_feedback_recommendation_id_fkey, "
+             "ADD CONSTRAINT aldi_recommendation_feedback_recommendation_id_fkey FOREIGN KEY (recommendation_id) "
+             "REFERENCES aldi_recommendations(id) ON DELETE SET NULL",
+             "SELECT 1 FROM information_schema.referential_constraints WHERE "
+             "constraint_name='aldi_recommendation_feedback_recommendation_id_fkey' AND delete_rule='SET NULL'"),
+            # Fill the denormalised columns for feedback saved before this change.
+            ("UPDATE aldi_recommendation_feedback f SET team=r.team, session_id=r.session_id, product_name=r.product_name, "
+             "retailer=r.retailer, url=r.url, price_usd=r.price_usd, material_family=r.material_family, "
+             "kind=COALESCE(r.kind, 'pick'), fails=r.fails, theme_name=r.theme_name "
+             "FROM aldi_recommendations r WHERE r.id=f.recommendation_id AND f.team IS NULL",
+             "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM aldi_recommendation_feedback f JOIN aldi_recommendations r "
+             "ON r.id=f.recommendation_id WHERE f.team IS NULL)"),
         ]
         for item in migrations:
             if isinstance(item, tuple):
