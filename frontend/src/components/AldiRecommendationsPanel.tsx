@@ -526,7 +526,9 @@ function TeamReel({
             </p>
           ) : visiblePicks.length === 0 ? (
             <p className="text-sm text-stone-500 bg-white border border-stone-200 rounded-xl p-4">
-              Every product in this set is hidden. Try Again for a fresh set.
+              {hiddenPicks.length === 1 ? "The product in this set was marked Bad and is hidden." : `All ${hiddenPicks.length} products in this set were marked Bad and are hidden.`}{" "}
+              <button type="button" onClick={() => setShowHidden(true)} className="font-semibold text-blue-700 hover:underline">Show hidden</button>
+              {" "}· Try Again for a fresh set.
             </p>
           ) : (
             <div className="space-y-3">
@@ -538,27 +540,11 @@ function TeamReel({
           {active.recommendations.length < 5 && active.recommendations.length > 0 && (
             <p className="text-xs text-stone-500">Only {active.recommendations.length} of 5 met every criterion; the bar was not lowered.</p>
           )}
-          {visibleMisses.length > 0 && (
-            <div className="space-y-2">
-              <div className="text-sm font-semibold text-stone-800">
-                {visibleMisses.length} near miss{visibleMisses.length === 1 ? "" : "es"}
-                <span className="ml-2 font-normal text-stone-500">
-                  Close calls. Mark them too — a Good tells the next set you&apos;d take it anyway.
-                </span>
-              </div>
-              <ul className="space-y-2">
-                {visibleMisses.map((m, i) => (
-                  <NearMissRow key={m.id ?? i} miss={m} onFeedback={handleFeedback} />
-                ))}
-              </ul>
-            </div>
-          )}
-
           {hiddenCount > 0 && (
             <div className="space-y-2">
               <button type="button" onClick={() => setShowHidden((v) => !v)}
                       className="text-xs font-medium text-stone-600 hover:text-stone-900">
-                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{showHidden ? "" : " · show"}
+                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{hiddenPicks.length ? ` (${hiddenPicks.length} product${hiddenPicks.length === 1 ? "" : "s"}${hiddenMisses.length ? `, ${hiddenMisses.length} near miss${hiddenMisses.length === 1 ? "" : "es"}` : ""})` : ""}{showHidden ? "" : " · show"}
               </button>
               {showHidden && (
                 <ul className="space-y-2">
@@ -578,6 +564,22 @@ function TeamReel({
               )}
             </div>
           )}
+          {visibleMisses.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-sm font-semibold text-stone-800">
+                {visibleMisses.length} near miss{visibleMisses.length === 1 ? "" : "es"}
+                <span className="ml-2 font-normal text-stone-500">
+                  Close calls. Mark them too — a Good tells the next set you&apos;d take it anyway.
+                </span>
+              </div>
+              <ul className="space-y-2">
+                {visibleMisses.map((m, i) => (
+                  <NearMissRow key={m.id ?? i} miss={m} onFeedback={handleFeedback} />
+                ))}
+              </ul>
+            </div>
+          )}
+
         </>
         );
       })()}
