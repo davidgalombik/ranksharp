@@ -5,8 +5,9 @@
  *
  * Two reels, one per buying team (Sapana: ceramic / plastic / glass / wood;
  * Adrah: fabric / metal). Each run returns five product links from the
- * web, each tied to the screenshot element it echoes. The card shows only
- * the link and how it relates to the report (decision 2026-11-01); the
+ * web, each tied to the screenshot element it echoes. The card shows the
+ * link, a prominent retailer name and the "See in report" evidence buttons
+ * (trimmed 2026-11-04: no theme chip, verified badge or match text); the
  * buyer marks each pick Good or Bad with a note, and Try Again feeds that
  * back into the next five. Runs happen in the worker; this panel polls
  * while one is in flight.
@@ -189,27 +190,15 @@ function RecCard({
         )}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <a href={rec.url} target="_blank" rel="noopener noreferrer"
-               className="font-semibold text-stone-900 hover:underline decoration-stone-400 break-words">
-              {rec.position}. {rec.product_name}
-            </a>
-            <div className="text-xs text-stone-500 mt-0.5">
-              {rec.retailer ?? new URL(rec.url).hostname}
-              {rec.verification_status === "verified" && (
-                <span className="ml-2 inline-flex items-center gap-1 text-emerald-700">✓ page verified</span>
-              )}
-            </div>
+        <div className="min-w-0">
+          <a href={rec.url} target="_blank" rel="noopener noreferrer"
+             className="font-semibold text-stone-900 hover:underline decoration-stone-400 break-words">
+            {rec.position}. {rec.product_name}
+          </a>
+          <div className="text-sm font-bold text-stone-800 mt-1">
+            {rec.retailer ?? new URL(rec.url).hostname}
           </div>
-          {rec.theme_id && (
-            <span className="flex-shrink-0 text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800">
-              {rec.theme_id} · {rec.theme_name}
-            </span>
-          )}
         </div>
-
-        <p className="text-sm text-stone-700 mt-2">{rec.how_it_matches}</p>
 
         {rec.evidence.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mt-2">
