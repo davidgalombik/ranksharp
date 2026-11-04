@@ -6,6 +6,13 @@ import AldiRecommendationsPanel, { type RecElement } from "@/components/AldiReco
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// Legacy catalogue clustering ("N Recommendations" cards from the product
+// database, with its own Try Again). Hidden since 2026-11-04: the web
+// Product Recommendations panel is the output now, and the backend no
+// longer runs the clustering (settings.aldi_legacy_clusters_enabled).
+// Flip both to bring it back.
+const SHOW_LEGACY_CLUSTERS: boolean = false;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface InspiredProduct {
@@ -212,7 +219,7 @@ function SessionCard({
           <div className="mt-2">
             <StatusBadge status={session.status} />
           </div>
-          {session.status === "done" && (
+          {SHOW_LEGACY_CLUSTERS && session.status === "done" && (
             <p className="text-xs text-stone-500 mt-1">{session.idea_count} ideas generated</p>
           )}
           {session.status === "analysing" && session.upload_count > 1 && (
@@ -979,7 +986,7 @@ function SessionDetailView({
       />
     )}
 
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
+    <div className={clsx("grid grid-cols-1 gap-6 mt-4", SHOW_LEGACY_CLUSTERS && "lg:grid-cols-2")}>
       {/* Left: document tabs + per-doc analysis */}
       <div className="space-y-4">
         {/* Progress bar (shown while analysing) */}
@@ -988,7 +995,7 @@ function SessionDetailView({
             <div className="flex items-center justify-between text-xs">
               <span className="font-medium text-stone-700">
                 {isGenerating
-                  ? "Generating combined ideas…"
+                  ? "Building the trend digest…"
                   : `Analysing documents — ${analysed} of ${total} done`}
               </span>
               <span className="text-stone-400">{isGenerating ? "100%" : `${progressPct}%`}</span>
@@ -1085,7 +1092,8 @@ function SessionDetailView({
         )}
       </div>
 
-      {/* Right: combined ideas */}
+      {/* Right: combined ideas — legacy catalogue clustering, hidden 2026-11-04 */}
+      {SHOW_LEGACY_CLUSTERS && (
       <div>
         {/* Low-match warning banner — shown when the mood board didn't
             match many products in the catalogue, so buyers understand
@@ -1319,6 +1327,7 @@ function SessionDetailView({
           </>
         )}
       </div>
+      )}
     </div>
     </>
   );
@@ -1459,7 +1468,7 @@ export default function AldiPage() {
       <div>
         <h1 className="text-2xl font-bold text-stone-900">Aldi Trends</h1>
         <p className="text-sm text-stone-500 mt-1">
-          Upload one or more trend mood boards together to extract insights and generate combined Aldi product ideas
+          Upload one or more trend report screenshots together to extract the trends and get web product recommendations for each team
         </p>
       </div>
 

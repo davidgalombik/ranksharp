@@ -719,6 +719,17 @@ def generate_aldi_session_ideas(self, session_id: int) -> dict:
             # reuse it. Non-fatal.
             _maybe_build_digest(db_session, sess_obj, done_uploads)
 
+            if not settings.aldi_legacy_clusters_enabled:
+                # Legacy catalogue clustering is off (2026-11-04): the session
+                # is complete once the digest exists; the web recommender
+                # (tasks/aldi_recommend_tasks.py) is the output. Everything
+                # below is kept for the day the flag is switched back on.
+                sess_obj.status = AldiUploadStatus.DONE
+                sess_obj.updated_at = datetime.utcnow()
+                db_session.commit()
+                log.info("aldi_session_done_no_clusters", session_id=session_id)
+                return {"status": "done", "session_id": session_id, "ideas": 0}
+
             # Find similar products — fetch 50, sample 20 inside generate_ideas
             similar_products, similar_count = _find_similar_products_for_session(
                 db_session, sess_obj, limit=250,
@@ -823,6 +834,11 @@ def regenerate_aldi_session_ideas(self, session_id: int) -> dict:
         sess_obj = db_session.get(AldiSession, session_id)
         if not sess_obj:
             return {"status": "not_found", "session_id": session_id}
+        if not settings.aldi_legacy_clusters_enabled:
+            # Legacy clustering is off (2026-11-04); the route refuses too.
+            sess_obj.status = AldiUploadStatus.DONE
+            db_session.commit()
+            return {"status": "skipped", "session_id": session_id, "reason": "legacy clustering disabled"}
 
         # Collect all existing idea names and inspired_by IDs across ALL generations
         existing_ideas_rows = db_session.execute(

@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     aldi_recommend_rounds: int = 2
     aldi_recommend_amazon_fallback: bool = False   # Amazon pages need the Apify fallback (Phase 5)
     aldi_recommend_prompt_version: str = "2026-11-01.1"
+    # Legacy catalogue clustering on ALDI sessions (the old "Recommendations"
+    # cards: vector search over the catalogue + an Opus clustering call, and
+    # its own Try Again). Off since 2026-11-04 — hidden on the page and not
+    # worth the spend while the web recommender is the output. Flip to True
+    # (and SHOW_LEGACY_CLUSTERS in frontend/src/app/aldi/page.tsx) to restore.
+    aldi_legacy_clusters_enabled: bool = False
 
     # LLM cost ledger (2026-11-01) — USD per million tokens, keyed by model
     # id (a dated id like claude-opus-4-6-20260101 matches by prefix). Check

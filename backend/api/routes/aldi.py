@@ -718,6 +718,8 @@ async def regenerate_session_ideas(session_id: int, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="Session not found")
     if sess_obj.status not in (AldiUploadStatus.DONE, AldiUploadStatus.FAILED):
         raise HTTPException(status_code=409, detail="Session is still processing")
+    if not settings.aldi_legacy_clusters_enabled:
+        raise HTTPException(status_code=409, detail="Catalogue clustering is switched off — use Product Recommendations")
 
     # Mark session as generating again
     sess_obj.status = AldiUploadStatus.GENERATING
