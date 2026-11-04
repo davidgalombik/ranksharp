@@ -165,10 +165,11 @@ function UploadZone({ onSessionCreated }: { onSessionCreated: (s: AldiSession) =
       onDrop={onDrop}
       onClick={() => !uploading && inputRef.current?.click()}
       className={clsx(
-        "border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors",
+        "border-2 border-dashed rounded-xl px-4 py-3 cursor-pointer transition-colors flex items-center gap-3 w-full sm:w-80",
         dragging ? "border-amber-400 bg-amber-50" : "border-stone-300 hover:border-stone-400 bg-white",
         uploading && "pointer-events-none opacity-60",
       )}
+      title="Select several screenshots to analyse them together as one session"
     >
       <input
         ref={inputRef}
@@ -178,14 +179,16 @@ function UploadZone({ onSessionCreated }: { onSessionCreated: (s: AldiSession) =
         className="hidden"
         onChange={(e) => handleFiles(Array.from(e.target.files || []))}
       />
-      <div className="text-4xl mb-3">{uploading ? "⏳" : "📂"}</div>
-      <p className="font-medium text-stone-700">
-        {uploading ? "Uploading documents…" : "Drop trend documents here or click to browse"}
-      </p>
-      <p className="text-sm text-stone-400 mt-1">
-        Select multiple files to analyse them together as one session · PDF, JPEG or PNG · max 20 MB each
-      </p>
-      {error && <p className="mt-3 text-xs text-red-500">{error}</p>}
+      <div className="text-2xl flex-shrink-0">{uploading ? "⏳" : "📂"}</div>
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-stone-700">
+          {uploading ? "Uploading…" : "Upload trend report"}
+        </p>
+        <p className="text-xs text-stone-400 mt-0.5">
+          Drop files or click · PDF, JPEG, PNG · 20 MB each
+        </p>
+        {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+      </div>
     </div>
   );
 }
@@ -1468,22 +1471,24 @@ export default function AldiPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-stone-900">Aldi Trends</h1>
-        <p className="text-sm text-stone-500 mt-1">
-          Upload one or more trend report screenshots together to extract the trends and get web product recommendations for each team
-        </p>
-      </div>
-
-      {/* Upload zone — hidden while an existing session is still being batched up */}
-      {selectedDetail?.status === "uploading" ? (
-        <div className="bg-stone-100 rounded-xl p-4 text-center text-xs text-stone-500">
-          Add more documents to your current session below, or finish uploading to start a new one.
+      {/* Header: title left, compact upload zone top right (2026-11-04).
+          The zone is swapped for a note while a session is still being
+          batched up. */}
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-stone-900">Aldi Trends</h1>
+          <p className="text-sm text-stone-500 mt-1">
+            Upload one or more trend report screenshots together to extract the trends and get web product recommendations for each team
+          </p>
         </div>
-      ) : (
-        <UploadZone onSessionCreated={handleSessionCreated} />
-      )}
+        {selectedDetail?.status === "uploading" ? (
+          <div className="bg-stone-100 rounded-xl px-4 py-3 text-xs text-stone-500 w-full sm:w-80">
+            Add more documents to your current session below, or finish uploading to start a new one.
+          </div>
+        ) : (
+          <UploadZone onSessionCreated={handleSessionCreated} />
+        )}
+      </div>
 
       {/* Content */}
       {loading ? (
