@@ -124,6 +124,7 @@ TIER_LABEL = {
     "wholesale": "Wholesale decor brands", "kids": "Kids, baby and toy", "pet": "Pet",
     "lifestyle": "Lifestyle, travel, stationery and drinkware", "apparel": "Apparel, beauty and fitness",
     "appliance": "Appliance brands", "germany": "Germany",
+    "decor": "Decorative accessories brands and studios",
 }
 
 
@@ -196,6 +197,11 @@ PREFERRED_RETAILERS: list[dict] = [
     _r("BAUR", "germany", "baur.de", "low", "DE"), _r("car moebel", "germany", "car-moebel.de", "low", "DE"),
     _r("Segmüller", "germany", "segmueller.de", "low", "DE"), _r("Thalia", "germany", "thalia.de", "low", "DE"),
 ]
+
+# Decorative accessories retailers and brands from the buying team's
+# spreadsheet (2026-11-18), ~470 more on top of the list above.
+from analysis.aldi_retailers_decor import DECOR_RETAILERS  # noqa: E402
+PREFERRED_RETAILERS += DECOR_RETAILERS
 
 # Domains Claude's web fetch refuses outright (url_not_allowed, policy).
 FETCH_BLOCKED_DOMAINS = {"amazon.com"}
