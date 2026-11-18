@@ -18,6 +18,15 @@ app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_routes={
+        # Interactive ALDI Trends work (2026-11-18): report uploads and
+        # recommendation runs go to the otherwise idle "reports" queue so a
+        # buyer's click is not stuck behind a catalogue backlog on "aldi"
+        # (a 1,400-photo upload once took most of a day to drain). Every
+        # worker already consumes "reports", so no start-command change is
+        # needed, and a worker cycles across its queues, so these start at
+        # the next free slot. Exact names win over the globs below.
+        "tasks.aldi_tasks.analyse_aldi_upload": {"queue": "reports"},
+        "tasks.aldi_recommend_tasks.recommend_aldi_products": {"queue": "reports"},
         "tasks.scrape_tasks.*": {"queue": "scrape"},
         "tasks.analysis_tasks.*": {"queue": "analysis"},
         "tasks.aldi_tasks.*": {"queue": "aldi"},
