@@ -3,7 +3,7 @@ import uuid
 import pathlib
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,6 +106,7 @@ class AldiUploadSummary(BaseModel):
 
 class AldiSessionOut(BaseModel):
     id: int
+    name: Optional[str] = None
     status: str
     created_at: datetime
     upload_count: int = 0
@@ -362,6 +363,14 @@ async def _aldi_process_files(
     return upload_ids, upload_bytes, skipped
 
 
+def _clean_session_name(name: Optional[str]) -> Optional[str]:
+    """Trim a user-supplied session name; blank → None; cap at the column's 200 chars."""
+    if name is None:
+        return None
+    name = name.strip()
+    return name[:200] or None
+
+
 def _aldi_dispatch_analysis(upload_ids: list[int], upload_bytes: list[bytes]):
     import base64 as _b64
     from datetime import datetime as _dt, timedelta as _td
@@ -378,6 +387,7 @@ def _aldi_dispatch_analysis(upload_ids: list[int], upload_bytes: list[bytes]):
 @router.post("/sessions", response_model=AldiSessionOut)
 async def create_session(
     files: list[UploadFile] = File(...),
+    name: Optional[str] = Form(None),
     finalise: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
@@ -392,7 +402,7 @@ async def create_session(
         )
 
     initial_status = AldiUploadStatus.PENDING if finalise else AldiUploadStatus.UPLOADING
-    sess_obj = AldiSession(status=initial_status)
+    sess_obj = AldiSession(name=_clean_session_name(name), status=initial_status)
     db.add(sess_obj)
     await db.flush()
 
@@ -407,6 +417,7 @@ async def create_session(
 
     return AldiSessionOut(
         id=sess_obj.id,
+        name=sess_obj.name,
         status=sess_obj.status.value,
         created_at=sess_obj.created_at,
         upload_count=len(upload_ids),
@@ -525,6 +536,7 @@ async def list_sessions(db: AsyncSession = Depends(get_db)):
     return [
         AldiSessionOut(
             id=s.id,
+            name=s.name,
             status=s.status.value,
             created_at=s.created_at,
             upload_count=len(s.uploads),
@@ -559,6 +571,7 @@ async def get_session(session_id: int, db: AsyncSession = Depends(get_db)):
 
     return AldiSessionDetailOut(
         id=sess_obj.id,
+        name=sess_obj.name,
         status=sess_obj.status.value,
         created_at=sess_obj.created_at,
         upload_count=len(sess_obj.uploads),
@@ -812,6 +825,38 @@ async def delete_session_generation(
         "generation": generation,
         "remaining_generations": remaining,
     }
+
+
+class AldiSessionPatch(BaseModel):
+    name: Optional[str] = None
+
+
+@router.patch("/sessions/{session_id}", response_model=AldiSessionOut)
+async def rename_session(
+    session_id: int,
+    body: AldiSessionPatch,
+    db: AsyncSession = Depends(get_db),
+):
+    """Rename a session. An empty or blank name clears it."""
+    from database.models import AldiSession
+    result = await db.execute(
+        select(AldiSession)
+        .options(selectinload(AldiSession.uploads), selectinload(AldiSession.ideas))
+        .where(AldiSession.id == session_id)
+    )
+    sess_obj = result.scalar_one_or_none()
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sess_obj.name = _clean_session_name(body.name)
+    await db.commit()
+    return AldiSessionOut(
+        id=sess_obj.id,
+        name=sess_obj.name,
+        status=sess_obj.status.value,
+        created_at=sess_obj.created_at,
+        upload_count=len(sess_obj.uploads),
+        idea_count=len(sess_obj.ideas),
+    )
 
 
 @router.delete("/sessions/{session_id}")

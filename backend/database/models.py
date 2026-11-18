@@ -267,6 +267,9 @@ class AldiSession(Base):
     __tablename__ = "aldi_sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # User-chosen label shown in the sessions sidebar. NULL = unnamed; the
+    # frontend falls back to "N documents".
+    name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     status: Mapped[AldiUploadStatus] = mapped_column(
         SAEnum(AldiUploadStatus), default=AldiUploadStatus.PENDING
     )
