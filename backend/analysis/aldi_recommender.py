@@ -126,7 +126,6 @@ TIER_LABEL = {
     "appliance": "Appliance brands", "germany": "Germany",
 }
 
-MID_OR_PREMIUM = {"mid_market", "premium"}
 
 
 def _r(name: str, tier: str, domain: Optional[str] = None, priority: str = "normal", country: str = "US") -> dict:
@@ -220,7 +219,7 @@ CRITERIA = """Product criteria (all must be met)
 * Current: in stock and currently listed. Only products whose page was actually opened and verified can be chosen.
 * Price: US${price_min:.0f}–{price_max:.0f} retail. For non-US retailers apply the band to the USD equivalent.
 * No licensed characters or branded IP.
-Spread: use no more than 3 products from any one retailer; include at least 2 from mass/value retailers and at least 2 from mid-market or premium retailers when the candidates allow it."""
+Retailers: choose the best and most relevant products wherever they are sold. When two products are comparably strong, prefer the one from a preferred retailer (any tier other than "other"); a retailer outside the list is fine when its product is clearly the better fit. Use no more than 3 products from any one retailer. There is no quota by retailer tier."""
 
 PLAN_PROMPT = """{role}
 
@@ -231,14 +230,14 @@ The products must be storage or organisation items — canisters, jars, lidded c
 TREND DIGEST
 {digest_block}
 
-RETAILERS TO SPREAD ACROSS (search these by name, e.g. "Target stackable glass canister wood lid")
+PREFERRED RETAILERS (search these by name first, e.g. "Target stackable glass canister wood lid")
 {retailer_block}
 
 {avoid_block}{feedback_block}{hints_block}{rotation_block}RULES
 - Return exactly {n} queries as a JSON array: [{{"query": "...", "theme_id": "T1", "tier": "mass_value|marketplace|mid_market|premium|brand|open", "material": "..."}}]
 - Every theme gets at least one query; weight queries toward themes with product imagery.
 - Each query names a concrete product type + a material from the scope + a distinctive attribute from the theme (colour, finish, print, form), and is 4–12 words. Include "stackable", "nesting" or "collapsible" where natural.
-- About half the queries name a retailer (spread across the tiers, at least 3 mass/value and 3 mid-market/premium); the rest are open-web ("tier": "open").
+- Search the preferred retailers first, then the whole web: about two thirds of the queries name a retailer from the list — pick the retailers most likely to sell this product type in this look, whatever their tier; the rest are open-web ("tier": "open") to catch the best products sold anywhere. There is no quota by tier.
 - Do not target amazon.com{amazon_note}.
 - No two queries may be near-duplicates, and none may repeat a query listed under AVOID.
 Return ONLY the JSON array."""
@@ -260,7 +259,7 @@ TREND DIGEST (short)
 CANDIDATE PRODUCT PAGES found by search (not yet opened):
 {candidate_block}
 
-{feedback_block}Choose up to {k} candidates to open and verify. Maximise: {rank_focus}, and spread across retailers and tiers (aim for several mass/value AND several mid-market/premium). Skip obvious duplicates of the same product.
+{feedback_block}Choose up to {k} candidates to open and verify. Maximise: {rank_focus}. Pick the strongest and most relevant pages wherever they are sold; when two are comparable, prefer the one from a preferred retailer (tier other than "other"). Avoid opening more than 3 pages from one retailer. Skip obvious duplicates of the same product.
 Return ONLY a JSON array, best first: [{{"id": <candidate id>, "theme_id": "T1", "fit": <0.0-1.0>}}]"""
 
 VERIFY_PROMPT = """Open this product page with web_fetch (one fetch only): {url}
@@ -359,7 +358,7 @@ FRAGRANCE_CRITERIA = """Product criteria (all must be met)
 * Price: US${price_min:.0f}–{price_max:.0f} retail. For non-US retailers apply the band to the USD equivalent.
 * Personal fragrance (perfume, cologne, body mist, eau de toilette, eau de parfum) only from the preferred retailers listed for this team.
 * No licensed characters or entertainment franchises.
-Spread: use no more than 3 products from any one retailer; include at least one CANDLES and one FRAGRANCES product; include at least 2 from mass/value retailers and at least 2 from mid-market or premium retailers when the candidates allow it."""
+Retailers: choose the best and most relevant products wherever they are sold. When two products are comparably strong, prefer the one from a preferred retailer (any tier other than "other"); a retailer outside the list is fine when its product is clearly the better fit (personal fragrance excepted, see above). Use no more than 3 products from any one retailer, and include at least one CANDLES and one FRAGRANCES product. There is no quota by retailer tier."""
 
 FRAGRANCE_PLAN_PROMPT = """{role}
 
@@ -373,7 +372,7 @@ Translate each theme onto those products through: vessel colour, finish and form
 TREND DIGEST
 {digest_block}
 
-RETAILERS TO SPREAD ACROSS (search these by name, e.g. "Target ribbed glass jar candle fig cedar")
+PREFERRED RETAILERS (search these by name first, e.g. "Target ribbed glass jar candle fig cedar")
 {retailer_block}
 
 {avoid_block}{feedback_block}{hints_block}{rotation_block}RULES
@@ -381,7 +380,7 @@ RETAILERS TO SPREAD ACROSS (search these by name, e.g. "Target ribbed glass jar 
 - Every theme gets at least one query; weight queries toward themes with product imagery.
 - Roughly half the queries target CANDLES and half FRAGRANCES; within FRAGRANCES spread across home fragrance (diffusers, sprays, oils, incense) and personal fragrance.
 - Each query names a concrete in-scope product type + a distinctive attribute from the theme (scent notes, vessel colour, finish or form), and is 4–12 words.
-- About half the queries name a retailer (spread across the tiers, at least 3 mass/value and 3 mid-market/premium); the rest are open-web ("tier": "open"). Personal fragrance queries MUST name a retailer from the list.
+- Search the preferred retailers first, then the whole web: about two thirds of the queries name a retailer from the list — pick the retailers most likely to sell this product type in this look, whatever their tier; the rest are open-web ("tier": "open") to catch the best products sold anywhere. There is no quota by tier. Personal fragrance queries MUST name a retailer from the list.
 - Do not target amazon.com{amazon_note}.
 - No two queries may be near-duplicates, and none may repeat a query listed under AVOID.
 Return ONLY the JSON array."""
@@ -671,8 +670,8 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
         top = sorted(ctx.searched_retailers.items(), key=lambda kv: -kv[1])[:20]
         rotation_block = ("RETAILERS ALREADY SEARCHED for this report and team (query counts): "
                           + ", ".join(f"{name} ×{count}" for name, count in top)
-                          + ". For the retailer-named queries this time, prefer retailers NOT in this list while "
-                            "keeping the tier spread, so the pool widens instead of circling.\n\n")
+                          + ". For the retailer-named queries this time, prefer other relevant "
+                            "retailers NOT in this list, so the pool widens instead of circling.\n\n")
     prompt = ctx.text["plan"].format(
         role=ctx.text["role"], material_scope=ctx.material_scope, digest_block=ctx.digest_block(with_elements=False),
         retailer_block=ctx.retailer_block(), avoid_block=avoid, feedback_block=ctx.feedback_block(),
@@ -1046,14 +1045,9 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
 
 def spread_gap(ctx: RunContext, accepted: list[dict], n: int) -> str:
     """Describe what a repair round should add, or '' when nothing is needed."""
-    tiers = [a.get("tier") for a in accepted]
-    need = []
+    need = []   # no tier quotas since 2026-11-18: best and most relevant wins
     if len(accepted) < n:
         need.append(f"{n - len(accepted)} more qualifying product(s)")
-    if sum(1 for t in tiers if t == "mass_value") < 2 and len(accepted) >= n:
-        need.append("at least 2 from mass/value retailers")
-    if sum(1 for t in tiers if t in MID_OR_PREMIUM) < 2 and len(accepted) >= n:
-        need.append("at least 2 from mid-market or premium retailers")
     if ctx.kind == "fragrance" and len(accepted) >= n:
         cats = {str(a.get("material_family") or "").lower() for a in accepted}
         for cat, label in (("candles", "CANDLES"), ("fragrances", "FRAGRANCES")):
