@@ -424,7 +424,7 @@ class AldiRecommendationRun(Base):
     session_id: Mapped[int] = mapped_column(ForeignKey("aldi_sessions.id", ondelete="CASCADE"), nullable=False)
     team: Mapped[str] = mapped_column(String(20), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, default=1)
-    status: Mapped[str] = mapped_column(String(16), default="queued")   # queued | running | done | failed
+    status: Mapped[str] = mapped_column(String(16), default="queued")   # queued | running | done | failed | cancelled
     stage: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     model: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     prompt_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)

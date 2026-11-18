@@ -102,6 +102,52 @@ async def _prefs(db: AsyncSession, team: str) -> AldiTeamPreference:
 
 # ── Runs ─────────────────────────────────────────────────────────────────────
 
+CANCELLABLE = ("queued", "running")
+
+
+def _expire_if_stuck(run: AldiRecommendationRun, now: Optional[datetime] = None) -> bool:
+    """Cancel a run no worker picked up, or one that stopped responding, so
+    it no longer blocks Try Again (2026-11-18). True when it was changed;
+    the caller commits. A cancelled run is skipped if a worker gets to it
+    later (the task only starts queued runs)."""
+    from config import settings
+    now = now or datetime.utcnow()
+    if run.status == "queued" and run.created_at and \
+            (now - run.created_at).total_seconds() > settings.aldi_run_queue_timeout_min * 60:
+        reason = (f"No worker picked this run up within {settings.aldi_run_queue_timeout_min} minutes, so it was "
+                  "cancelled. The ALDI worker may be down.")
+    elif run.status == "running" and (run.started_at or run.created_at) and \
+            (now - (run.started_at or run.created_at)).total_seconds() > settings.aldi_run_stuck_timeout_min * 60:
+        reason = f"Stopped responding after {settings.aldi_run_stuck_timeout_min} minutes, so it was cancelled."
+    else:
+        return False
+    run.status = "cancelled"
+    run.stage = None
+    run.error = reason
+    run.finished_at = now
+    return True
+
+
+@router.post("/recommendation-runs/{run_id}/cancel")
+async def cancel_run(run_id: int, db: AsyncSession = Depends(get_db)):
+    """Cancel a queued or running run. A running pipeline notices at its next
+    stage and stops; anything it already spent stays in the cost ledger."""
+    run = (await db.execute(
+        select(AldiRecommendationRun)
+        .options(selectinload(AldiRecommendationRun.recommendations).selectinload(AldiRecommendation.feedback))
+        .where(AldiRecommendationRun.id == run_id)
+    )).scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status not in CANCELLABLE:
+        raise HTTPException(status_code=409, detail=f"Run is already {run.status}")
+    run.status = "cancelled"
+    run.stage = None
+    run.error = "Cancelled."
+    run.finished_at = datetime.utcnow()
+    await db.commit()
+    return _run_out(run)
+
 @router.post("/sessions/{session_id}/recommendations", status_code=202)
 async def start_run(session_id: int, body: StartRunBody, db: AsyncSession = Depends(get_db)):
     """Queue a recommendation run for one team. Builds the session's trend
@@ -120,6 +166,9 @@ async def start_run(session_id: int, body: StartRunBody, db: AsyncSession = Depe
             AldiRecommendationRun.session_id == session_id, AldiRecommendationRun.team == team,
             AldiRecommendationRun.status.in_(["queued", "running"]))
     )).scalars().first()
+    if in_flight and _expire_if_stuck(in_flight):
+        await db.commit()
+        in_flight = None
     if in_flight:
         raise HTTPException(status_code=409, detail=f"A run is already in progress for {TEAMS[team]['label']}")
 
@@ -162,6 +211,9 @@ async def list_runs(session_id: int, db: AsyncSession = Depends(get_db)):
         .where(AldiRecommendationRun.session_id == session_id)
         .order_by(desc(AldiRecommendationRun.generation))
     )).scalars().all()
+    expired = [r for r in runs if _expire_if_stuck(r)]
+    if expired:
+        await db.commit()
     out = {}
     for key, cfg in TEAMS.items():
         prefs = await _prefs(db, key)

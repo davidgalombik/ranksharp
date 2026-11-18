@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     aldi_linkcheck_batch: int = 40         # links per weekly run
     aldi_recommend_amazon_fallback: bool = False   # Amazon pages need the Apify fallback (Phase 5)
     aldi_recommend_prompt_version: str = "2026-11-01.1"
+    # Stuck runs (2026-11-18): a run no worker picks up within this many
+    # minutes, or one that has been running this long, is cancelled so Try
+    # Again is not blocked. Runs normally finish in 1–3 minutes.
+    aldi_run_queue_timeout_min: int = 10
+    aldi_run_stuck_timeout_min: int = 30
     # Legacy catalogue clustering on ALDI sessions (the old "Recommendations"
     # cards: vector search over the catalogue + an Opus clustering call, and
     # its own Try Again). Off since 2026-11-04 — hidden on the page and not

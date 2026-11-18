@@ -26,7 +26,18 @@ log = structlog.get_logger()
 PICKS = 5
 
 
+class RunCancelled(Exception):
+    """The run was cancelled from the UI (or expired as stuck) mid-pipeline."""
+
+
+def _check_cancelled(db, run: AldiRecommendationRun) -> None:
+    status = db.execute(text("select status from aldi_recommendation_runs where id=:id"), {"id": run.id}).scalar()
+    if status == "cancelled":
+        raise RunCancelled()
+
+
 def _set_stage(db, run: AldiRecommendationRun, stage: str) -> None:
+    _check_cancelled(db, run)
     run.stage = stage
     db.commit()
     log.info("aldi_recommend_stage", run_id=run.id, stage=stage)
@@ -284,6 +295,7 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         "select coalesce(sum(cost_usd),0), coalesce(sum(web_searches),0), coalesce(sum(web_fetches),0) "
         "from llm_calls where ref_type='aldi_run' and ref_id=:rid"), {"rid": run.id}).one()
     run.cost_usd, run.searches, run.fetches = float(row[0]), int(row[1]), int(row[2])
+    _check_cancelled(db, run)
     run.status = "done"
     run.stage = None
     run.finished_at = datetime.utcnow()
@@ -299,7 +311,7 @@ def recommend_aldi_products(self, run_id: int) -> dict:
         run = db.get(AldiRecommendationRun, run_id)
         if not run:
             return {"status": "not_found", "run_id": run_id}
-        if run.status not in ("queued", "failed"):
+        if run.status != "queued":   # cancelled, or another worker already has it
             return {"status": "skipped", "run_id": run_id, "current": run.status}
         run.status = "running"
         run.started_at = datetime.utcnow()
@@ -308,6 +320,17 @@ def recommend_aldi_products(self, run_id: int) -> dict:
         db.commit()
         try:
             asyncio.run(run_pipeline(db, run))
+        except RunCancelled:
+            db.rollback()
+            run = db.get(AldiRecommendationRun, run_id)
+            row = db.execute(text("select coalesce(sum(cost_usd),0), coalesce(sum(web_searches),0), "
+                                  "coalesce(sum(web_fetches),0) from llm_calls where ref_type='aldi_run' and ref_id=:rid"),
+                             {"rid": run_id}).one()
+            run.cost_usd, run.searches, run.fetches = float(row[0]), int(row[1]), int(row[2])
+            run.stage = None
+            db.commit()
+            log.info("aldi_recommend_cancelled", run_id=run_id)
+            return {"status": "cancelled", "run_id": run_id}
         except Exception as exc:  # noqa: BLE001
             import traceback
             log.error("aldi_recommend_failed", run_id=run_id, error=str(exc), traceback=traceback.format_exc())
