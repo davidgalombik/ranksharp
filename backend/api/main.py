@@ -20,6 +20,13 @@ async def lifespan(app: FastAPI):
     await init_db()
     await seed_retailers()
     await seed_aldi_recommender()
+    # Fill in images for ALDI recommendation cards saved without one
+    # (2026-11-18). Idempotent; a queue outage must never block startup.
+    try:
+        from tasks.aldi_recommend_tasks import backfill_aldi_thumbnails
+        backfill_aldi_thumbnails.delay()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("aldi_thumbnail_backfill_not_queued", error=str(exc))
     log.info("startup_complete")
     yield
     log.info("shutdown")
