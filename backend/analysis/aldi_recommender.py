@@ -84,7 +84,35 @@ TEAMS: dict[str, dict] = {
             "unfinished bamboo dividers."
         ),
     },
+    # Fragrance (2026-11-18): scoped by product category, not material, and
+    # judged on scent and vessel rather than stacking. Its prompts live in
+    # FRAGRANCE_TEXT below; storage teams use the defaults.
+    "fragrance": {
+        "label": "Fragrance",
+        "kind": "fragrance",
+        "families": ["candles", "fragrances"],
+        "material_block": (
+            "Only select products in one of these two categories:\n"
+            "* CANDLES: jar candles, pillar candles, tapers, votives, tea lights, wax melts, and any other wax-based "
+            "scented product designed to burn.\n"
+            "* FRAGRANCES: reed diffusers, room sprays, linen sprays, essential oils, electric / plug-in diffusers, "
+            "incense, and personal fragrance (perfume, cologne, body mist, eau de toilette, eau de parfum).\n"
+            "Exclude everything else, including empty candle holders, lanterns, wax warmers sold without wax, "
+            "candle-making supplies, and bath or skincare products whose main purpose is not fragrance."
+        ),
+        "finish_examples": (
+            "a considered vessel (e.g. reactive-glaze or matte ceramic, tinted, ribbed or frosted glass, brushed tin, "
+            "sculptural or novelty-shaped candles, marbled or striped pillars), premium details (wooden or metal lids, "
+            "wooden or cotton wicks, gift boxes, refill pouches, thick glass bases, quality reeds and labels), and a "
+            "clear scent story. Exclude generic unscented tea-light bulk packs, plain white pillars, and budget "
+            "air-freshener formats."
+        ),
+    },
 }
+
+
+def team_kind(team: str) -> str:
+    return TEAMS[team].get("kind", "storage")
 
 # ── Preferred retailers (seeded into aldi_preferred_retailers) ───────────────
 # Tiers follow the prompt; priority steers the search budget — kids, pet,
@@ -232,7 +260,7 @@ TREND DIGEST (short)
 CANDIDATE PRODUCT PAGES found by search (not yet opened):
 {candidate_block}
 
-{feedback_block}Choose up to {k} candidates to open and verify. Maximise: fit to a theme (material, colour, finish, form), likelihood of being stackable/nesting storage, elevated look, and spread across retailers and tiers (aim for several mass/value AND several mid-market/premium). Skip obvious duplicates of the same product.
+{feedback_block}Choose up to {k} candidates to open and verify. Maximise: {rank_focus}, and spread across retailers and tiers (aim for several mass/value AND several mid-market/premium). Skip obvious duplicates of the same product.
 Return ONLY a JSON array, best first: [{{"id": <candidate id>, "theme_id": "T1", "fit": <0.0-1.0>}}]"""
 
 VERIFY_PROMPT = """Open this product page with web_fetch (one fetch only): {url}
@@ -270,7 +298,7 @@ SELECT_SYSTEM = """{role}
 Rules
 * Only use facts from the verified candidate facts given to you. If a detail is missing there, treat it as not listed.
 * The facts come from the page's text, not its scripts. Many retailers render star ratings and stock widgets in scripts, so: (a) treat a product as in stock unless the page says sold out, out of stock, unavailable or discontinued; (b) a missing star rating is NOT a demand failure by itself — demand is met by ANY one of: a Best Seller-type label, 100+ reviews mentioned, a popularity or low-stock signal, or a retailer that does not show ratings (then judge on label or placement). Demand fails only when the page gives no signal of any kind.
-* Stackable / nesting / collapsing must still be stated on the page (the stack_nest claim and its evidence). "Unclear" is a failure; do not assume.
+{select_rule}
 * Only cite trend elements that appear in the digest. Do not invent pages, elements or themes.
 * If fewer than {n} candidates meet every criterion, choose only those that do and list the closest misses separately with the criterion each one fails. Do not lower the bar."""
 
@@ -289,12 +317,147 @@ VERIFIED CANDIDATES (each page was opened; facts are from the page)
       "element_refs": [{{"upload_id": <int>, "element_id": "E4"}}],   // 1–3 elements from the digest this product echoes, images first
       "how_it_matches": "<1–2 sentences on the specific shared attributes: material, colour, finish, form, function>",
       "demand_evidence": "<the label / rating / other signal, in a few words>",
-      "material_family": "fabric" | "metal" | "ceramic" | "glass" | "wood" | "plastic"
+      "material_family": {family_enum}
     }}
   ],
   "near_misses": [ {{"candidate_id": <id>, "fails": "<criterion>", "note": "<under 20 words>"}} ]
 }}
 Order picks best first (visual appeal and trend fit). Respect the spread rules. Never pick a candidate listed under DO NOT REPEAT."""
+
+STORAGE_SELECT_RULE = ('* Stackable / nesting / collapsing must still be stated on the page (the stack_nest claim and its '
+                       'evidence). "Unclear" is a failure; do not assume.')
+STORAGE_FAMILY_ENUM = '"fabric" | "metal" | "ceramic" | "glass" | "wood" | "plastic"'
+STORAGE_RANK_FOCUS = ("fit to a theme (material, colour, finish, form), likelihood of being stackable/nesting storage, "
+                      "elevated look")
+STORAGE_HINTS_EXAMPLE = "add 'stackable' / 'set of' / 'lidded', target the price band, prefer retailers that show ratings"
+STORAGE_DISTILL_SCOPE = ("finds stackable / nesting home storage and organisation products on the web that express a "
+                         "trend report, \nrestricted to these primary materials: {families}")
+
+
+# ── Fragrance prompts (2026-11-18) ───────────────────────────────────────────
+# Borrow the Fragrance Trends analyst's lenses (vessel aesthetic, scent
+# family, wax and clean claims, gifting and social-friendly formats) and
+# point them at a buyer's product hunt instead of a trend report.
+
+FRAGRANCE_ROLE = (
+    "You are a senior Buying Manager and Merchandise Expert specialising in candles, home fragrance and personal "
+    "fragrance. You know scent families (fresh/clean, floral, woody, gourmand, earthy/green, spicy, citrus), wax and "
+    "base types (soy, coconut, beeswax, paraffin blends, alcohol vs oil bases), vessel and packaging quality, price "
+    "architecture, and what sells at US mass and mid-to-premium retail. You read a trend report the way a product "
+    "designer would: its colours, finishes and moods become vessel colours, finishes and scent stories. You have a "
+    "strong eye for what looks premium on shelf, gifts well and photographs well for social."
+)
+
+FRAGRANCE_CRITERIA = """Product criteria (all must be met)
+* In scope: a CANDLES product (jar, pillar, taper, votive, tea light, wax melt or other wax-based scented product designed to burn) or a FRAGRANCES product (reed diffuser, room spray, linen spray, essential oil, electric / plug-in diffuser, incense, or personal fragrance: perfume, cologne, body mist, eau de toilette, eau de parfum). Holders, warmers sold without wax, and candle-making supplies are out of scope.
+* Trend fit: the product expresses a theme in the digest through its vessel or product colour, finish, form or pattern, its scent story (named notes or scent family that suit the theme's mood or season), or its format.
+* Elevated and visually appealing: the product must look premium and present well on shelf, the kind of item a buyer would put in a feature display or gift table. Look for {finish_examples} At mass and value retailers, look for their elevated or design-led lines rather than core basics.
+* Novel: a distinctive scent pairing, vessel, shape, format or ritual. Exclude commodity basics and generic air fresheners.
+* Proven demand: prefer products carrying a label such as Best Seller, Bestseller, Top Rated, Popular Pick, Customer Favourite or #1 in Category. An unlabelled product may still qualify if rated 4.3 stars or higher with at least 100 reviews. If the retailer uses neither labels nor ratings, use another visible popularity signal (Best Sellers / Most Popular placement, selling fast / low-stock messaging). Do not exclude a product from a retailer that doesn't label or rate for lacking a label.
+* Selection preference: when choosing between qualifying products, prefer (1) the more elevated and visually appealing product with the clearer trend link, then (2) the product with a Best Seller or equivalent label (never held against retailers that don't label), then (3) cleaner or more sustainable claims (soy, coconut or beeswax, cotton or wooden wicks, refillable, phthalate-free or non-toxic).
+* Current: in stock and currently listed. Only products whose page was actually opened and verified can be chosen.
+* Price: US${price_min:.0f}–{price_max:.0f} retail. For non-US retailers apply the band to the USD equivalent.
+* Personal fragrance (perfume, cologne, body mist, eau de toilette, eau de parfum) only from the preferred retailers listed for this team.
+* No licensed characters or entertainment franchises.
+Spread: use no more than 3 products from any one retailer; include at least one CANDLES and one FRAGRANCES product; include at least 2 from mass/value retailers and at least 2 from mid-market or premium retailers when the candidates allow it."""
+
+FRAGRANCE_PLAN_PROMPT = """{role}
+
+TASK: write web search queries that will find elevated, visually appealing CANDLES and FRAGRANCE products that express the trend themes below, for the US market. {material_scope}
+
+Products must be in scope:
+* CANDLES — jar candles, pillar candles, tapers, votives, tea lights, wax melts, and any other wax-based scented product designed to burn.
+* FRAGRANCES — reed diffusers, room sprays, linen sprays, essential oils, electric / plug-in diffusers, incense, and personal fragrance (perfume, cologne, body mist, eau de toilette, eau de parfum).
+Translate each theme onto those products through: vessel colour, finish and form (e.g. a terracotta theme becomes a matte terracotta ceramic jar candle); scent story (the notes and scent family that match the theme's mood, season or place — e.g. a coastal theme suggests sea salt, driftwood, fresh/aquatic); and format or ritual (refillable, sculptural, gift set, layered scents). Do NOT search for the report's own product types unless they are in scope.
+
+TREND DIGEST
+{digest_block}
+
+RETAILERS TO SPREAD ACROSS (search these by name, e.g. "Target ribbed glass jar candle fig cedar")
+{retailer_block}
+
+{avoid_block}{feedback_block}{hints_block}{rotation_block}RULES
+- Return exactly {n} queries as a JSON array: [{{"query": "...", "theme_id": "T1", "tier": "mass_value|marketplace|mid_market|premium|brand|open", "material": "candles|fragrances"}}]
+- Every theme gets at least one query; weight queries toward themes with product imagery.
+- Roughly half the queries target CANDLES and half FRAGRANCES; within FRAGRANCES spread across home fragrance (diffusers, sprays, oils, incense) and personal fragrance.
+- Each query names a concrete in-scope product type + a distinctive attribute from the theme (scent notes, vessel colour, finish or form), and is 4–12 words.
+- About half the queries name a retailer (spread across the tiers, at least 3 mass/value and 3 mid-market/premium); the rest are open-web ("tier": "open"). Personal fragrance queries MUST name a retailer from the list.
+- Do not target amazon.com{amazon_note}.
+- No two queries may be near-duplicates, and none may repeat a query listed under AVOID.
+Return ONLY the JSON array."""
+
+FRAGRANCE_DISCOVER_PROMPT = """Run exactly ONE web search for this query, then stop searching:
+{query}
+
+From the results, return ONLY a JSON array of the URLs that are individual PRODUCT pages (one product you could buy — not category, search, listicle, blog or brand-home pages) for a candle (jar, pillar, taper, votive, tea light, wax melt or other scented wax to burn) or a fragrance product (reed diffuser, room or linen spray, essential oil, electric / plug-in diffuser, incense, perfume, cologne, body mist, eau de toilette, eau de parfum), each as:
+{{"url": "<exact result url>", "title": "<result title>", "retailer": "<site name>", "fit": <0.0-1.0 how well it matches the query's product type, scent and look>, "why": "<under 10 words>"}}
+Skip empty candle holders, lanterns, warmers sold without wax, candle-making supplies, and anything with licensed characters. If no result is a product page, return []."""
+
+FRAGRANCE_VERIFY_PROMPT = """Open this product page with web_fetch (one fetch only): {url}
+
+Then return ONLY a JSON object with these facts, read from the page. Use null where the page does not say; never guess.
+{{
+  "is_product_page": true/false,
+  "product_name": "...",
+  "retailer": "...",
+  "price_usd": <number or null — the current price of the single product as shown; if a set, the set price>,
+  "price_text": "<price exactly as shown, with currency>",
+  "currency": "USD" | "...",
+  "in_stock": true/false/null,
+  "product_category": "candles" | "fragrances" | "other",
+  "product_type": "<e.g. 'jar candle', 'taper candles', 'wax melts', 'reed diffuser', 'room spray', 'eau de parfum'>",
+  "is_personal_fragrance": true/false,
+  "scent_notes": ["<named notes or scent, e.g. 'fig', 'cedarwood', 'sea salt'>"],
+  "scent_family": "<fresh|floral|woody|gourmand|earthy|spicy|citrus|other or null>",
+  "primary_material": "<wax or base type, e.g. 'soy wax', 'coconut wax', 'alcohol-based', 'oil-based', or null>",
+  "materials": ["<vessel and other materials named, e.g. 'ceramic', 'glass', 'wooden wick'>"],
+  "clean_claims": ["<e.g. 'phthalate-free', 'refillable', 'vegan', 'cotton wick' — [] if none>"],
+  "size": "<e.g. '8 oz', '100 ml', or null>",
+  "burn_time": "<as listed, or null>",
+  "bestseller_label": "<exact label wording such as 'Best Seller', or null>",
+  "rating": <number or null>,
+  "review_count": <integer or null — count any 'N reviews' / 'N ratings' text even when no star value is shown>,
+  "demand_signals": ["<other popularity text on the page, e.g. 'Popular pick', 'Selling fast', '500+ bought in past month', 'Only 3 left', 'Top rated' — [] if none>"],
+  "stock_text": "<exact stock wording if any, e.g. 'In stock', 'Sold out', or null>",
+  "licensed_ip": true/false,
+  "image_url": "<main product image URL if present, else null>",
+  "description": "<one or two sentences: what it is, vessel, colour, scent, notable details>"
+}}
+If the fetch fails or the page is not a product page, return {{"is_product_page": false, "error": "<why>"}}."""
+
+FRAGRANCE_TEXT = {
+    "role": FRAGRANCE_ROLE,
+    "criteria": FRAGRANCE_CRITERIA,
+    "plan": FRAGRANCE_PLAN_PROMPT,
+    "discover": FRAGRANCE_DISCOVER_PROMPT,
+    "verify": FRAGRANCE_VERIFY_PROMPT,
+    "select_rule": ('* The product category must be candles or fragrances (the category fact). "other" is a failure. '
+                    "Personal fragrance must come from a preferred retailer (its tier is not 'other')."),
+    "family_enum": '"candles" | "fragrances"',
+    "rank_focus": ("fit to a theme (vessel colour, finish, form, scent story), likelihood of being an in-scope candle "
+                   "or fragrance product, elevated look, a mix of candles and fragrances"),
+    "hints_example": "name scent notes or vessel finish, target the price band, prefer retailers that show ratings",
+    "distill_scope": ("finds candles (jar, pillar, taper, votive, tea light, wax melt) and fragrance products (reed "
+                      "diffusers, room and linen sprays, essential oils, electric diffusers, incense, personal "
+                      "fragrance) on the web that express a trend report"),
+}
+
+STORAGE_TEXT = {
+    "role": ROLE,
+    "criteria": CRITERIA,
+    "plan": PLAN_PROMPT,
+    "discover": DISCOVER_PROMPT,
+    "verify": VERIFY_PROMPT,
+    "select_rule": STORAGE_SELECT_RULE,
+    "family_enum": STORAGE_FAMILY_ENUM,
+    "rank_focus": STORAGE_RANK_FOCUS,
+    "hints_example": STORAGE_HINTS_EXAMPLE,
+    "distill_scope": STORAGE_DISTILL_SCOPE,
+}
+
+
+def team_text(team: str) -> dict:
+    return FRAGRANCE_TEXT if team_kind(team) == "fragrance" else STORAGE_TEXT
 
 
 # ── URL helpers ──────────────────────────────────────────────────────────────
@@ -372,6 +535,8 @@ class RunContext:
         self.session_id = session_id
         self.team = team
         self.team_cfg = TEAMS[team]
+        self.kind = team_kind(team)
+        self.text = team_text(team)
         self.digest = digest
         self.prefs = prefs                     # {memo, price_min, price_max}
         self.retailers = [r for r in retailers if r.get("active", True)]
@@ -394,6 +559,8 @@ class RunContext:
 
     @property
     def material_scope(self) -> str:
+        if self.kind == "fragrance":
+            return "Product scope for this team: candles and fragrances only (see the categories below)."
         fams = ", ".join(self.team_cfg["families"])
         return f"Material scope for this team: {fams} as the PRIMARY material only."
 
@@ -495,8 +662,8 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
                 "\n".join(f"- {q}" for q in ctx.previous_queries[-60:]) + "\n\n"
     hints_block = ""
     if hints:
-        hints_block = ("WHAT FAILED IN THE PREVIOUS ROUND (steer the new queries away from these problems — e.g. add "
-                       "'stackable' / 'set of' / 'lidded', target the price band, prefer retailers that show ratings):\n"
+        hints_block = ("WHAT FAILED IN THE PREVIOUS ROUND (steer the new queries away from these problems — e.g. "
+                       f"{ctx.text['hints_example']}):\n"
                        + "\n".join(f"- {h}" for h in hints[:12]) + "\n\n")
     amazon_note = "" if settings.aldi_recommend_amazon_fallback else " (its product pages cannot be opened)"
     rotation_block = ""
@@ -506,8 +673,8 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
                           + ", ".join(f"{name} ×{count}" for name, count in top)
                           + ". For the retailer-named queries this time, prefer retailers NOT in this list while "
                             "keeping the tier spread, so the pool widens instead of circling.\n\n")
-    prompt = PLAN_PROMPT.format(
-        role=ROLE, material_scope=ctx.material_scope, digest_block=ctx.digest_block(with_elements=False),
+    prompt = ctx.text["plan"].format(
+        role=ctx.text["role"], material_scope=ctx.material_scope, digest_block=ctx.digest_block(with_elements=False),
         retailer_block=ctx.retailer_block(), avoid_block=avoid, feedback_block=ctx.feedback_block(),
         hints_block=hints_block, rotation_block=rotation_block, n=n, amazon_note=amazon_note,
     )
@@ -542,7 +709,7 @@ async def discover(ctx: RunContext, queries: list[dict]) -> list[dict]:
                 "model": ctx.search_model, "max_tokens": 2500,
                 "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1,
                            "user_location": {"type": "approximate", "country": "US"}}],
-                "messages": [{"role": "user", "content": DISCOVER_PROMPT.format(query=q["query"])}],
+                "messages": [{"role": "user", "content": ctx.text["discover"].format(query=q["query"])}],
             }
             try:
                 data = await messages_create(body, feature="aldi_recommend_search", ref_type="aldi_run", ref_id=ctx.run_id)
@@ -604,7 +771,7 @@ async def rank(ctx: RunContext, candidates: list[dict], k: int) -> list[dict]:
         name, tier = retailer_for_domain(c["domain"], ctx.retailers)
         lines.append(f"[{c['id']}] {c['title'][:120]} | {name or c['domain']} ({tier}) | theme {c.get('theme_id') or '?'} | {c.get('snippet') or ''}")
     prompt = RANK_PROMPT.format(
-        role=ROLE, material_scope=ctx.material_scope, price_min=ctx.prefs["price_min"], price_max=ctx.prefs["price_max"],
+        role=ctx.text["role"], rank_focus=ctx.text["rank_focus"], material_scope=ctx.material_scope, price_min=ctx.prefs["price_min"], price_max=ctx.prefs["price_max"],
         digest_short=ctx.digest_short(), candidate_block="\n".join(lines), feedback_block=ctx.feedback_block(), k=k,
     )
     data = await messages_create(
@@ -648,7 +815,7 @@ async def verify(ctx: RunContext, candidates: list[dict]) -> dict[int, dict]:
                 body = {
                     "model": ctx.fast_model, "max_tokens": 2500,
                     "tools": [{"type": tool_type, "name": "web_fetch", "max_uses": 1}],
-                    "messages": [{"role": "user", "content": VERIFY_PROMPT.format(url=c["url"])}],
+                    "messages": [{"role": "user", "content": ctx.text["verify"].format(url=c["url"])}],
                 }
                 try:
                     data = await messages_create(body, feature="aldi_recommend_fetch", ref_type="aldi_run", ref_id=ctx.run_id)
@@ -676,7 +843,7 @@ async def verify(ctx: RunContext, candidates: list[dict]) -> dict[int, dict]:
                     facts = {}
             except Exception:  # noqa: BLE001
                 facts = {}
-            facts = _sanitise_facts(facts, meta)
+            facts = _sanitise_facts(facts, meta, ctx.kind)
             og = facts.get("image_url") or meta.get("og:image")
             status = "verified" if facts.get("is_product_page") else "not_product"
             return c["id"], {"status": status, "facts": facts, "og_image": og}
@@ -685,7 +852,7 @@ async def verify(ctx: RunContext, candidates: list[dict]) -> dict[int, dict]:
     return dict(pairs)
 
 
-def _sanitise_facts(facts: dict, meta: dict) -> dict:
+def _sanitise_facts(facts: dict, meta: dict, kind: str = "storage") -> dict:
     out = dict(facts)
     out["is_product_page"] = bool(facts.get("is_product_page"))
     price = _to_float(facts.get("price_usd"))
@@ -714,6 +881,19 @@ def _sanitise_facts(facts: dict, meta: dict) -> dict:
     out["in_stock"] = facts.get("in_stock") if isinstance(facts.get("in_stock"), bool) else None
     out["families"] = mf.families_for(out["materials"] + ([out["primary_material"]] if out["primary_material"] else []))
     out["primary_family"] = mf.family_of(out["primary_material"]) if out["primary_material"] else None
+    if kind == "fragrance":
+        # The "family" of a fragrance product is its category, not a material.
+        cat = str(facts.get("product_category") or "").strip().lower()
+        out["product_category"] = cat if cat in ("candles", "fragrances") else "other"
+        out["primary_family"] = out["product_category"] if out["product_category"] != "other" else None
+        out["families"] = [out["primary_family"]] if out["primary_family"] else []
+        out["product_type"] = (str(facts.get("product_type")).strip()[:80] if facts.get("product_type") else None)
+        out["is_personal_fragrance"] = bool(facts.get("is_personal_fragrance"))
+        out["scent_notes"] = [str(n).strip()[:40] for n in (facts.get("scent_notes") or []) if str(n).strip()][:8]
+        out["scent_family"] = (str(facts.get("scent_family")).strip()[:30] if facts.get("scent_family") else None)
+        out["clean_claims"] = [str(c).strip()[:60] for c in (facts.get("clean_claims") or []) if str(c).strip()][:6]
+        out["size"] = (str(facts.get("size")).strip()[:40] if facts.get("size") else None)
+        out["burn_time"] = (str(facts.get("burn_time")).strip()[:40] if facts.get("burn_time") else None)
     return out
 
 
@@ -735,9 +915,20 @@ def _candidate_block(ctx: RunContext, verified: list[dict]) -> str:
         demand_bits += f.get("demand_signals") or []
         demand = "; ".join(demand_bits) or "no signal visible in page text"
         stock = f.get("stock_text") or ("in stock" if f.get("in_stock") else "sold out" if f.get("in_stock") is False else "not stated (assume in stock)")
+        head = (f"[{c['id']}] {f.get('product_name') or c['title']} | {name or f.get('retailer') or c['domain']} ({tier}) | "
+                f"price {f.get('price_text') or f.get('price_usd') or 'not listed'} (USD {f.get('price_usd') if f.get('price_usd') is not None else '?'}) | ")
+        if ctx.kind == "fragrance":
+            lines.append(
+                head + f"category: {f.get('product_category') or '?'} ({f.get('product_type') or '?'}"
+                f"{', personal fragrance' if f.get('is_personal_fragrance') else ''}) | "
+                f"scent: {', '.join(f.get('scent_notes') or []) or '?'} [{f.get('scent_family') or '?'}] | "
+                f"base: {f.get('primary_material') or '?'}; materials: {', '.join(f.get('materials') or []) or '?'} | "
+                f"clean claims: {', '.join(f.get('clean_claims') or []) or 'none'} | size: {f.get('size') or '?'} | "
+                f"demand: {demand} | stock: {stock} | licensed IP: {f.get('licensed_ip')} | {f.get('description') or ''}"
+            )
+            continue
         lines.append(
-            f"[{c['id']}] {f.get('product_name') or c['title']} | {name or f.get('retailer') or c['domain']} ({tier}) | "
-            f"price {f.get('price_text') or f.get('price_usd') or 'not listed'} (USD {f.get('price_usd') if f.get('price_usd') is not None else '?'}) | "
+            head +
             f"primary material: {f.get('primary_material') or '?'}; materials: {', '.join(f.get('materials') or []) or '?'} | "
             f"stack/nest: {snc.get('claim')} — \"{(snc.get('evidence') or '')[:120]}\" | demand: {demand} | "
             f"stock: {stock} | licensed IP: {f.get('licensed_ip')} | {f.get('description') or ''}"
@@ -747,8 +938,8 @@ def _candidate_block(ctx: RunContext, verified: list[dict]) -> str:
 
 async def select(ctx: RunContext, verified: list[dict], n: int, fixed: Optional[list[dict]] = None, gap_note: str = "") -> dict:
     system = SELECT_SYSTEM.format(
-        role=ROLE, material_block=ctx.team_cfg["material_block"],
-        criteria=CRITERIA.format(finish_examples=ctx.team_cfg["finish_examples"],
+        role=ctx.text["role"], material_block=ctx.team_cfg["material_block"], select_rule=ctx.text["select_rule"],
+        criteria=ctx.text["criteria"].format(finish_examples=ctx.team_cfg["finish_examples"],
                                  price_min=ctx.prefs["price_min"], price_max=ctx.prefs["price_max"]),
         n=n,
     )
@@ -758,7 +949,7 @@ async def select(ctx: RunContext, verified: list[dict], n: int, fixed: Optional[
     user = SELECT_USER.format(
         digest_block=ctx.digest_block(with_elements=True), candidate_block=_candidate_block(ctx, verified),
         exclusion_block=ctx.exclusion_block(), feedback_block=ctx.feedback_block(), approved_block=ctx.approved_block(),
-        fixed_block=fixed_block,
+        fixed_block=fixed_block, family_enum=ctx.text["family_enum"],
         n=n, gap_note=gap_note,
     )
     data = await messages_create(
@@ -817,6 +1008,12 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
             reason = f"price ${f['price_usd']:.2f} outside ${pmin:.0f}–{pmax:.0f}"
         elif f.get("in_stock") is False:
             reason = "out of stock"
+        elif ctx.kind == "fragrance":
+            cat = f.get("product_category")
+            if cat not in team_fams and str(p.get("material_family") or "").lower() not in team_fams:
+                reason = "not a candle or fragrance product"
+            elif f.get("is_personal_fragrance") and tier == "other":
+                reason = "personal fragrance from a retailer outside our list"
         elif (f.get("stacks_nests_collapses") or {}).get("claim") in ("none",) and not override:
             reason = "does not stack, nest or collapse"
         else:
@@ -847,14 +1044,18 @@ def spread_gap(ctx: RunContext, accepted: list[dict], n: int) -> str:
         need.append("at least 2 from mass/value retailers")
     if sum(1 for t in tiers if t in MID_OR_PREMIUM) < 2 and len(accepted) >= n:
         need.append("at least 2 from mid-market or premium retailers")
+    if ctx.kind == "fragrance" and len(accepted) >= n:
+        cats = {str(a.get("material_family") or "").lower() for a in accepted}
+        for cat, label in (("candles", "CANDLES"), ("fragrances", "FRAGRANCES")):
+            if cat not in cats:
+                need.append(f"at least 1 {label} product")
     return "; ".join(need)
 
 
 # ── Phase 5: distillation and link re-check ──────────────────────────────────
 
 DISTILL_PROMPT = """You maintain the standing preferences of {team_label}'s buying team for a product recommender. 
-The recommender finds stackable / nesting home storage and organisation products on the web that express a trend report, 
-restricted to these primary materials: {families}. The team marks each recommended product Good or Bad, often with a note, 
+The recommender {scope}. The team marks each recommended product Good or Bad, often with a note, 
 and also marks "near misses" (products that failed one criterion) — a Good on a near miss means they would accept it despite 
 that criterion.
 
@@ -887,7 +1088,8 @@ async def distill_rules(team: str, items: list[dict], current_rules: str, memo: 
         note = f" — \"{it['note']}\"" if it.get("note") else ""
         lines.append(f"- {tag} {kind}: {it.get('product_name')} ({it.get('retailer') or '?'}{price}){fam};{theme}{note}")
     prompt = DISTILL_PROMPT.format(
-        team_label=cfg["label"], families=", ".join(cfg["families"]), memo=memo.strip() or "(none)",
+        team_label=cfg["label"], families=", ".join(cfg["families"]),
+        scope=team_text(team)["distill_scope"].format(families=", ".join(cfg["families"])), memo=memo.strip() or "(none)",
         current_rules=current_rules.strip() or "(none yet)", n=len(lines), log="\n".join(lines) or "(empty)",
     )
     try:

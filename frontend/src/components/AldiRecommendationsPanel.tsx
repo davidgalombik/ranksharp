@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const TEAM_ORDER = ["sapana", "adrah"];
+const TEAM_ORDER = ["sapana", "adrah", "fragrance"];
 
 export interface RecElement {
   id: string;
@@ -108,6 +108,7 @@ const STAGE_LABEL: Record<string, string> = {
 
 const FAMILY_LABEL: Record<string, string> = {
   fabric: "Fabric", metal: "Metal", ceramic: "Ceramic", glass: "Glass", wood: "Wood & bamboo", plastic: "Plastic",
+  candles: "Candles", fragrances: "Fragrances",
 };
 
 function elapsed(run: Run): string {
@@ -589,7 +590,7 @@ function TeamReel({
 
       {!active && !inFlight && runs.length === 0 && (
         <p className="text-sm text-stone-500">
-          Five products from the web for {block.label}&apos;s materials, each tied to the screenshot it echoes. Mark each one Good or Bad and the next set learns from it.
+          Five products from the web for {block.label}&apos;s scope, each tied to the screenshot it echoes. Mark each one Good or Bad and the next set learns from it.
         </p>
       )}
     </div>
