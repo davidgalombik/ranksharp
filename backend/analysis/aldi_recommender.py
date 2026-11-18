@@ -682,7 +682,14 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
         {"model": ctx.fast_model, "max_tokens": 4000, "messages": [{"role": "user", "content": prompt}]},
         feature="aldi_recommend_plan", ref_type="aldi_run", ref_id=ctx.run_id,
     )
-    raw = parse_json(response_text(data))
+    text_out = response_text(data)
+    try:
+        raw = parse_json(text_out)
+    except ValueError as exc:   # JSONDecodeError is a ValueError
+        log.error("aldi_recommend_plan_unparseable", run_id=ctx.run_id, team=ctx.team, error=str(exc),
+                  response=text_out[:2000])
+        raise RuntimeError(f"Query planning returned text that is not valid JSON ({exc}). "
+                           "Try Again usually succeeds.") from exc
     out: list[dict] = []
     seen: set[str] = set()
     for q in raw if isinstance(raw, list) else []:
