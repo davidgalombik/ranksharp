@@ -113,10 +113,40 @@ def parse_json(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    m = re.search(r"(\[.*\]|\{.*\})", text, flags=re.S)
-    if m:
-        return json.loads(m.group(1))
-    raise ValueError("no JSON in response")
+    values = _json_values(text)
+    if not values:
+        raise ValueError("no JSON in response")
+    # Several top-level values (2026-11-18): a model sometimes writes one
+    # array per theme, or one record per line, instead of a single array —
+    # the old greedy regex then failed with "Extra data". Arrays are joined;
+    # records that share the same keys become a list; otherwise the first
+    # value wins and trailing prose or examples are ignored.
+    if len(values) > 1:
+        if all(isinstance(v, list) for v in values):
+            return [x for v in values for x in v]
+        if all(isinstance(v, dict) for v in values) and len({frozenset(v) for v in values}) == 1:
+            return values
+    return values[0]
+
+
+def _json_values(text: str) -> list:
+    """Every top-level JSON array or object in `text`, in order, skipping
+    the prose between them."""
+    decoder = json.JSONDecoder()
+    out: list = []
+    i = 0
+    while True:
+        starts = [p for p in (text.find("[", i), text.find("{", i)) if p != -1]
+        if not starts:
+            return out
+        start = min(starts)
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            i = start + 1        # a stray bracket in prose — keep looking
+            continue
+        out.append(value)
+        i = end
 
 
 def search_results(data: dict) -> list[dict]:
