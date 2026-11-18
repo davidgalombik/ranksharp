@@ -343,12 +343,13 @@ function NearMissRow({
 // ── Team reel ─────────────────────────────────────────────────────────────────
 
 function TeamReel({
-  teamKey, block, uploads, onStart, onFeedback, onUndoFeedback, onSavePrefs, onDistill, onShowEvidence,
+  teamKey, block, uploads, onStart, onCancel, onFeedback, onUndoFeedback, onSavePrefs, onDistill, onShowEvidence,
 }: {
   teamKey: string;
   block: TeamBlock;
   uploads: RecUpload[];
   onStart: (team: string) => Promise<void>;
+  onCancel: (runId: number) => Promise<void>;
   onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<Feedback | null>;
   onUndoFeedback: (feedbackId: number) => Promise<void>;
   onSavePrefs: (team: string, prefs: Prefs) => Promise<void>;
@@ -362,6 +363,7 @@ function TeamReel({
   const [activeRunId, setActiveRunId] = useState<number | null>(doneRuns[0]?.id ?? null);
   const [showPrefs, setShowPrefs] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [prefs, setPrefs] = useState(block.preferences);
   const [tick, setTick] = useState(0);
   // Bad hides a card: a short undo line first, then a "hidden" toggle.
@@ -391,6 +393,12 @@ function TeamReel({
 
   const active = doneRuns.find((r) => r.id === activeRunId) ?? doneRuns[0] ?? null;
   void tick;
+
+  async function cancel(runId: number) {
+    if (!confirm("Cancel this run? Anything already spent on it stays in Costs.")) return;
+    setCancelling(true);
+    try { await onCancel(runId); } finally { setCancelling(false); }
+  }
 
   async function start() {
     setStarting(true);
@@ -471,7 +479,19 @@ function TeamReel({
             {STAGE_LABEL[latest.stage ?? ""] ?? (latest.status === "queued" ? "Waiting for a worker…" : "Working…")}
             <span className="ml-2 text-stone-400 tabular-nums">{elapsed(latest)}</span>
           </div>
-          <div className="ml-auto text-xs text-stone-400">Set {latest.generation} · usually 1–3 minutes</div>
+          <div className="ml-auto flex items-center gap-3">
+            <span className="text-xs text-stone-400">Set {latest.generation} · usually 1–3 minutes</span>
+            <button type="button" disabled={cancelling} onClick={() => cancel(latest.id)}
+                    className="text-xs px-2.5 py-1 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100 disabled:opacity-50">
+              {cancelling ? "Cancelling…" : "Cancel"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {latest && latest.status === "cancelled" && !inFlight && (
+        <div className="bg-stone-100 border border-stone-200 text-stone-700 text-sm rounded-xl px-4 py-3">
+          The last run was cancelled{latest.error && latest.error !== "Cancelled." ? `: ${latest.error}` : "."} Try Again starts a fresh run.
         </div>
       )}
 
@@ -651,6 +671,15 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
     await load();
   }, [sessionId, load]);
 
+  const onCancel = useCallback(async (runId: number) => {
+    const res = await fetch(`${API_BASE}/api/aldi/recommendation-runs/${runId}/cancel`, { method: "POST" });
+    if (!res.ok && res.status !== 409) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || `Could not cancel (${res.status})`);
+    }
+    await load();   // 409 = it finished or failed meanwhile; reload shows that
+  }, [load]);
+
   const onFeedback = useCallback(async (recId: number, verdict: "good" | "bad", note: string): Promise<Feedback | null> => {
     const res = await fetch(`${API_BASE}/api/aldi/recommendations/${recId}/feedback`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict, note }),
@@ -727,6 +756,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
             block={data.teams[tab]}
             uploads={uploads}
             onStart={onStart}
+            onCancel={onCancel}
             onFeedback={onFeedback}
             onUndoFeedback={onUndoFeedback}
             onSavePrefs={onSavePrefs}
