@@ -367,6 +367,9 @@ async def init_db():
              _col("aldi_uploads", "elements")),
             ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS trend_digest JSONB DEFAULT '{}'",
              _col("aldi_sessions", "trend_digest")),
+            # ALDI session names (2026-11-18): user-chosen sidebar label.
+            ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS name VARCHAR(200)",
+             _col("aldi_sessions", "name")),
             # ALDI web product recommender (Phase 3, 2026-11-01). Tables are
             # also created by create_all above; kept here for the record and
             # for the indexes.

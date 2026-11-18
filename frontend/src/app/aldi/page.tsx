@@ -68,6 +68,8 @@ interface AldiUploadDoc {
 
 interface AldiSession {
   id: number;
+  // User-chosen label; null/absent = unnamed (show the document count).
+  name?: string | null;
   status: "uploading" | "pending" | "analysing" | "generating" | "done" | "failed";
   created_at: string;
   upload_count: number;
@@ -130,13 +132,33 @@ function UploadZone({ onSessionCreated }: { onSessionCreated: (s: AldiSession) =
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleFiles = async (files: File[]) => {
+  // Files picked but not sent yet: the zone asks for a session name first.
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
+  const [name, setName] = useState("");
+
+  const handleFiles = (files: File[]) => {
     if (!files.length) return;
+    setError(null);
+    setPendingFiles(files);
+    setName(files[0].name.replace(/\.[^.]+$/, ""));
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const cancelPending = () => {
+    setPendingFiles(null);
+    setName("");
+    setError(null);
+  };
+
+  const upload = async () => {
+    const files = pendingFiles;
+    if (!files?.length) return;
     setError(null);
     setUploading(true);
     try {
       const form = new FormData();
       for (const file of files) form.append("files", file);
+      if (name.trim()) form.append("name", name.trim());
       const res = await fetch(`${API_BASE}/api/aldi/sessions?finalise=false`, { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -144,11 +166,12 @@ function UploadZone({ onSessionCreated }: { onSessionCreated: (s: AldiSession) =
       }
       const session: AldiSession = await res.json();
       onSessionCreated(session);
+      setPendingFiles(null);
+      setName("");
     } catch (e: any) {
       setError(e.message || "Upload failed");
     } finally {
       setUploading(false);
-      if (inputRef.current) inputRef.current.value = "";
     }
   };
 
@@ -157,6 +180,52 @@ function UploadZone({ onSessionCreated }: { onSessionCreated: (s: AldiSession) =
     setDragging(false);
     handleFiles(Array.from(e.dataTransfer.files));
   };
+
+  if (pendingFiles) {
+    const count = pendingFiles.length;
+    return (
+      <form
+        onSubmit={(e) => { e.preventDefault(); upload(); }}
+        className="border-2 border-amber-300 rounded-xl px-4 py-3 bg-white w-full sm:w-80 space-y-2"
+      >
+        <label className="block text-sm font-medium text-stone-700" htmlFor="aldi-session-name">
+          Name this session
+        </label>
+        <input
+          id="aldi-session-name"
+          autoFocus
+          value={name}
+          maxLength={200}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") cancelPending(); }}
+          placeholder="e.g. Spring kitchen trends"
+          disabled={uploading}
+          className="w-full border border-stone-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-amber-400"
+        />
+        <p className="text-xs text-stone-400">
+          {count === 1 ? "1 file selected" : `${count} files selected`}
+        </p>
+        {error && <p className="text-xs text-red-500">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={cancelPending}
+            disabled={uploading}
+            className="px-3 py-1 text-sm text-stone-600 hover:text-stone-900"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={uploading}
+            className="px-3 py-1 text-sm font-medium rounded-lg bg-stone-900 text-white hover:bg-stone-700 disabled:opacity-60"
+          >
+            {uploading ? "Uploading…" : "Upload"}
+          </button>
+        </div>
+      </form>
+    );
+  }
 
   return (
     <div
@@ -207,6 +276,7 @@ function SessionCard({
   onDelete: () => void;
 }) {
   const docLabel = session.upload_count === 1 ? "1 document" : `${session.upload_count} documents`;
+  const title = session.name?.trim() || docLabel;
   return (
     <div
       onClick={onClick}
@@ -217,8 +287,9 @@ function SessionCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-stone-800">{docLabel}</p>
+          <p className="text-sm font-medium text-stone-800 break-words" title={title}>{title}</p>
           <p className="text-xs text-stone-400 mt-0.5">
+            {session.name?.trim() ? `${docLabel} · ` : ""}
             {new Date(session.created_at).toLocaleDateString("en-AU", {
               day: "numeric", month: "short", year: "numeric",
             })}
@@ -245,6 +316,71 @@ function SessionCard({
         </button>
       </div>
     </div>
+  );
+}
+
+// ── Editable session title (detail header) ────────────────────────────────────
+
+function EditableSessionTitle({
+  name,
+  fallback,
+  onSave,
+}: {
+  name: string | null;
+  fallback: string;
+  onSave: (v: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { if (!editing) setDraft(name ?? ""); }, [name, editing]);
+
+  const commit = async () => {
+    if (saving) return;
+    const v = draft.trim();
+    if (v === (name ?? "").trim()) { setEditing(false); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(v);
+      setEditing(false);
+    } catch (e: any) {
+      setError(e.message || "Rename failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        className="group flex items-center gap-1.5 text-left font-semibold text-stone-800 hover:text-stone-600"
+        title="Click to rename"
+      >
+        <span className="break-words">{name?.trim() || fallback}</span>
+        <span className="text-xs text-stone-300 group-hover:text-stone-500">✎</span>
+      </button>
+    );
+  }
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); commit(); }} className="flex flex-col">
+      <input
+        autoFocus
+        value={draft}
+        maxLength={200}
+        placeholder={fallback}
+        disabled={saving}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") { setDraft(name ?? ""); setError(null); setEditing(false); }
+        }}
+        className="border border-stone-300 rounded-lg px-2 py-1 text-sm font-semibold w-72 max-w-full focus:outline-none focus:border-amber-400"
+      />
+      {error && <span className="text-xs text-red-500 mt-1">{error}</span>}
+    </form>
   );
 }
 
@@ -1405,6 +1541,18 @@ export default function AldiPage() {
     setSelectedId(s.id);
   };
 
+  const handleRename = useCallback(async (sessionId: number, name: string) => {
+    const res = await fetch(`${API_BASE}/api/aldi/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(`Rename failed (${res.status})`);
+    const updated: AldiSession = await res.json();
+    setSessions((prev) => prev.map((s) => s.id === sessionId ? { ...s, name: updated.name } : s));
+    setSelectedDetail((prev) => prev && prev.id === sessionId ? { ...prev, name: updated.name } : prev);
+  }, []);
+
   const handleTryAgain = useCallback(async (sessionId: number) => {
     try {
       const res = await fetch(`${API_BASE}/api/aldi/sessions/${sessionId}/regenerate`, { method: "POST" });
@@ -1523,9 +1671,11 @@ export default function AldiPage() {
               <>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <h2 className="font-semibold text-stone-800">
-                      {selectedDetail.upload_count === 1 ? "1 Document" : `${selectedDetail.upload_count} Documents`}
-                    </h2>
+                    <EditableSessionTitle
+                      name={selectedDetail.name ?? null}
+                      fallback={selectedDetail.upload_count === 1 ? "1 Document" : `${selectedDetail.upload_count} Documents`}
+                      onSave={(v) => handleRename(selectedDetail.id, v)}
+                    />
                     <StatusBadge status={selectedDetail.status} />
                   </div>
                 </div>
