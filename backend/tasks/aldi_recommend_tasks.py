@@ -456,3 +456,49 @@ def recheck_aldi_links() -> dict:
         return {"checked": len(rows), **counts}
     finally:
         db.close()
+
+
+# ── Thumbnail backfill (2026-11-18) ──────────────────────────────────────────
+
+@app.task
+def backfill_aldi_thumbnails(limit: int = 300) -> dict:
+    """Find images for saved picks and near misses that have none — cards
+    saved before Shopify-style links (//shop.com/cdn/...) and page-tag
+    fallbacks were handled showed "no image". Queued on API startup; only
+    touches rows without a stored thumbnail and only fills image fields, so
+    re-running is harmless. Plain HTTP fetches, no model calls."""
+    db = _get_session()
+    try:
+        rows = db.execute(
+            sa_select(AldiRecommendation, AldiCandidate)
+            .outerjoin(AldiCandidate, AldiCandidate.id == AldiRecommendation.candidate_id)
+            .where(AldiRecommendation.thumbnail.is_(None))
+            .order_by(AldiRecommendation.id.desc())
+            .limit(limit)
+        ).all()
+        if not rows:
+            return {"checked": 0, "fixed": 0}
+
+        async def resolve_all():
+            sem = asyncio.Semaphore(6)
+
+            async def one(r, c):
+                async with sem:
+                    return await rec.resolve_thumbnail(
+                        r.url, r.thumbnail_url, c.og_image if c else None, ((c.facts or {}) if c else {}).get("image_url"))
+            return await asyncio.gather(*(one(r, c) for r, c in rows))
+
+        results = asyncio.run(resolve_all())
+        fixed = linked = 0
+        for (r, _c), (thumb, image_url) in zip(rows, results):
+            if thumb:
+                r.thumbnail = thumb
+                fixed += 1
+            if image_url and image_url != r.thumbnail_url:
+                r.thumbnail_url = image_url
+                linked += 1
+        db.commit()
+        log.info("aldi_thumbnails_backfilled", checked=len(rows), fixed=fixed, linked=linked)
+        return {"checked": len(rows), "fixed": fixed, "linked": linked}
+    finally:
+        db.close()

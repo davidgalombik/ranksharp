@@ -27,6 +27,7 @@ app.conf.update(
         # the next free slot. Exact names win over the globs below.
         "tasks.aldi_tasks.analyse_aldi_upload": {"queue": "reports"},
         "tasks.aldi_recommend_tasks.recommend_aldi_products": {"queue": "reports"},
+        "tasks.aldi_recommend_tasks.backfill_aldi_thumbnails": {"queue": "reports"},
         "tasks.scrape_tasks.*": {"queue": "scrape"},
         "tasks.analysis_tasks.*": {"queue": "analysis"},
         "tasks.aldi_tasks.*": {"queue": "aldi"},
