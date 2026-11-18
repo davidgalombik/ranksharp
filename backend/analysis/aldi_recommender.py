@@ -883,7 +883,10 @@ def _sanitise_facts(facts: dict, meta: dict, kind: str = "storage") -> dict:
     out["licensed_ip"] = bool(facts.get("licensed_ip"))
     out["product_name"] = (str(facts.get("product_name") or meta.get("og:title") or "").strip()[:300]) or None
     out["retailer"] = (str(facts.get("retailer") or meta.get("og:site_name") or "").strip()[:120]) or None
-    out["image_url"] = (str(facts.get("image_url")).strip() if facts.get("image_url") and str(facts["image_url"]).startswith("http") else None)
+    # Keep relative and protocol-relative links (Shopify) too; they are made
+    # absolute against the page URL when the thumbnail is fetched.
+    img = str(facts.get("image_url") or "").strip()
+    out["image_url"] = img if img.startswith(("http", "/")) else None
     out["description"] = (str(facts.get("description") or "").strip()[:600]) or None
     out["in_stock"] = facts.get("in_stock") if isinstance(facts.get("in_stock"), bool) else None
     out["families"] = mf.families_for(out["materials"] + ([out["primary_material"]] if out["primary_material"] else []))
@@ -1161,6 +1164,86 @@ async def check_link(url: str, *, ref_id: Optional[int] = None) -> dict:
 # header (Walmart served AVIF on the first run and the thumbnail was lost).
 _UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
        "Accept": "image/jpeg,image/png,image/gif;q=0.9,*/*;q=0.5"}
+
+
+def absolute_image_url(url: Optional[str], page_url: str) -> Optional[str]:
+    """Make an image link usable (2026-11-18). Shopify and many brand sites
+    write protocol-relative ('//shop.com/cdn/...') or root-relative links,
+    which were dropped as 'not http'; plain http is upgraded so the card's
+    hotlink is not blocked as mixed content."""
+    if not url:
+        return None
+    u = str(url).strip().split()[0] if str(url).strip() else ""
+    if not u or u.startswith("data:"):
+        return None
+    if u.startswith("//"):
+        u = "https:" + u
+    elif u.startswith("/"):
+        from urllib.parse import urljoin
+        u = urljoin(page_url, u)
+    if u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
+    return u if u.startswith("https://") else None
+
+
+_IMG_META_RE = re.compile(
+    r"<meta[^>]+(?:property|name)\s*=\s*[\"'](?:og:image(?::secure_url)?|twitter:image(?::src)?)[\"'][^>]*>", re.I)
+_CONTENT_RE = re.compile(r"content\s*=\s*[\"']([^\"']+)[\"']", re.I)
+_LD_IMAGE_RE = re.compile(r"\"image\"\s*:\s*(?:\[\s*)?(?:\{[^{}]*?\"url\"\s*:\s*)?\"([^\"]+)\"", re.I)
+
+
+async def discover_image_url(page_url: str) -> Optional[str]:
+    """Fallback when the fetch facts carry no usable image: read the page's
+    own og:image / twitter:image / JSON-LD image, then, for Shopify product
+    URLs, the store's public product JSON. None when the site blocks us."""
+    async with httpx.AsyncClient(headers={**_UA, "Accept": "text/html,application/xhtml+xml"},
+                                 follow_redirects=True, timeout=15) as client:
+        try:
+            r = await client.get(page_url)
+            if r.status_code == 200:
+                html = r.text[:400_000]
+                for tag in _IMG_META_RE.findall(html):
+                    m = _CONTENT_RE.search(tag)
+                    u = absolute_image_url(m.group(1) if m else None, str(r.url))
+                    if u:
+                        return u
+                m = _LD_IMAGE_RE.search(html)
+                u = absolute_image_url(m.group(1).replace("\\/", "/") if m else None, str(r.url))
+                if u:
+                    return u
+        except Exception:  # noqa: BLE001
+            pass
+        parts = urlsplit(page_url)
+        if "/products/" in parts.path:
+            try:
+                r = await client.get(urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") + ".js", "", "")),
+                                     headers={"Accept": "application/json"})
+                if r.status_code == 200:
+                    data = r.json()
+                    img = data.get("featured_image") or ((data.get("images") or [None])[0])
+                    return absolute_image_url(img, page_url)
+            except Exception:  # noqa: BLE001
+                pass
+    return None
+
+
+async def resolve_thumbnail(page_url: str, *candidates: Optional[str]) -> tuple[Optional[bytes], Optional[str]]:
+    """(JPEG thumbnail or None, image URL or None) for a product page: the
+    fetched facts' image first, then the page's own tags as a fallback."""
+    tried: set[str] = set()
+    for c in candidates:
+        u = absolute_image_url(c, page_url)
+        if u and u not in tried:
+            tried.add(u)
+            thumb = await fetch_thumbnail(u)
+            if thumb:
+                return thumb, u
+    found = await discover_image_url(page_url)
+    if found and found not in tried:
+        thumb = await fetch_thumbnail(found)
+        return thumb, found
+    # Nothing downloadable: keep a link for the card to hotlink if we have one.
+    return None, (next(iter(tried)) if tried else found)
 
 
 async def fetch_thumbnail(url: Optional[str], max_edge: int = 480) -> Optional[bytes]:

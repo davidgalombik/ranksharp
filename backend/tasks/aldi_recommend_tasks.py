@@ -238,12 +238,15 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
     _set_stage(db, run, "saving")
     elements = rec.element_lookup(ctx.digest)
     themes = {t["id"]: t for t in ctx.digest.get("themes") or []}
-    for pos, p in enumerate(picks_out, 1):
+    pick_images = await asyncio.gather(*(
+        rec.resolve_thumbnail(verified_by_id[p["candidate_id"]]["url"], verified_by_id[p["candidate_id"]].get("og_image"),
+                              verified_by_id[p["candidate_id"]]["facts"].get("image_url"))
+        for p in picks_out))
+    for pos, (p, (thumb, image_url)) in enumerate(zip(picks_out, pick_images), 1):
         c = verified_by_id[p["candidate_id"]]
         f = c["facts"]
         theme = themes.get(str(p.get("theme_id") or ""))
         refs = rec.validate_refs(p.get("element_refs"), elements, theme)
-        thumb = await rec.fetch_thumbnail(c.get("og_image") or f.get("image_url"))
         db.add(AldiRecommendation(
             run_id=run.id, session_id=run.session_id, team=run.team, position=pos, candidate_id=c["id"],
             product_name=(f.get("product_name") or c["title"] or c["url"])[:300],
@@ -253,7 +256,7 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
             evidence=refs, how_it_matches=(p.get("how_it_matches") or "")[:1200] or None,
             demand_evidence=(p.get("demand_evidence") or "")[:300] or None,
             verification_status="verified", page_title=f.get("product_name"),
-            thumbnail=thumb, thumbnail_url=(c.get("og_image") or f.get("image_url")),
+            thumbnail=thumb, thumbnail_url=image_url,
         ))
     # Near misses: name them for the UI.
     pool_by_id = {c.id: c for c in _pool(db, run)}
@@ -275,11 +278,14 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
                       "retailer": (c.facts or {}).get("retailer") or c.domain, "url": c.url,
                       "fails": str(m.get("fails") or "")[:120], "note": str(m.get("note") or "")[:200]})
     # Near misses as rows of their own, so the buyer can mark them too.
-    for pos, m in enumerate(named, 1):
+    miss_images = await asyncio.gather(*(
+        rec.resolve_thumbnail(pool_by_id[m["candidate_id"]].url, pool_by_id[m["candidate_id"]].og_image,
+                              (pool_by_id[m["candidate_id"]].facts or {}).get("image_url"))
+        for m in named))
+    for pos, (m, (thumb, image_url)) in enumerate(zip(named, miss_images), 1):
         c = pool_by_id[m["candidate_id"]]
         f = c.facts or {}
         name, tier = rec.retailer_for_domain(c.domain or "", ctx.retailers)
-        thumb = await rec.fetch_thumbnail(c.og_image or f.get("image_url"))
         db.add(AldiRecommendation(
             run_id=run.id, session_id=run.session_id, team=run.team, kind="near_miss", position=pos,
             candidate_id=c.id, product_name=(m["product_name"] or c.url)[:300],
@@ -287,7 +293,7 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
             url=c.url, price_usd=f.get("price_usd"), material_family=f.get("primary_family"),
             fails=m["fails"] or None, how_it_matches=m["note"] or None,
             verification_status=c.verify_status, page_title=f.get("product_name"),
-            thumbnail=thumb, thumbnail_url=(c.og_image or f.get("image_url")),
+            thumbnail=thumb, thumbnail_url=image_url,
         ))
     run.near_misses = named
     run.stats = stats
