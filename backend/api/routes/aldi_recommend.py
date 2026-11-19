@@ -128,6 +128,24 @@ def _expire_if_stuck(run: AldiRecommendationRun, now: Optional[datetime] = None)
     return True
 
 
+@router.delete("/recommendation-runs/{run_id}")
+async def delete_run(run_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete one set (a run) with its picks and near misses (2026-11-19).
+    Good / Bad feedback is kept: the feedback rows' FK is ON DELETE SET
+    NULL and they carry their own product details, so learned rules and the
+    next Try Again still see them. A Core DELETE is used on purpose: the ORM
+    relationship cascades would delete the feedback rows too."""
+    from sqlalchemy import delete as sa_delete
+    run = await db.get(AldiRecommendationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Set not found")
+    if run.status in CANCELLABLE:
+        raise HTTPException(status_code=409, detail="This set is still running — cancel it first")
+    await db.execute(sa_delete(AldiRecommendationRun).where(AldiRecommendationRun.id == run_id))
+    await db.commit()
+    return {"deleted": run_id}
+
+
 @router.post("/recommendation-runs/{run_id}/cancel")
 async def cancel_run(run_id: int, db: AsyncSession = Depends(get_db)):
     """Cancel a queued or running run. A running pipeline notices at its next

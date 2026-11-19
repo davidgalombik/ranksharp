@@ -343,13 +343,14 @@ function NearMissRow({
 // ── Team reel ─────────────────────────────────────────────────────────────────
 
 function TeamReel({
-  teamKey, block, uploads, onStart, onCancel, onFeedback, onUndoFeedback, onSavePrefs, onDistill, onShowEvidence,
+  teamKey, block, uploads, onStart, onCancel, onDeleteSet, onFeedback, onUndoFeedback, onSavePrefs, onDistill, onShowEvidence,
 }: {
   teamKey: string;
   block: TeamBlock;
   uploads: RecUpload[];
   onStart: (team: string) => Promise<void>;
   onCancel: (runId: number) => Promise<void>;
+  onDeleteSet: (runId: number) => Promise<void>;
   onFeedback: (recId: number, verdict: "good" | "bad", note: string) => Promise<Feedback | null>;
   onUndoFeedback: (feedbackId: number) => Promise<void>;
   onSavePrefs: (team: string, prefs: Prefs) => Promise<void>;
@@ -364,6 +365,7 @@ function TeamReel({
   const [showPrefs, setShowPrefs] = useState(false);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [prefs, setPrefs] = useState(block.preferences);
   const [tick, setTick] = useState(0);
   // Bad hides a card: a short undo line first, then a "hidden" toggle.
@@ -398,6 +400,12 @@ function TeamReel({
     if (!confirm("Cancel this run? Anything already spent on it stays in Costs.")) return;
     setCancelling(true);
     try { await onCancel(runId); } finally { setCancelling(false); }
+  }
+
+  async function deleteSet(run: Run) {
+    if (!confirm(`Delete Set ${run.generation} and its products? Your Good / Bad marks are kept and still guide the next set.`)) return;
+    setDeleting(true);
+    try { await onDeleteSet(run.id); } finally { setDeleting(false); }
   }
 
   async function start() {
@@ -528,8 +536,14 @@ function TeamReel({
               {hiddenPicks.length > 0 && ` · ${hiddenPicks.length} hidden`}
               {active.finished_at && ` · ${new Date(active.finished_at + "Z").toLocaleString()}`}
             </span>
-            <span className="tabular-nums">
-              ${active.cost_usd.toFixed(2)} · {active.searches} searches · {active.fetches} pages opened
+            <span className="flex items-center gap-3">
+              <span className="tabular-nums">
+                ${active.cost_usd.toFixed(2)} · {active.searches} searches · {active.fetches} pages opened
+              </span>
+              <button type="button" disabled={deleting} onClick={() => deleteSet(active)}
+                      className="px-2 py-0.5 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-300 disabled:opacity-50">
+                {deleting ? "Deleting…" : `Delete set ${active.generation}`}
+              </button>
             </span>
           </div>
 
@@ -680,6 +694,15 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
     await load();   // 409 = it finished or failed meanwhile; reload shows that
   }, [load]);
 
+  const onDeleteSet = useCallback(async (runId: number) => {
+    const res = await fetch(`${API_BASE}/api/aldi/recommendation-runs/${runId}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || `Could not delete (${res.status})`);
+    }
+    await load();
+  }, [load]);
+
   const onFeedback = useCallback(async (recId: number, verdict: "good" | "bad", note: string): Promise<Feedback | null> => {
     const res = await fetch(`${API_BASE}/api/aldi/recommendations/${recId}/feedback`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict, note }),
@@ -757,6 +780,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
             uploads={uploads}
             onStart={onStart}
             onCancel={onCancel}
+            onDeleteSet={onDeleteSet}
             onFeedback={onFeedback}
             onUndoFeedback={onUndoFeedback}
             onSavePrefs={onSavePrefs}
