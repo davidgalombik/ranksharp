@@ -509,15 +509,30 @@ function TeamReel({
         </div>
       )}
 
-      {doneRuns.length > 1 && (
-        <div className="flex gap-1.5 flex-wrap">
-          {doneRuns.slice().sort((a, b) => a.generation - b.generation).map((r) => (
-            <button key={r.id} type="button" onClick={() => setActiveRunId(r.id)}
-                    className={clsx("px-3 py-1 rounded-lg text-xs font-medium border",
-                      r.id === active?.id ? "bg-stone-900 text-white border-stone-900" : "bg-white border-stone-200 text-stone-600 hover:bg-stone-50")}>
-              Set {r.generation}
-            </button>
-          ))}
+      {doneRuns.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-stone-400 font-medium">Set:</span>
+          {doneRuns.slice().sort((a, b) => a.generation - b.generation).map((r) => {
+            const isActive = r.id === active?.id;
+            const newest = r.id === doneRuns[0]?.id && doneRuns.length > 1;
+            return (
+              <div key={r.id}
+                   className={clsx("inline-flex items-stretch rounded-lg overflow-hidden border transition-colors",
+                     isActive ? "border-stone-900 bg-stone-900 text-white"
+                              : "border-stone-200 bg-white text-stone-600 hover:border-stone-400")}>
+                <button type="button" onClick={() => setActiveRunId(r.id)} className="px-3 py-1 text-xs font-medium">
+                  {newest ? `Set ${r.generation} ✨` : `Set ${r.generation}`}
+                </button>
+                <button type="button" disabled={deleting} onClick={() => deleteSet(r)}
+                        title={`Delete Set ${r.generation}`} aria-label={`Delete Set ${r.generation}`}
+                        className={clsx("px-1.5 text-xs border-l transition-colors disabled:opacity-50",
+                          isActive ? "border-stone-700 hover:bg-stone-800"
+                                   : "border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600")}>
+                  ×
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -536,14 +551,8 @@ function TeamReel({
               {hiddenPicks.length > 0 && ` · ${hiddenPicks.length} hidden`}
               {active.finished_at && ` · ${new Date(active.finished_at + "Z").toLocaleString()}`}
             </span>
-            <span className="flex items-center gap-3">
-              <span className="tabular-nums">
-                ${active.cost_usd.toFixed(2)} · {active.searches} searches · {active.fetches} pages opened
-              </span>
-              <button type="button" disabled={deleting} onClick={() => deleteSet(active)}
-                      className="px-2 py-0.5 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-300 disabled:opacity-50">
-                {deleting ? "Deleting…" : `Delete set ${active.generation}`}
-              </button>
+            <span className="tabular-nums">
+              ${active.cost_usd.toFixed(2)} · {active.searches} searches · {active.fetches} pages opened
             </span>
           </div>
 
