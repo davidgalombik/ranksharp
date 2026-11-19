@@ -87,6 +87,25 @@ def load_context(db, run: AldiRecommendationRun) -> rec.RunContext:
             elif latest.verdict == "bad":
                 rejected.append({"product_name": s.product_name, "retailer": s.retailer, "url": s.url,
                                  "url_hash": rec.url_hash(s.url)})
+    # Feedback on products from deleted sets (2026-11-19): the rows survive
+    # with recommendation_id NULL, so keep honouring them for this report —
+    # a Bad still excludes the product and the notes still steer the planner.
+    orphans = db.execute(
+        sa_select(AldiRecommendationFeedback).where(AldiRecommendationFeedback.session_id == run.session_id,
+                                                    AldiRecommendationFeedback.team == run.team,
+                                                    AldiRecommendationFeedback.recommendation_id.is_(None))
+        .order_by(AldiRecommendationFeedback.created_at)
+    ).scalars().all()
+    latest_by_url: dict[str, AldiRecommendationFeedback] = {}
+    for fb in orphans:
+        feedback.append({"verdict": fb.verdict, "note": fb.note, "product_name": fb.product_name,
+                         "retailer": fb.retailer, "kind": fb.kind or "pick", "fails": fb.fails})
+        if fb.url:
+            latest_by_url[fb.url] = fb
+    for url, fb in latest_by_url.items():
+        if fb.verdict == "bad":
+            rejected.append({"product_name": fb.product_name, "retailer": fb.retailer, "url": url,
+                             "url_hash": rec.url_hash(url)})
     previous_queries = [
         q.get("query") for r in db.execute(
             sa_select(AldiRecommendationRun).where(AldiRecommendationRun.session_id == run.session_id,
