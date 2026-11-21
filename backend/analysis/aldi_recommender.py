@@ -203,6 +203,10 @@ PREFERRED_RETAILERS: list[dict] = [
 # spreadsheet (2026-11-18), ~470 more on top of the list above.
 from analysis.aldi_retailers_decor import DECOR_RETAILERS  # noqa: E402
 PREFERRED_RETAILERS += DECOR_RETAILERS
+# Additional retailers and brands from a second spreadsheet (2026-11-21),
+# searched by every team.
+from analysis.aldi_retailers_additional import ADDITIONAL_RETAILERS  # noqa: E402
+PREFERRED_RETAILERS += ADDITIONAL_RETAILERS
 
 # Team-only retailers (2026-11-21): searched and recognised for that team
 # alone, listed first in its prompt. Kept out of PREFERRED_RETAILERS so the
