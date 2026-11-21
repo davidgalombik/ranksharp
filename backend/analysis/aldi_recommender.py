@@ -125,6 +125,7 @@ TIER_LABEL = {
     "lifestyle": "Lifestyle, travel, stationery and drinkware", "apparel": "Apparel, beauty and fitness",
     "appliance": "Appliance brands", "germany": "Germany",
     "decor": "Decorative accessories brands and studios",
+    "fragrance": "Fragrance specialists",
 }
 
 
@@ -202,6 +203,19 @@ PREFERRED_RETAILERS: list[dict] = [
 # spreadsheet (2026-11-18), ~470 more on top of the list above.
 from analysis.aldi_retailers_decor import DECOR_RETAILERS  # noqa: E402
 PREFERRED_RETAILERS += DECOR_RETAILERS
+
+# Team-only retailers (2026-11-21): searched and recognised for that team
+# alone, listed first in its prompt. Kept out of PREFERRED_RETAILERS so the
+# storage teams' searches are unchanged. Sephora is listed for both the US
+# site (the recommender searches the US market) and the Australian one.
+TEAM_RETAILERS: dict[str, list[dict]] = {
+    "fragrance": [
+        _r("Ulta Beauty", "fragrance", "ulta.com", "high"),
+        _r("Sephora", "fragrance", "sephora.com", "high"),
+        _r("Sephora Australia", "fragrance", "sephora.com.au", "high", "AU"),
+        _r("Yankee Candle", "fragrance", "yankeecandle.com", "high"),
+    ],
+}
 
 # Domains Claude's web fetch refuses outright (url_not_allowed, policy).
 FETCH_BLOCKED_DOMAINS = {"amazon.com"}
@@ -544,7 +558,10 @@ class RunContext:
         self.text = team_text(team)
         self.digest = digest
         self.prefs = prefs                     # {memo, price_min, price_max}
-        self.retailers = [r for r in retailers if r.get("active", True)]
+        listed = [r for r in retailers if r.get("active", True)]
+        names = {r["name"].lower() for r in listed}
+        extra = [r for r in TEAM_RETAILERS.get(team, []) if r["name"].lower() not in names]
+        self.retailers = extra + listed          # team-only first, so they lead the prompt
         self.shown = shown                     # [{product_name, url, url_hash, retailer}] already shown to this team
         self.feedback = feedback               # [{verdict, note, product_name, retailer, kind, fails}]
         # Near misses the buyer marked Good (pre-approved despite the failed
