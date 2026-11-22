@@ -1499,6 +1499,13 @@ export default function AldiPage() {
 
   useEffect(() => { fetchList(); }, [fetchList]);
 
+  // Open a session by default (2026-11-22): the newest on first load, and
+  // the next one down when the open session is deleted — no empty
+  // "select a session" state while any session exists.
+  useEffect(() => {
+    if (selectedId === null && sessions.length > 0) setSelectedId(sessions[0].id);
+  }, [sessions, selectedId]);
+
   const fetchDetail = useCallback(async (id: number) => {
     try {
       const res = await fetch(`${API_BASE}/api/aldi/sessions/${id}`);
@@ -1688,9 +1695,8 @@ export default function AldiPage() {
                 />
               </>
             ) : (
-              <div className="bg-white rounded-xl border border-stone-200 p-12 text-center text-stone-400">
-                <p className="text-3xl mb-3">👈</p>
-                <p className="font-medium">Select a session to view insights and ideas</p>
+              <div className="bg-white rounded-xl border border-stone-200 p-12 text-center text-stone-400 text-sm">
+                Loading…
               </div>
             )}
           </div>
