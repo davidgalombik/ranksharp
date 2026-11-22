@@ -8,9 +8,11 @@
  * web, each tied to the screenshot element it echoes. The card shows the
  * link, a prominent retailer name and the "See in report" evidence buttons
  * (trimmed 2026-11-04: no theme chip, verified badge or match text); the
- * buyer marks each pick Good or Bad with a note, and Try Again feeds that
- * back into the next five. Runs happen in the worker; this panel polls
- * while one is in flight.
+ * buyer marks each pick Good or Bad with a note, and Find More Products
+ * (formerly Try Again) feeds that back into the next five. Each run is a
+ * "Round" (formerly "Set"; renamed 2026-11-22, numbered 1..n in order),
+ * with an "All rounds" tab listing every product. Runs happen in the
+ * worker; this panel polls while one is in flight.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
@@ -96,14 +98,15 @@ interface TeamBlock {
 }
 interface Payload { session_id: number; teams: Record<string, TeamBlock> }
 
-const STAGE_LABEL: Record<string, string> = {
-  planning: "Planning the searches…",
-  discovering: "Searching the web…",
-  ranking: "Ranking what came back…",
-  verifying: "Opening product pages…",
-  selecting: "Choosing the five…",
-  repairing: "Filling the gaps…",
-  saving: "Saving…",
+// The pipeline's stages, shown as four plain-English steps (2026-11-22).
+const STEPS = [
+  { label: "Reading the report", detail: "Writing searches from the report and your marks" },
+  { label: "Searching retailers", detail: "Your preferred retailers, then the web" },
+  { label: "Opening product pages", detail: "Checking price, stock and details" },
+  { label: "Picking the best 5", detail: "Matched to the report" },
+];
+const STAGE_STEP: Record<string, number> = {
+  planning: 0, "planning again": 1, discovering: 1, ranking: 1, verifying: 2, selecting: 3, repairing: 3, saving: 3,
 };
 
 const FAMILY_LABEL: Record<string, string> = {
@@ -121,6 +124,120 @@ function elapsed(run: Run): string {
 function thumbSrc(rec: Rec): string | null {
   if (!rec.thumbnail_url) return null;
   return rec.thumbnail_url.startsWith("/") ? `${API_BASE}${rec.thumbnail_url}` : rec.thumbnail_url;
+}
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function Sparkle({ className = "w-4 h-4", double = false }: { className?: string; double?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" aria-hidden="true" className={className}>
+      <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />
+      {double && <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" />}
+    </svg>
+  );
+}
+
+function Check({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={className}>
+      <path d="M5 12l5 5L20 7" />
+    </svg>
+  );
+}
+
+function StatusPill({ verdict }: { verdict: string | null }) {
+  const [text, cls] = verdict === "good" ? ["Good", "bg-emerald-100 text-emerald-900"]
+    : verdict === "bad" ? ["Bad", "bg-rose-100 text-rose-900"]
+    : ["To review", "bg-blue-50 text-blue-700"];
+  return <span className={clsx("px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap", cls)}>{text}</span>;
+}
+
+// ── Round tab (2026-11-22) ────────────────────────────────────────────────────
+// A select button plus an always-visible × to delete the round.
+
+function RoundTab({
+  label, sub, todo, isNew, active, onSelect, onDelete, deleteLabel,
+}: {
+  label: string; sub: string; todo?: boolean; isNew?: boolean; active: boolean;
+  onSelect: () => void; onDelete?: () => void; deleteLabel?: string;
+}) {
+  return (
+    <div className={clsx("inline-flex items-stretch min-w-[8.5rem] rounded-xl overflow-hidden border transition-colors",
+      active ? "bg-stone-900 border-stone-900 text-white shadow-md shadow-stone-900/20"
+             : "bg-white border-stone-300 text-stone-900 hover:border-stone-500")}>
+      <button type="button" role="tab" aria-selected={active} onClick={onSelect}
+              className="flex-1 flex flex-col items-start gap-0.5 pl-4 pr-3.5 py-2.5 text-left">
+        <span className="flex items-center gap-1.5 text-sm font-semibold">
+          {label}
+          {isNew && <span className="px-1.5 py-px rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">New</span>}
+        </span>
+        <span className={clsx("text-xs", active ? "text-stone-200" : todo ? "text-blue-700 font-semibold" : "text-stone-500")}>{sub}</span>
+      </button>
+      {onDelete && (
+        <button type="button" onClick={onDelete} aria-label={deleteLabel} title={deleteLabel}
+                className={clsx("w-9 text-lg leading-none border-l transition-colors",
+                  active ? "border-stone-700 text-stone-200 hover:bg-stone-800"
+                         : "border-stone-200 text-stone-500 hover:bg-red-50 hover:text-red-700")}>
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Confirm delete (2026-11-22) ───────────────────────────────────────────────
+
+function DeleteRoundDialog({
+  roundNo, products, teamLabel, busy, onConfirm, onClose,
+}: {
+  roundNo: number; products: number; teamLabel: string; busy: boolean;
+  onConfirm: () => void; onClose: () => void;
+}) {
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    keepRef.current?.focus();   // the safe choice has focus, so Enter never deletes by accident
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeRef.current(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  return (
+    <div className="fixed inset-0 z-50 bg-stone-900/45 flex items-center justify-center p-4" onClick={() => !busy && onClose()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="delete-round-title"
+           className="w-full max-w-md bg-white rounded-2xl shadow-2xl p-7 space-y-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex gap-3.5 items-start">
+          <span className="w-11 h-11 flex-shrink-0 rounded-full bg-red-100 text-red-700 flex items-center justify-center">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="w-5 h-5">
+              <path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M6 6l1 14h10l1-14" /><path d="M10 11v6" /><path d="M14 11v6" />
+            </svg>
+          </span>
+          <div className="space-y-1.5">
+            <h2 id="delete-round-title" className="text-lg font-bold text-stone-900">Delete Round {roundNo}?</h2>
+            <p className="text-sm text-stone-600 leading-relaxed">
+              This removes the {plural(products, "product")} in Round {roundNo} from {teamLabel}&apos;s recommendations for this report. It can&apos;t be undone.
+            </p>
+          </div>
+        </div>
+        <ul className="rounded-xl bg-stone-100 px-4 py-3.5 space-y-2 text-sm text-stone-800">
+          <li className="flex gap-2 items-start"><Check className="w-4 h-4 mt-0.5 flex-shrink-0 text-emerald-600" />Your Good / Bad marks are kept and still guide future rounds.</li>
+          <li className="flex gap-2 items-start"><Check className="w-4 h-4 mt-0.5 flex-shrink-0 text-emerald-600" />Products you marked Bad won&apos;t come back.</li>
+        </ul>
+        <div className="flex justify-end gap-2.5">
+          <button ref={keepRef} type="button" disabled={busy} onClick={onClose}
+                  className="h-11 px-4 rounded-xl border border-stone-300 bg-white text-sm font-semibold text-stone-800 hover:bg-stone-50">
+            Keep round
+          </button>
+          <button type="button" disabled={busy} onClick={onConfirm}
+                  className="h-11 px-4 rounded-xl bg-red-700 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60">
+            {busy ? "Deleting…" : `Delete Round ${roundNo}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Evidence viewer ───────────────────────────────────────────────────────────
@@ -276,6 +393,7 @@ function RecCard({
              className="font-semibold text-blue-700 hover:underline break-words">
             {rec.position}. {rec.product_name}
           </a>
+          {!verdict && <span className="ml-2 align-middle"><StatusPill verdict={null} /></span>}
           <div className="text-sm font-bold text-stone-800 mt-1">
             {rec.retailer ?? new URL(rec.url).hostname}
             {rec.link_status === "gone" && (
@@ -334,8 +452,39 @@ function NearMissRow({
       </div>
       {miss.id != null && (
         <FeedbackRow feedback={miss.feedback ?? []} onSubmit={(v, n) => onFeedback(miss.id!, v, n, miss.product_name ?? miss.url ?? "product")}
-                     placeholder="Would you take it anyway? Say why, and the next set learns from it…" />
+                     placeholder="Would you take it anyway? Say why, and the next round learns from it…" />
       )}
+    </li>
+  );
+}
+
+// ── Compact row for the All rounds tab (2026-11-22) ───────────────────────────
+
+function CompactRec({
+  rec, onFeedback,
+}: {
+  rec: Rec;
+  onFeedback: (recId: number, verdict: "good" | "bad", note: string, name: string) => Promise<void>;
+}) {
+  const verdict = latestVerdict(rec.feedback);
+  const src = thumbSrc(rec);
+  return (
+    <li className={clsx("bg-white rounded-xl border px-3 py-2.5 space-y-2",
+      verdict === "good" ? "border-emerald-300" : verdict === "bad" ? "border-rose-300" : "border-stone-200")}>
+      <div className="flex items-center gap-3.5">
+        <div className="w-14 h-14 flex-shrink-0 rounded-lg bg-stone-100 overflow-hidden">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          {src && <img src={src} alt={rec.product_name} className="w-full h-full object-cover" />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <a href={rec.url} target="_blank" rel="noopener noreferrer"
+             className="block text-sm font-semibold text-blue-700 hover:underline truncate">{rec.product_name}</a>
+          <span className="text-xs font-semibold text-stone-700">{rec.retailer ?? new URL(rec.url).hostname}</span>
+        </div>
+        <StatusPill verdict={verdict} />
+      </div>
+      <FeedbackRow feedback={rec.feedback} onSubmit={(v, n) => onFeedback(rec.id, v, n, rec.product_name)}
+                   placeholder="Why? e.g. not functional enough, focus on needlepoint…" />
     </li>
   );
 }
@@ -357,20 +506,31 @@ function TeamReel({
   onDistill: (team: string) => Promise<void>;
   onShowEvidence: (ev: Evidence) => void;
 }) {
+  void uploads;
   const runs = block.runs;
   const latest = block.latest;
-  const inFlight = latest && (latest.status === "queued" || latest.status === "running");
-  const doneRuns = runs.filter((r) => r.status === "done");
-  const [activeRunId, setActiveRunId] = useState<number | null>(doneRuns[0]?.id ?? null);
+  const inFlight = !!latest && (latest.status === "queued" || latest.status === "running");
+  // Rounds = finished runs, oldest first, numbered 1..n so deletions leave no gaps.
+  const rounds = runs.filter((r) => r.status === "done").sort((a, b) => a.generation - b.generation);
+  const roundNo = new Map(rounds.map((r, i) => [r.id, i + 1]));
+  const newest = rounds.length ? rounds[rounds.length - 1] : null;
+  const newestId = newest?.id ?? null;
+
+  const [view, setView] = useState<number | "all" | null>(null);
   const [showPrefs, setShowPrefs] = useState(false);
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Run | null>(null);
   const [prefs, setPrefs] = useState(block.preferences);
   const [tick, setTick] = useState(0);
   // Bad hides a card: a short undo line first, then a "hidden" toggle.
   const [showHidden, setShowHidden] = useState(false);
   const [justHidden, setJustHidden] = useState<{ name: string; feedbackId: number } | null>(null);
+
+  const showAll = view === "all" && rounds.length > 1;
+  const active = showAll ? null : (rounds.find((r) => r.id === view) ?? newest);
+
   useEffect(() => {
     if (!justHidden) return;
     const t = setTimeout(() => setJustHidden(null), 10000);
@@ -378,34 +538,51 @@ function TeamReel({
   }, [justHidden]);
   const handleFeedback = useCallback(async (recId: number, verdict: "good" | "bad", note: string, name: string) => {
     const saved = await onFeedback(recId, verdict, note);
-    if (saved && verdict === "bad") setJustHidden({ name, feedbackId: saved.id });
-  }, [onFeedback]);
+    if (saved && verdict === "bad" && !showAll) setJustHidden({ name, feedbackId: saved.id });
+  }, [onFeedback, showAll]);
 
   useEffect(() => { setPrefs(block.preferences); }, [block.preferences]);
+  // Open the newest round on load and whenever a new round arrives.
+  const lastNewest = useRef<number | null>(null);
   useEffect(() => {
-    if (doneRuns.length && (activeRunId == null || !doneRuns.some((r) => r.id === activeRunId))) {
-      setActiveRunId(doneRuns[0].id);
+    if (newestId !== lastNewest.current) {
+      lastNewest.current = newestId;
+      setView(newestId);
     }
-  }, [doneRuns, activeRunId]);
+  }, [newestId]);
   useEffect(() => {
     if (!inFlight) return;
     const t = setInterval(() => setTick((x) => x + 1), 1000);
     return () => clearInterval(t);
   }, [inFlight]);
-
-  const active = doneRuns.find((r) => r.id === activeRunId) ?? doneRuns[0] ?? null;
   void tick;
 
+  const counts = (r: Run) => {
+    const products = r.recommendations.length;
+    const toReview = r.recommendations.filter((x) => !x.feedback.length).length;
+    return { products, toReview, sub: products === 0 ? "No products" : `${plural(products, "product")} · ${toReview ? `${toReview} to review` : "all rated"}` };
+  };
+  const totalProducts = rounds.reduce((n, r) => n + r.recommendations.length, 0);
+  const totalToReview = rounds.reduce((n, r) => n + counts(r).toReview, 0);
+  const newestCounts = newest ? counts(newest) : null;
+  let goodMarks = 0, badMarks = 0;
+  for (const r of runs) {
+    for (const item of [...r.recommendations, ...r.near_misses]) {
+      const v = latestVerdict(item.feedback);
+      if (v === "good") goodMarks++; else if (v === "bad") badMarks++;
+    }
+  }
+
   async function cancel(runId: number) {
-    if (!confirm("Cancel this run? Anything already spent on it stays in Costs.")) return;
+    if (!confirm("Cancel this search? Anything already spent on it stays in Costs.")) return;
     setCancelling(true);
     try { await onCancel(runId); } finally { setCancelling(false); }
   }
 
-  async function deleteSet(run: Run) {
-    if (!confirm(`Delete Set ${run.generation} and its products? Your Good / Bad marks are kept and still guide the next set.`)) return;
+  async function confirmDelete() {
+    if (!pendingDelete) return;
     setDeleting(true);
-    try { await onDeleteSet(run.id); } finally { setDeleting(false); }
+    try { await onDeleteSet(pendingDelete.id); } finally { setDeleting(false); setPendingDelete(null); }
   }
 
   async function start() {
@@ -421,122 +598,208 @@ function TeamReel({
             <span key={f} className="inline-block mr-1.5 px-2 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-xs">{FAMILY_LABEL[f] ?? f}</span>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => setShowPrefs((v) => !v)}
-                  className="text-xs px-2.5 py-1.5 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100">
-            Team settings
+        <div className="flex flex-wrap items-start gap-3">
+          <button type="button" onClick={() => setShowPrefs((v) => !v)} aria-expanded={showPrefs}
+                  className={clsx("flex items-center gap-2 h-11 px-4 rounded-xl border text-sm font-semibold transition-colors",
+                    showPrefs ? "border-violet-600 bg-violet-50 text-violet-800" : "border-stone-300 bg-white text-stone-800 hover:bg-stone-50")}>
+            <Sparkle className="w-4 h-4 text-violet-600" />
+            AI prompt
           </button>
-          {!inFlight && (
-            <button type="button" disabled={starting} onClick={start}
-                    className={clsx("px-4 py-2 rounded-lg text-sm font-semibold transition-colors",
-                      runs.length === 0 ? "bg-stone-900 text-white hover:bg-stone-700" : "bg-amber-50 border border-amber-300 text-amber-900 hover:bg-amber-100")}>
-              {runs.length === 0 ? "✨ Product Recommendations" : "🔄 Try Again"}
+          {inFlight ? (
+            <button type="button" disabled
+                    className="flex items-center gap-2.5 h-12 px-6 rounded-xl bg-stone-700 text-stone-100 text-base font-bold cursor-wait">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" aria-hidden="true" className="w-[18px] h-[18px] text-amber-300 animate-spin">
+                <path d="M21 12a9 9 0 1 1-6.2-8.6" />
+              </svg>
+              Finding products…
             </button>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <button type="button" disabled={starting} onClick={start}
+                      className="flex items-center justify-center gap-2.5 h-12 px-6 rounded-xl bg-stone-900 text-white text-base font-bold shadow-lg shadow-stone-900/20 hover:bg-stone-700 disabled:opacity-60 transition-colors">
+                <Sparkle double className="w-[18px] h-[18px] text-amber-300" />
+                {starting ? "Starting…" : rounds.length === 0 ? "Find Products" : "Find More Products"}
+              </button>
+              {newestCounts && newestCounts.products > 0 && (
+                <div className="flex items-center gap-2 text-[11px] text-stone-600" title="Rate the newest round to sharpen the next one">
+                  <div className="flex-1 h-1.5 rounded-full bg-stone-200 overflow-hidden" aria-hidden="true">
+                    <div className="h-full rounded-full bg-emerald-600 transition-all"
+                         style={{ width: `${Math.round(100 * (newestCounts.products - newestCounts.toReview) / newestCounts.products)}%` }} />
+                  </div>
+                  <span>{newestCounts.toReview === 0 ? `All ${newestCounts.products} rated` : `${newestCounts.products - newestCounts.toReview} of ${newestCounts.products} rated`}</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
 
       {showPrefs && (
-        <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-3">
+        <div className="bg-violet-50/60 border border-violet-200 rounded-2xl p-5 space-y-4">
+          <div>
+            <h4 className="text-base font-bold text-stone-900">AI prompt · {block.label}</h4>
+            <p className="text-sm text-stone-600 mt-0.5">Everything here is sent to the AI on every search for {block.label}&apos;s team.</p>
+          </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <label className="text-stone-600">Price band (USD)</label>
-            <input type="number" min={0} value={prefs.price_min}
+            <label htmlFor={`pmin-${teamKey}`} className="text-stone-700 font-medium">Price band (USD)</label>
+            <input id={`pmin-${teamKey}`} type="number" min={0} value={prefs.price_min}
                    onChange={(e) => setPrefs({ ...prefs, price_min: Number(e.target.value) })}
-                   className="w-20 border border-stone-300 rounded-md px-2 py-1 bg-white" />
-            <span className="text-stone-400">to</span>
-            <input type="number" min={0} value={prefs.price_max}
+                   className="w-20 border border-stone-300 rounded-lg px-2 py-1.5 bg-white" />
+            <span className="text-stone-500">to</span>
+            <input aria-label="Maximum price (USD)" type="number" min={0} value={prefs.price_max}
                    onChange={(e) => setPrefs({ ...prefs, price_max: Number(e.target.value) })}
-                   className="w-20 border border-stone-300 rounded-md px-2 py-1 bg-white" />
+                   className="w-20 border border-stone-300 rounded-lg px-2 py-1.5 bg-white" />
           </div>
           <div>
-            <label className="text-sm text-stone-600">Standing preferences for {block.label}&apos;s team (read by every run)</label>
-            <textarea value={prefs.memo} onChange={(e) => setPrefs({ ...prefs, memo: e.target.value })} rows={3}
+            <label htmlFor={`memo-${teamKey}`} className="text-sm font-semibold text-stone-900">Your instructions to the AI</label>
+            <p className="text-xs text-stone-500">Written by the team. Read before every search.</p>
+            <textarea id={`memo-${teamKey}`} value={prefs.memo} onChange={(e) => setPrefs({ ...prefs, memo: e.target.value })} rows={3}
                       placeholder="e.g. Prefer products with a clear functional story; avoid purely decorative pieces."
-                      className="mt-1 w-full text-sm border border-stone-300 rounded-md px-2 py-1.5 bg-white" />
+                      className="mt-1.5 w-full text-sm border border-stone-300 rounded-lg px-3 py-2 bg-white" />
           </div>
           <div>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <label className="text-sm text-stone-600">
-                Learned from feedback
-                <span className="ml-2 text-xs text-stone-400">
-                  {prefs.distilled_at
-                    ? `updated ${new Date(prefs.distilled_at + "Z").toLocaleString()} from ${prefs.distilled_count} judgment${prefs.distilled_count === 1 ? "" : "s"}`
-                    : "nothing distilled yet — it updates itself after a few Good / Bad marks"}
-                </span>
-              </label>
+              <label htmlFor={`learned-${teamKey}`} className="text-sm font-semibold text-stone-900">What the AI learned from your Good / Bad marks</label>
               <button type="button" onClick={() => onDistill(teamKey)}
-                      className="text-xs px-2.5 py-1 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100">
+                      className="text-xs px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-stone-700 hover:bg-stone-100">
                 Update now
               </button>
             </div>
-            <textarea value={prefs.learned_rules} onChange={(e) => setPrefs({ ...prefs, learned_rules: e.target.value })} rows={5}
-                      placeholder="Standing rules the recommender has distilled from this team's Good / Bad marks appear here. You can edit them."
-                      className="mt-1 w-full text-sm border border-stone-300 rounded-md px-2 py-1.5 bg-white font-mono" />
+            <p className="text-xs text-stone-500">
+              {prefs.distilled_at
+                ? `Updated ${new Date(prefs.distilled_at + "Z").toLocaleString()} from ${plural(prefs.distilled_count, "mark")}. You can edit these.`
+                : "Nothing learned yet. It updates itself after a few Good / Bad marks."}
+            </p>
+            <textarea id={`learned-${teamKey}`} value={prefs.learned_rules} onChange={(e) => setPrefs({ ...prefs, learned_rules: e.target.value })} rows={5}
+                      placeholder="Rules the AI has learned from this team's Good / Bad marks appear here. You can edit them."
+                      className="mt-1.5 w-full text-sm border border-stone-300 rounded-lg px-3 py-2 bg-white font-mono" />
           </div>
           <div className="flex justify-end">
             <button type="button" onClick={() => onSavePrefs(teamKey, prefs)}
-                    className="px-3 py-1.5 rounded-md text-sm font-medium bg-stone-900 text-white hover:bg-stone-700">Save</button>
-          </div>
-        </div>
-      )}
-
-      {inFlight && latest && (
-        <div className="bg-white border border-stone-200 rounded-xl p-4 flex items-center gap-3">
-          <span className="inline-block w-3 h-3 rounded-full bg-amber-400 animate-pulse" />
-          <div className="text-sm text-stone-700">
-            {STAGE_LABEL[latest.stage ?? ""] ?? (latest.status === "queued" ? "Waiting for a worker…" : "Working…")}
-            <span className="ml-2 text-stone-400 tabular-nums">{elapsed(latest)}</span>
-          </div>
-          <div className="ml-auto flex items-center gap-3">
-            <span className="text-xs text-stone-400">Set {latest.generation} · usually 1–3 minutes</span>
-            <button type="button" disabled={cancelling} onClick={() => cancel(latest.id)}
-                    className="text-xs px-2.5 py-1 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100 disabled:opacity-50">
-              {cancelling ? "Cancelling…" : "Cancel"}
-            </button>
+                    className="h-10 px-4 rounded-xl text-sm font-semibold bg-stone-900 text-white hover:bg-stone-700">Save</button>
           </div>
         </div>
       )}
 
       {latest && latest.status === "cancelled" && !inFlight && (
         <div className="bg-stone-100 border border-stone-200 text-stone-700 text-sm rounded-xl px-4 py-3">
-          The last run was cancelled{latest.error && latest.error !== "Cancelled." ? `: ${latest.error}` : "."} Try Again starts a fresh run.
+          The last search was cancelled{latest.error && latest.error !== "Cancelled." ? `: ${latest.error}` : "."} Find More Products starts a fresh round.
         </div>
       )}
 
       {latest && latest.status === "failed" && !inFlight && (
         <div className="bg-rose-50 border border-rose-200 text-rose-800 text-sm rounded-xl px-4 py-3">
-          The last run failed{latest.error ? `: ${latest.error}` : "."} Try Again starts a fresh run.
+          The last search failed{latest.error ? `: ${latest.error}` : "."} Find More Products starts a fresh round.
         </div>
       )}
 
-      {doneRuns.length > 0 && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-stone-400 font-medium">Set:</span>
-          {doneRuns.slice().sort((a, b) => a.generation - b.generation).map((r) => {
-            const isActive = r.id === active?.id;
-            const newest = r.id === doneRuns[0]?.id && doneRuns.length > 1;
-            return (
-              <div key={r.id}
-                   className={clsx("inline-flex items-stretch rounded-lg overflow-hidden border transition-colors",
-                     isActive ? "border-stone-900 bg-stone-900 text-white"
-                              : "border-stone-200 bg-white text-stone-600 hover:border-stone-400")}>
-                <button type="button" onClick={() => setActiveRunId(r.id)} className="px-3 py-1 text-xs font-medium">
-                  {newest ? `Set ${r.generation} ✨` : `Set ${r.generation}`}
-                </button>
-                <button type="button" disabled={deleting} onClick={() => deleteSet(r)}
-                        title={`Delete Set ${r.generation}`} aria-label={`Delete Set ${r.generation}`}
-                        className={clsx("px-1.5 text-xs border-l transition-colors disabled:opacity-50",
-                          isActive ? "border-stone-700 hover:bg-stone-800"
-                                   : "border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600")}>
-                  ×
-                </button>
+      {(rounds.length > 0 || inFlight) && (
+        <div className="space-y-2.5 pt-1">
+          {rounds.length > 0 && (
+            <p className="text-sm text-stone-600">
+              <strong className="text-stone-900">{plural(totalProducts, "product")} across {plural(rounds.length, "round")}.</strong>
+              {rounds.length > 1 && " Click each round to see them all."}
+              {totalToReview > 0 && ` ${totalToReview} still to review.`}
+            </p>
+          )}
+          <div role="tablist" aria-label="Rounds" className="flex flex-wrap gap-2">
+            {rounds.length > 1 && (
+              <RoundTab label="All rounds" active={showAll} onSelect={() => setView("all")} todo={totalToReview > 0}
+                        sub={`${plural(totalProducts, "product")}${totalToReview ? ` · ${totalToReview} to review` : ""}`} />
+            )}
+            {rounds.map((r) => {
+              const n = roundNo.get(r.id)!;
+              const c = counts(r);
+              return (
+                <RoundTab key={r.id} label={`Round ${n}`} sub={c.sub} todo={c.toReview > 0}
+                          isNew={r.id === newestId && rounds.length > 1} active={!showAll && active?.id === r.id}
+                          onSelect={() => setView(r.id)} onDelete={() => setPendingDelete(r)} deleteLabel={`Delete Round ${n}`} />
+              );
+            })}
+            {inFlight && (
+              <div className="inline-flex flex-col items-start justify-center gap-0.5 min-w-[8.5rem] pl-4 pr-3.5 py-2.5 rounded-xl border-2 border-dashed border-amber-400 bg-amber-50">
+                <span className="text-sm font-semibold text-stone-900">Round {rounds.length + 1}</span>
+                <span className="text-xs font-semibold text-amber-800">Finding…</span>
               </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {inFlight && latest && (() => {
+        const step = latest.status === "queued" ? -1 : (STAGE_STEP[latest.stage ?? ""] ?? 0);
+        const pct = step < 0 ? 4 : Math.round(((step + 0.5) / STEPS.length) * 100);
+        return (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 space-y-3.5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h4 className="text-base font-bold text-stone-900">Finding Round {rounds.length + 1} for {block.label}</h4>
+              <span className="text-xs text-stone-600 tabular-nums">{elapsed(latest)} · usually 1–3 minutes</span>
+            </div>
+            <div className="h-2 rounded-full bg-amber-200 overflow-hidden" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress">
+              <div className="h-full rounded-full bg-amber-600 transition-all duration-700" style={{ width: `${pct}%` }} />
+            </div>
+            <ol className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {STEPS.map((s, i) => {
+                const state = i < step ? "done" : i === step ? "now" : "todo";
+                return (
+                  <li key={s.label} className="flex gap-2.5 items-start">
+                    <span className={clsx("w-6 h-6 flex-shrink-0 rounded-full flex items-center justify-center text-xs font-bold",
+                      state === "done" ? "bg-emerald-600 text-white" : state === "now" ? "bg-amber-600 text-white animate-pulse" : "bg-white text-stone-500 border border-stone-300")}>
+                      {state === "done" ? <Check className="w-3.5 h-3.5" /> : i + 1}
+                    </span>
+                    <span className="flex flex-col gap-0.5">
+                      <span className={clsx("text-sm", state === "now" ? "font-bold text-amber-900" : state === "done" ? "font-semibold text-stone-900" : "font-medium text-stone-500")}>{s.label}</span>
+                      <span className="text-xs text-stone-600">{s.detail}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-amber-200 pt-3">
+              <span className="text-sm text-stone-700">
+                {step < 0 ? "Waiting for a worker to pick this up…"
+                  : goodMarks + badMarks > 0 ? `Using your ${[goodMarks ? plural(goodMarks, "Good mark") : "", badMarks ? plural(badMarks, "Bad mark") : ""].filter(Boolean).join(" and ")} to steer this round.`
+                  : "Mark products Good or Bad and the next round learns from it."}
+              </span>
+              <button type="button" disabled={cancelling} onClick={() => cancel(latest.id)}
+                      className="h-9 px-3.5 rounded-lg border border-stone-300 bg-white text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-50">
+                {cancelling ? "Cancelling…" : "Cancel"}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {showAll && (
+        <div className="space-y-5">
+          {rounds.slice().reverse().map((r) => {
+            const n = roundNo.get(r.id)!;
+            return (
+              <section key={r.id} className="space-y-2" aria-label={`Round ${n}`}>
+                <div className="flex items-center gap-2.5 pt-1">
+                  <h4 className="text-[15px] font-bold text-stone-900">Round {n}</h4>
+                  {r.id === newestId && <span className="px-1.5 py-px rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">New</span>}
+                  <span className="text-xs text-stone-500">
+                    {plural(r.recommendations.length, "product")}{r.finished_at && ` · ${new Date(r.finished_at + "Z").toLocaleString()}`}
+                  </span>
+                  <div className="flex-1 h-px bg-stone-200" />
+                </div>
+                {r.recommendations.length === 0 ? (
+                  <p className="text-xs text-stone-500">No product met every criterion in this round. Its near misses are on the Round {n} tab.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {r.recommendations.map((rec) => <CompactRec key={rec.id} rec={rec} onFeedback={handleFeedback} />)}
+                  </ul>
+                )}
+              </section>
             );
           })}
+          <p className="text-xs text-stone-500">Near misses are listed on each round&apos;s own tab.</p>
         </div>
       )}
 
       {active && (() => {
+        const n = roundNo.get(active.id)!;
         const isHidden = (fb: Feedback[] | undefined) => latestVerdict(fb) === "bad";
         const visiblePicks = active.recommendations.filter((r) => !isHidden(r.feedback));
         const hiddenPicks = active.recommendations.filter((r) => isHidden(r.feedback));
@@ -547,7 +810,7 @@ function TeamReel({
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500">
             <span>
-              Set {active.generation} · {active.recommendations.length} product{active.recommendations.length === 1 ? "" : "s"}
+              Round {n} · {plural(active.recommendations.length, "product")}
               {hiddenPicks.length > 0 && ` · ${hiddenPicks.length} hidden`}
               {active.finished_at && ` · ${new Date(active.finished_at + "Z").toLocaleString()}`}
             </span>
@@ -566,13 +829,13 @@ function TeamReel({
 
           {active.recommendations.length === 0 ? (
             <p className="text-sm text-stone-500 bg-white border border-stone-200 rounded-xl p-4">
-              No product met every criterion this time. The closest misses are listed below — Try Again searches different angles.
+              No product met every criterion this round. The closest misses are listed below. Find More Products searches different angles.
             </p>
           ) : visiblePicks.length === 0 ? (
             <p className="text-sm text-stone-500 bg-white border border-stone-200 rounded-xl p-4">
-              {hiddenPicks.length === 1 ? "The product in this set was marked Bad and is hidden." : `All ${hiddenPicks.length} products in this set were marked Bad and are hidden.`}{" "}
+              {hiddenPicks.length === 1 ? "The product in this round was marked Bad and is hidden." : `All ${hiddenPicks.length} products in this round were marked Bad and are hidden.`}{" "}
               <button type="button" onClick={() => setShowHidden((v) => !v)} className="font-semibold text-blue-700 hover:underline">{showHidden ? "Hide hidden" : "Show hidden"}</button>
-              {" "}· Try Again for a fresh set.
+              {" "}· Find More Products for a fresh round.
             </p>
           ) : (
             <div className="space-y-3">
@@ -588,7 +851,7 @@ function TeamReel({
             <div className="space-y-2">
               <button type="button" onClick={() => setShowHidden((v) => !v)}
                       className="text-xs font-medium text-stone-600 hover:text-stone-900">
-                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{hiddenPicks.length ? ` (${hiddenPicks.length} product${hiddenPicks.length === 1 ? "" : "s"}${hiddenMisses.length ? `, ${hiddenMisses.length} near miss${hiddenMisses.length === 1 ? "" : "es"}` : ""})` : ""}{showHidden ? " · hide" : " · show"}
+                {showHidden ? "▾" : "▸"} {hiddenCount} hidden{hiddenPicks.length ? ` (${plural(hiddenPicks.length, "product")}${hiddenMisses.length ? `, ${plural(hiddenMisses.length, "near miss", "near misses")}` : ""})` : ""}{showHidden ? " · hide" : " · show"}
               </button>
               {showHidden && (
                 <ul className="space-y-2">
@@ -614,9 +877,9 @@ function TeamReel({
           {visibleMisses.length > 0 && (
             <div className="space-y-2">
               <div className="text-sm font-semibold text-stone-800">
-                {visibleMisses.length} near miss{visibleMisses.length === 1 ? "" : "es"}
+                {plural(visibleMisses.length, "near miss", "near misses")}
                 <span className="ml-2 font-normal text-stone-500">
-                  Close calls. Mark them too — a Good tells the next set you&apos;d take it anyway.
+                  Close calls. Mark them too: a Good tells the next round you&apos;d take it anyway.
                 </span>
               </div>
               <ul className="space-y-2">
@@ -631,10 +894,15 @@ function TeamReel({
         );
       })()}
 
-      {!active && !inFlight && runs.length === 0 && (
+      {rounds.length === 0 && !inFlight && runs.length === 0 && (
         <p className="text-sm text-stone-500">
-          Five products from the web for {block.label}&apos;s scope, each tied to the screenshot it echoes. Mark each one Good or Bad and the next set learns from it.
+          Five products from the web for {block.label}&apos;s scope, each tied to the screenshot it echoes. Mark each one Good or Bad and the next round learns from it.
         </p>
+      )}
+
+      {pendingDelete && (
+        <DeleteRoundDialog roundNo={roundNo.get(pendingDelete.id) ?? 0} products={pendingDelete.recommendations.length}
+                           teamLabel={block.label} busy={deleting} onConfirm={confirmDelete} onClose={() => setPendingDelete(null)} />
       )}
     </div>
   );
@@ -735,7 +1003,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
       alert(err.detail || `Could not queue (${res.status})`);
       return;
     }
-    alert("Queued. The rules rewrite themselves within a minute — close and reopen Team settings to see them.");
+    alert("Queued. The rules rewrite themselves within a minute — close and reopen AI prompt to see them.");
     setTimeout(load, 45000);
   }, [load]);
 
@@ -745,7 +1013,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(err.detail || "Could not save settings");
+      alert(err.detail || "Could not save the AI prompt");
       return;
     }
     await load();
@@ -756,7 +1024,7 @@ export default function AldiRecommendationsPanel({ sessionId, uploads, ready }: 
       <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
         <div>
           <h3 className="font-semibold text-stone-900 text-lg">Product Recommendations</h3>
-          <p className="text-xs text-stone-500 mt-0.5">Five products from the web per set, each tied to the report. Dates in your local time.</p>
+          <p className="text-xs text-stone-500 mt-0.5">Five products from the web per round, each tied to the report. Dates in your local time.</p>
         </div>
         <div className="flex gap-1 bg-white border border-stone-200 rounded-lg p-1">
           {TEAM_ORDER.map((key) => {
