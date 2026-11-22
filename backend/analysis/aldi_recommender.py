@@ -733,10 +733,21 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
 
 # ── Stage 2: discover ────────────────────────────────────────────────────────
 
-async def discover(ctx: RunContext, queries: list[dict]) -> list[dict]:
+async def discover(ctx: RunContext, queries: list[dict], on_query_done=None) -> list[dict]:
+    """`on_query_done(query, picked)` is called as each search finishes, so
+    the worker can report live progress (2026-11-22)."""
     sem = asyncio.Semaphore(settings.aldi_recommend_concurrency)
 
     async def one(q: dict) -> list[dict]:
+        picked = await _one(q)
+        if on_query_done:
+            try:
+                on_query_done(q, picked)
+            except Exception as exc:  # noqa: BLE001 — progress must never break a run
+                log.warning("aldi_progress_failed", run_id=ctx.run_id, error=str(exc))
+        return picked
+
+    async def _one(q: dict) -> list[dict]:
         async with sem:
             body = {
                 "model": ctx.search_model, "max_tokens": 2500,
@@ -837,11 +848,21 @@ async def rank(ctx: RunContext, candidates: list[dict], k: int) -> list[dict]:
 
 # ── Stage 4: verify ──────────────────────────────────────────────────────────
 
-async def verify(ctx: RunContext, candidates: list[dict]) -> dict[int, dict]:
-    """{candidate id: {status, facts, og_image}} — status: verified | blocked | dead | not_product | error."""
+async def verify(ctx: RunContext, candidates: list[dict], on_checked=None) -> dict[int, dict]:
+    """{candidate id: {status, facts, og_image}} — status: verified | blocked | dead | not_product | error.
+    `on_checked(candidate, result)` is called as each page is checked (live progress)."""
     sem = asyncio.Semaphore(settings.aldi_recommend_concurrency)
 
     async def one(c: dict) -> tuple[int, dict]:
+        cid, result = await _one(c)
+        if on_checked:
+            try:
+                on_checked(c, result)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("aldi_progress_failed", run_id=ctx.run_id, error=str(exc))
+        return cid, result
+
+    async def _one(c: dict) -> tuple[int, dict]:
         async with sem:
             data = None
             for tool_type in ("web_fetch_20250910", "web_fetch_20260209"):

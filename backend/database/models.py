@@ -434,6 +434,9 @@ class AldiRecommendationRun(Base):
     search_queries: Mapped[list] = mapped_column(JSON, default=list)
     near_misses: Mapped[list] = mapped_column(JSON, default=list)
     stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Live progress while the run is in flight (2026-11-22): counters, the
+    # latest searches, retailers searched, products just checked.
+    progress: Mapped[Optional[dict]] = mapped_column(JSON, default=dict, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
