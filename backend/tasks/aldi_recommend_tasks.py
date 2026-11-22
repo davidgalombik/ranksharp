@@ -7,6 +7,9 @@ the picks, near misses, thumbnails and the run's cost.
 from __future__ import annotations
 
 import asyncio
+import copy
+import re
+import time
 from datetime import datetime
 
 import structlog
@@ -186,8 +189,96 @@ async def _select_round(db, run, ctx, shown_hashes: set[str]) -> tuple[list[dict
     return accepted[:PICKS], near_misses, verified_by_id, len(verified)
 
 
+class LiveProgress:
+    """Live progress for the panel (2026-11-22). Written to run.progress at
+    most every 1.5 s (forced at step boundaries); the page polls every 4 s.
+    Counts are cumulative across a run's internal search rounds."""
+
+    FLUSH_EVERY = 1.5
+
+    def __init__(self, db, run: AldiRecommendationRun, ctx: rec.RunContext):
+        self.db, self.run, self.ctx = db, run, ctx
+        self.p: dict = {"queries_total": 0, "queries_done": 0, "found": 0, "recent": [],
+                        "retailers": [], "to_verify": 0, "checked": 0, "feed": []}
+        self._last = 0.0
+        # Retailer names as the planner writes them (capitalised), longest
+        # first so "Pottery Barn Kids" wins over "Pottery Barn".
+        names = sorted({r["name"] for r in ctx.retailers if r.get("priority") != "low"}, key=len, reverse=True)
+        self._name_res = [(n, re.compile(r"(?<![\w])" + re.escape(n) + r"(?![\w])")) for n in names]
+        self.flush(force=True)
+
+    def _retailer_in(self, q: dict) -> str | None:
+        if str(q.get("tier") or "open") == "open":
+            return None
+        text_ = q.get("query") or ""
+        for name, rx in self._name_res:
+            if rx.search(text_):
+                return name
+        return None
+
+    def planned(self, queries: list[dict]) -> None:
+        self.p["queries_total"] += len(queries)
+        known = {r["name"] for r in self.p["retailers"]}
+        for q in queries:
+            name = self._retailer_in(q)
+            if name and name not in known:
+                known.add(name)
+                self.p["retailers"].append({"name": name, "done": False})
+        self.flush(force=True)
+
+    def query_done(self, q: dict, picked: list) -> None:
+        self.p["queries_done"] += 1
+        self.p["found"] += len(picked)
+        self.p["recent"] = (self.p["recent"] + [q.get("query") or ""])[-3:]
+        name = self._retailer_in(q)
+        for r in self.p["retailers"]:
+            if r["name"] == name:
+                r["done"] = True
+        self.flush()
+
+    def shortlisted(self, n: int) -> None:
+        self.p["to_verify"] += n
+        self.flush(force=True)
+
+    def checked(self, c: dict, result: dict) -> None:
+        self.p["checked"] += 1
+        f = result.get("facts") or {}
+        name, _tier = rec.retailer_for_domain(c.get("domain") or "", self.ctx.retailers)
+        price = f.get("price_usd")
+        pmin, pmax = float(self.ctx.prefs["price_min"]), float(self.ctx.prefs["price_max"])
+        ok = False
+        if result.get("status") != "verified":
+            tag = "Not a product page" if result.get("status") == "not_product" else "Couldn't open the page"
+        elif price is None:
+            tag = "Skipped · no price listed"
+        elif not (pmin <= float(price) <= pmax):
+            tag = f"Skipped · ${float(price):.0f}, outside ${pmin:.0f}–{pmax:.0f}"
+        elif f.get("in_stock") is False:
+            tag = "Skipped · out of stock"
+        else:
+            ok = True
+            extra = f.get("bestseller_label") or "in stock"
+            tag = f"${float(price):.0f} · {extra}"
+        img = result.get("og_image") or f.get("image_url")
+        entry = {"name": (f.get("product_name") or c.get("title") or c.get("url") or "")[:120],
+                 "retailer": (name or f.get("retailer") or c.get("domain") or "")[:80],
+                 "tag": tag[:60], "ok": ok,
+                 "image": img if isinstance(img, str) and img.startswith("http") else None}
+        self.p["feed"] = ([entry] + self.p["feed"])[:6]
+        self.flush()
+
+    def flush(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last < self.FLUSH_EVERY:
+            return
+        self._last = now
+        self.run.progress = copy.deepcopy(self.p)   # a new object so the JSON change is detected
+        self.db.commit()
+
+
 async def run_pipeline(db, run: AldiRecommendationRun) -> None:
     ctx = load_context(db, run)
+    live = LiveProgress(db, run, ctx)
     shown_hashes = {s["url_hash"] for s in ctx.shown} | {r["url_hash"] for r in ctx.rejected}
     stats: dict = {"rounds": 0, "queries": 0, "found": 0, "to_verify": 0, "verified_now": 0, "blocked_now": 0}
     all_queries: list[dict] = []
@@ -203,6 +294,7 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         all_queries += queries
         run.search_queries = all_queries
         db.commit()
+        live.planned(queries)
         if not queries:
             if round_no == 1:
                 raise RuntimeError("query planning returned nothing")
@@ -211,7 +303,8 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         ctx.previous_queries = ctx.previous_queries + [q["query"] for q in queries]
 
         _set_stage(db, run, "discovering")
-        found = await rec.discover(ctx, queries)
+        found = await rec.discover(ctx, queries, on_query_done=live.query_done)
+        live.flush(force=True)
         _upsert_candidates(db, run, found)
         pool = _pool(db, run)
         stats["queries"] += len(queries)
@@ -222,9 +315,11 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         pending = [_as_dict(c) for c in pool if c.verify_status == "pending" and c.url_hash not in shown_hashes]
         to_verify = await rec.rank(ctx, pending, settings.aldi_recommend_verify)
         stats["to_verify"] += len(to_verify)
+        live.shortlisted(len(to_verify))
 
         _set_stage(db, run, "verifying")
-        results = await rec.verify(ctx, to_verify)
+        results = await rec.verify(ctx, to_verify, on_checked=live.checked)
+        live.flush(force=True)
         by_id = {c.id: c for c in pool}
         for cid, r in results.items():
             c = by_id.get(cid)

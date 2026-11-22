@@ -370,6 +370,9 @@ async def init_db():
             # ALDI session names (2026-11-18): user-chosen sidebar label.
             ("ALTER TABLE aldi_sessions ADD COLUMN IF NOT EXISTS name VARCHAR(200)",
              _col("aldi_sessions", "name")),
+            # Live run progress for the recommendations panel (2026-11-22).
+            ("ALTER TABLE aldi_recommendation_runs ADD COLUMN IF NOT EXISTS progress JSONB DEFAULT '{}'",
+             _col("aldi_recommendation_runs", "progress")),
             # ALDI web product recommender (Phase 3, 2026-11-01). Tables are
             # also created by create_all above; kept here for the record and
             # for the indexes.

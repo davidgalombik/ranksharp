@@ -64,7 +64,14 @@ interface NearMiss {
   feedback?: Feedback[];
   link_status?: string | null;
 }
+interface FeedItem { name: string; retailer: string; tag: string; ok: boolean; image: string | null }
+// Live progress written by the worker while a run is in flight (2026-11-22).
+interface Progress {
+  queries_total?: number; queries_done?: number; found?: number; recent?: string[];
+  retailers?: { name: string; done: boolean }[]; to_verify?: number; checked?: number; feed?: FeedItem[];
+}
 interface Run {
+  progress?: Progress;
   id: number;
   team: string;
   generation: number;
@@ -114,11 +121,50 @@ const FAMILY_LABEL: Record<string, string> = {
   candles: "Candles", fragrances: "Fragrances",
 };
 
-function elapsed(run: Run): string {
-  const start = run.started_at ?? run.created_at;
-  if (!start) return "";
-  const s = Math.max(0, Math.round((Date.now() - new Date(start + "Z").getTime()) / 1000));
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+function secsSince(iso: string | null): number {
+  return iso ? Math.max(0, (Date.now() - new Date(iso + "Z").getTime()) / 1000) : 0;
+}
+
+function fmtClock(secs: number): string {
+  const s = Math.round(secs);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function fmtDuration(secs: number): string {
+  const s = Math.round(secs);
+  return s < 60 ? `${s} sec` : `${Math.floor(s / 60)} min ${s % 60} sec`;
+}
+
+/** Typical run length for this team, from its finished rounds (default ~2 min). */
+function typicalSecs(runs: Run[]): number {
+  const d = runs.filter((r) => r.status === "done" && r.started_at && r.finished_at)
+    .map((r) => (new Date(r.finished_at! + "Z").getTime() - new Date(r.started_at! + "Z").getTime()) / 1000)
+    .filter((x) => x > 5 && x < 1800).sort((a, b) => a - b);
+  return d.length ? d[Math.floor(d.length / 2)] : 110;
+}
+
+function etaText(elapsed: number, typical: number): string {
+  const left = typical - elapsed;
+  if (elapsed > typical * 1.3) return "Taking a little longer than usual";
+  if (left > 75) return `About ${Math.round(left / 60)} min left`;
+  if (left > 15) return `About ${Math.max(20, Math.round(left / 10) * 10)} sec left`;
+  return "Almost done";
+}
+
+/** Where the bar should be for this stage: real counts where the worker
+ *  reports them, an easing creep elsewhere. The caller keeps it monotonic. */
+function targetPct(run: Run, p: Progress, stageSecs: number): number {
+  if (run.status === "queued") return 2;
+  const ease = (tau: number) => 1 - Math.exp(-stageSecs / tau);
+  const ratio = (a?: number, b?: number) => (b ? Math.min(1, (a ?? 0) / b) : 0);
+  switch (run.stage) {
+    case "planning": return 3 + 20 * ease(12);
+    case "discovering": return 25 + 22 * ratio(p.queries_done, p.queries_total);
+    case "ranking": return 48 + 2 * ease(5);
+    case "verifying": return 50 + 25 * ratio(p.checked, p.to_verify);
+    case "planning again": return 50;
+    default: return 76 + 22 * ease(20);   // selecting, repairing, saving
+  }
 }
 
 function thumbSrc(rec: Rec): string | null {
@@ -158,13 +204,13 @@ function StatusPill({ verdict }: { verdict: string | null }) {
 // A select button plus an always-visible × to delete the round.
 
 function RoundTab({
-  label, sub, todo, isNew, active, onSelect, onDelete, deleteLabel,
+  label, sub, todo, isNew, active, onSelect, onDelete, deleteLabel, glow,
 }: {
-  label: string; sub: string; todo?: boolean; isNew?: boolean; active: boolean;
+  label: string; sub: string; todo?: boolean; isNew?: boolean; active: boolean; glow?: boolean;
   onSelect: () => void; onDelete?: () => void; deleteLabel?: string;
 }) {
   return (
-    <div className={clsx("inline-flex items-stretch min-w-[8.5rem] rounded-xl overflow-hidden border transition-colors",
+    <div className={clsx("inline-flex items-stretch min-w-[8.5rem] rounded-xl overflow-hidden border transition-colors", glow && "ring-4 ring-emerald-200",
       active ? "bg-stone-900 border-stone-900 text-white shadow-md shadow-stone-900/20"
              : "bg-white border-stone-300 text-stone-900 hover:border-stone-500")}>
       <button type="button" role="tab" aria-selected={active} onClick={onSelect}
@@ -557,6 +603,62 @@ function TeamReel({
   }, [inFlight]);
   void tick;
 
+  // Live progress bar (2026-11-22): follows the worker's real counts and
+  // creeps forward in between, never backwards, never past 98% until done.
+  const typical = typicalSecs(runs);
+  const stageRef = useRef({ key: "", since: Date.now() });
+  const pctRef = useRef({ id: 0, pct: 0 });
+  let livePct = 0;
+  if (inFlight && latest) {
+    const key = `${latest.id}:${latest.status}:${latest.stage}`;
+    if (stageRef.current.key !== key) stageRef.current = { key, since: Date.now() };
+    if (pctRef.current.id !== latest.id) pctRef.current = { id: latest.id, pct: 0 };
+    const target = targetPct(latest, latest.progress ?? {}, (Date.now() - stageRef.current.since) / 1000);
+    pctRef.current.pct = Math.min(98, Math.max(target, pctRef.current.pct + 0.15));
+    livePct = Math.round(pctRef.current.pct);
+  }
+
+  // Finish moment: banner, tab glow, browser tab title, optional notification.
+  const [celebrate, setCelebrate] = useState<number | null>(null);
+  const [notifyOn, setNotifyOn] = useState(false);
+  const canNotify = typeof window !== "undefined" && "Notification" in window && Notification.permission !== "denied";
+  const prevLatest = useRef<{ id: number; status: string } | null>(null);
+  const baseTitle = useRef("");
+  useEffect(() => {
+    baseTitle.current = document.title;
+    return () => { if (baseTitle.current) document.title = baseTitle.current; };
+  }, []);
+  useEffect(() => {
+    if (!latest) return;
+    const prev = prevLatest.current;
+    prevLatest.current = { id: latest.id, status: latest.status };
+    if (prev && prev.id === latest.id && (prev.status === "queued" || prev.status === "running") && latest.status === "done") {
+      setCelebrate(latest.id);
+      if (notifyOn && document.hidden && "Notification" in window && Notification.permission === "granted") {
+        try {
+          new Notification(`Round ${roundNo.get(latest.id) ?? ""} is ready`,
+            { body: `${plural(latest.recommendations.length, "new product")} for ${block.label}.` });
+        } catch { /* some browsers only allow notifications from a service worker */ }
+      }
+    }
+  }, [latest?.id, latest?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const base = baseTitle.current || document.title;
+    if (inFlight) document.title = `Finding products ${livePct}% · ${base}`;
+    else if (celebrate && document.hidden) document.title = `✓ Round ${roundNo.get(celebrate) ?? ""} ready · ${base}`;
+    else document.title = base;
+  }, [inFlight, livePct, celebrate]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden && !inFlight && baseTitle.current) document.title = baseTitle.current; };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [inFlight]);
+  async function enableNotify() {
+    if (!("Notification" in window)) return;
+    const perm = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+    setNotifyOn(perm === "granted");
+  }
+
   const counts = (r: Run) => {
     const products = r.recommendations.length;
     const toReview = r.recommendations.filter((x) => !x.feedback.length).length;
@@ -713,13 +815,14 @@ function TeamReel({
               return (
                 <RoundTab key={r.id} label={`Round ${n}`} sub={c.sub} todo={c.toReview > 0}
                           isNew={r.id === newestId && rounds.length > 1} active={!showAll && active?.id === r.id}
-                          onSelect={() => setView(r.id)} onDelete={() => setPendingDelete(r)} deleteLabel={`Delete Round ${n}`} />
+                          onSelect={() => setView(r.id)} onDelete={() => setPendingDelete(r)} deleteLabel={`Delete Round ${n}`}
+                          glow={celebrate === r.id} />
               );
             })}
             {inFlight && (
               <div className="inline-flex flex-col items-start justify-center gap-0.5 min-w-[8.5rem] pl-4 pr-3.5 py-2.5 rounded-xl border-2 border-dashed border-amber-400 bg-amber-50">
                 <span className="text-sm font-semibold text-stone-900">Round {rounds.length + 1}</span>
-                <span className="text-xs font-semibold text-amber-800">Finding…</span>
+                <span className="text-xs font-semibold text-amber-800">{livePct}% · Finding…</span>
               </div>
             )}
           </div>
@@ -727,45 +830,173 @@ function TeamReel({
       )}
 
       {inFlight && latest && (() => {
+        const p = latest.progress ?? {};
         const step = latest.status === "queued" ? -1 : (STAGE_STEP[latest.stage ?? ""] ?? 0);
-        const pct = step < 0 ? 4 : Math.round(((step + 0.5) / STEPS.length) * 100);
+        const el = secsSince(latest.started_at ?? latest.created_at);
+        const recent = p.recent ?? [];
+        const retailers = p.retailers ?? [];
+        const feed = p.feed ?? [];
+        const toVerify = p.to_verify ?? 0;
+        const nudge = rounds.slice().reverse().find((r) => counts(r).toReview > 0);
+        const card = (on: boolean) => clsx("bg-white rounded-xl px-4 py-3 flex flex-col gap-0.5", on ? "border-2 border-amber-500" : "border border-amber-200");
         return (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 space-y-3.5">
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 space-y-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h4 className="text-base font-bold text-stone-900">Finding Round {rounds.length + 1} for {block.label}</h4>
-              <span className="text-xs text-stone-600 tabular-nums">{elapsed(latest)} · usually 1–3 minutes</span>
+              <span className="text-sm text-stone-700 tabular-nums">
+                <strong className="text-stone-900">{step < 0 ? "Starting…" : etaText(el, typical)}</strong> · {fmtClock(el)} so far
+              </span>
             </div>
-            <div className="h-2 rounded-full bg-amber-200 overflow-hidden" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress">
-              <div className="h-full rounded-full bg-amber-600 transition-all duration-700" style={{ width: `${pct}%` }} />
-            </div>
-            <ol className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {STEPS.map((s, i) => {
-                const state = i < step ? "done" : i === step ? "now" : "todo";
-                return (
-                  <li key={s.label} className="flex gap-2.5 items-start">
-                    <span className={clsx("w-6 h-6 flex-shrink-0 rounded-full flex items-center justify-center text-xs font-bold",
-                      state === "done" ? "bg-emerald-600 text-white" : state === "now" ? "bg-amber-600 text-white animate-pulse" : "bg-white text-stone-500 border border-stone-300")}>
-                      {state === "done" ? <Check className="w-3.5 h-3.5" /> : i + 1}
-                    </span>
-                    <span className="flex flex-col gap-0.5">
-                      <span className={clsx("text-sm", state === "now" ? "font-bold text-amber-900" : state === "done" ? "font-semibold text-stone-900" : "font-medium text-stone-500")}>{s.label}</span>
-                      <span className="text-xs text-stone-600">{s.detail}</span>
-                    </span>
+
+            <div className="space-y-2">
+              <div className="relative h-2.5 rounded-full bg-amber-200 overflow-hidden" role="progressbar" aria-valuenow={livePct} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress">
+                <div className="absolute inset-y-0 left-0 rounded-full bg-amber-600 transition-all duration-1000 ease-out" style={{ width: `${livePct}%` }} />
+                <div className="absolute inset-y-0 w-[8%] rounded-full bg-white/50 animate-pulse transition-all duration-1000" style={{ left: `${Math.max(0, livePct - 8)}%` }} />
+              </div>
+              <ol className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-xs">
+                {STEPS.map((st, i) => (
+                  <li key={st.label} className={clsx(i < step ? "text-emerald-800 font-semibold" : i === step ? "text-amber-900 font-bold" : "text-stone-500")}>
+                    {i < step ? "✓ " : i === step ? "● " : ""}{st.label}
                   </li>
-                );
-              })}
-            </ol>
+                ))}
+              </ol>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className={card(step === 0)}>
+                <span className="text-2xl font-extrabold tabular-nums">{p.queries_total || "…"}</span>
+                <span className="text-xs text-stone-600">{p.queries_total ? `searches written · ${p.queries_done ?? 0} run` : "searches being written from your report"}</span>
+              </div>
+              <div className={card(step === 1)}>
+                <span className="text-2xl font-extrabold tabular-nums">{p.found ?? 0}</span>
+                <span className="text-xs text-stone-600">{toVerify ? `products found, shortlisted to ${toVerify}` : "products found so far"}</span>
+              </div>
+              <div className={card(step === 2)}>
+                <span className={clsx("text-2xl font-extrabold tabular-nums", !toVerify && "text-stone-400")}>
+                  {p.checked ?? 0} <span className="text-stone-400 font-bold">/ {toVerify || 15}</span>
+                </span>
+                {toVerify > 0 && (
+                  <div className="flex gap-0.5 my-1" aria-hidden="true">
+                    {Array.from({ length: toVerify }, (_, i) => (
+                      <span key={i} className={clsx("flex-1 h-1.5 rounded-full", i < (p.checked ?? 0) ? "bg-amber-600" : "bg-stone-200")} />
+                    ))}
+                  </div>
+                )}
+                <span className="text-xs text-stone-600">product pages checked</span>
+              </div>
+            </div>
+
+            {step >= 2 && feed.length > 0 ? (
+              <div className="bg-white border border-amber-200 rounded-xl px-4 py-3.5 space-y-2">
+                <span className="text-[11px] font-bold tracking-wider text-amber-800">JUST CHECKED</span>
+                <ul className="space-y-2">
+                  {feed.slice(0, 4).map((f, i) => (
+                    <li key={`${f.name}-${i}`} className={clsx("flex items-center gap-3", i === 1 && "opacity-85", i >= 2 && "opacity-60")}>
+                      <span className="w-10 h-10 flex-shrink-0 rounded-lg bg-stone-100 overflow-hidden">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        {f.image && <img src={f.image} alt="" className="w-full h-full object-cover"
+                                         onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
+                      </span>
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm font-semibold text-stone-900 truncate">{f.name}</span>
+                        <span className="text-xs text-stone-500">{f.retailer}</span>
+                      </span>
+                      <span className={clsx("px-2 py-0.5 rounded-full text-xs whitespace-nowrap", f.ok ? "bg-emerald-100 text-emerald-900 font-semibold" : "bg-stone-100 text-stone-600")}>
+                        {f.ok ? "✓ " : ""}{f.tag}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <div className="bg-white border border-amber-200 rounded-xl px-4 py-3.5 space-y-2.5">
+                <span className="text-[11px] font-bold tracking-wider text-amber-800">NOW SEARCHING</span>
+                {recent.length === 0 ? (
+                  <p className="text-sm text-stone-600">{step < 0 ? "Waiting for a worker to pick this up…" : "Writing searches from the report and your marks…"}</p>
+                ) : (
+                  <div className="space-y-1.5 text-sm">
+                    {recent.map((q, i) => i === recent.length - 1 ? (
+                      <p key={`${q}-${i}`} className="font-semibold text-stone-900">“{q}”<span className="text-amber-600 animate-pulse"> ▍</span></p>
+                    ) : (
+                      <p key={`${q}-${i}`} className={i === recent.length - 2 ? "text-stone-500" : "text-stone-400"}>✓ “{q}”</p>
+                    ))}
+                  </div>
+                )}
+                {retailers.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-stone-500 mr-0.5">Retailers:</span>
+                    {retailers.slice(0, 10).map((r) => (
+                      <span key={r.name} className={clsx("px-2 py-0.5 rounded-full text-xs", r.done ? "bg-emerald-100 text-emerald-900 font-semibold" : "bg-stone-100 text-stone-600")}>
+                        {r.name}{r.done ? " ✓" : ""}
+                      </span>
+                    ))}
+                    <span className="px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 text-xs">+ the open web</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-amber-200 pt-3">
               <span className="text-sm text-stone-700">
-                {step < 0 ? "Waiting for a worker to pick this up…"
-                  : goodMarks + badMarks > 0 ? `Using your ${[goodMarks ? plural(goodMarks, "Good mark") : "", badMarks ? plural(badMarks, "Bad mark") : ""].filter(Boolean).join(" and ")} to steer this round.`
-                  : "Mark products Good or Bad and the next round learns from it."}
+                {nudge ? (
+                  <>While you wait: <strong className="text-stone-900">{plural(counts(nudge).toReview, "product")} in Round {roundNo.get(nudge.id)}</strong> {counts(nudge).toReview === 1 ? "still needs" : "still need"} a Good / Bad.{" "}
+                    <button type="button" onClick={() => setView(nudge.id)} className="font-semibold text-blue-700 hover:underline">Review {counts(nudge).toReview === 1 ? "it" : "them"}</button></>
+                ) : goodMarks + badMarks > 0 ? (
+                  `Using your ${[goodMarks ? plural(goodMarks, "Good mark") : "", badMarks ? plural(badMarks, "Bad mark") : ""].filter(Boolean).join(" and ")} to steer this round.`
+                ) : "Mark products Good or Bad and the next round learns from it."}
               </span>
-              <button type="button" disabled={cancelling} onClick={() => cancel(latest.id)}
-                      className="h-9 px-3.5 rounded-lg border border-stone-300 bg-white text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-50">
-                {cancelling ? "Cancelling…" : "Cancel"}
-              </button>
+              <span className="flex items-center gap-2">
+                {canNotify && (
+                  <button type="button" onClick={enableNotify} disabled={notifyOn}
+                          className="h-9 px-3.5 rounded-lg border border-stone-300 bg-white text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:text-emerald-800 disabled:border-emerald-300 disabled:bg-emerald-50">
+                    {notifyOn ? "✓ We'll notify you" : "Notify me when it's done"}
+                  </button>
+                )}
+                <button type="button" disabled={cancelling} onClick={() => cancel(latest.id)}
+                        className="h-9 px-3.5 rounded-lg border border-stone-300 bg-white text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-50">
+                  {cancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              </span>
             </div>
+          </div>
+        );
+      })()}
+
+      {celebrate && !inFlight && (() => {
+        const r = rounds.find((x) => x.id === celebrate);
+        if (!r) return null;
+        const n = roundNo.get(r.id)!;
+        const k = r.recommendations.length;
+        const took = r.started_at && r.finished_at
+          ? (new Date(r.finished_at + "Z").getTime() - new Date(r.started_at + "Z").getTime()) / 1000 : null;
+        const st = r.stats || {};
+        return (
+          <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-5 flex flex-wrap items-center gap-4" role="status">
+            <span className="w-12 h-12 flex-shrink-0 rounded-full bg-emerald-600 text-white flex items-center justify-center"><Check className="w-7 h-7" /></span>
+            <div className="flex-1 min-w-[16rem]">
+              <h4 className="text-lg font-extrabold text-stone-900">{k ? `${plural(k, "new product")} found for ${block.label}` : `Round ${n} finished`}</h4>
+              <p className="text-sm text-stone-700">
+                {k ? `Round ${n} is ready` : "No product met every criterion this time; its near misses are listed below"}
+                {took != null && ` · took ${fmtDuration(took)}`}
+                {st.found ? ` · ${st.found} products considered, ${st.to_verify ?? 0} checked${k ? `, the best ${k} kept` : ""}` : ""}.
+              </p>
+            </div>
+            {k > 0 && (
+              <div className="flex gap-1.5">
+                {r.recommendations.slice(0, 5).map((x) => {
+                  const src = thumbSrc(x);
+                  return (
+                    <span key={x.id} className="w-12 h-12 rounded-lg bg-white border-2 border-white shadow overflow-hidden">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      {src && <img src={src} alt="" className="w-full h-full object-cover" />}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            <button type="button" onClick={() => { setView(r.id); setCelebrate(null); }}
+                    className="h-11 px-4 rounded-xl bg-emerald-700 text-white text-sm font-bold hover:bg-emerald-800">See Round {n}</button>
+            <button type="button" aria-label="Dismiss" onClick={() => setCelebrate(null)} className="text-stone-500 hover:text-stone-900 text-xl leading-none px-1">×</button>
           </div>
         );
       })()}

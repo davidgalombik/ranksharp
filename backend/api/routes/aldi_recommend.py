@@ -81,7 +81,7 @@ def _run_out(run: AldiRecommendationRun) -> dict:
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "cost_usd": round(float(run.cost_usd or 0.0), 4), "searches": run.searches, "fetches": run.fetches,
-        "error": run.error, "stats": run.stats or {},
+        "error": run.error, "stats": run.stats or {}, "progress": run.progress or {},
         "recommendations": [_rec_out(r) for r in sorted(run.recommendations or [], key=lambda x: x.position)
                             if (r.kind or "pick") == "pick"],
         # Near misses are rows since 2026-11-04 (feedback-able); older runs
