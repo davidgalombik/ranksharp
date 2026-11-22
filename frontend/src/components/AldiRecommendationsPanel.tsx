@@ -338,55 +338,61 @@ function FeedbackRow({
   onSubmit: (verdict: "good" | "bad", note: string) => Promise<void>;
   placeholder: string;
 }) {
+  // Good / Bad saves the moment it is clicked (2026-11-22); the note is
+  // optional and saves on Enter or "Save note". The server keeps one
+  // judgment per product, so later saves update it.
   const latest = feedback.length ? feedback[feedback.length - 1] : null;
-  const [verdict, setVerdict] = useState<"good" | "bad" | null>((latest?.verdict as "good" | "bad") ?? null);
-  const [note, setNote] = useState(latest?.note ?? "");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const l = feedback.length ? feedback[feedback.length - 1] : null;
-    setVerdict((l?.verdict as "good" | "bad") ?? null);
-    setNote(l?.note ?? "");
-  }, [feedback]);
-
   const savedVerdict = (latest?.verdict as "good" | "bad" | undefined) ?? null;
   const savedNote = latest?.note ?? "";
-  const changed = verdict !== null && (verdict !== savedVerdict || note.trim() !== savedNote.trim());
+  const [note, setNote] = useState(savedNote);
+  const [saving, setSaving] = useState<"good" | "bad" | "note" | null>(null);
 
-  async function submit() {
-    if (!verdict) return;
-    setSaving(true);
-    try {
-      await onSubmit(verdict, note);
-    } finally {
-      setSaving(false);
-    }
+  useEffect(() => { setNote(feedback.length ? feedback[feedback.length - 1].note ?? "" : ""); }, [feedback]);
+
+  const noteChanged = note.trim() !== savedNote.trim();
+
+  async function pick(v: "good" | "bad") {
+    if (saving || v === savedVerdict) return;
+    setSaving(v);
+    try { await onSubmit(v, note); } finally { setSaving(null); }
+  }
+
+  async function saveNote() {
+    if (!savedVerdict || !noteChanged || saving) return;
+    setSaving("note");
+    try { await onSubmit(savedVerdict, note); } finally { setSaving(null); }
   }
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <button type="button" disabled={saving} onClick={() => setVerdict("good")}
+      <button type="button" disabled={!!saving} onClick={() => pick("good")} aria-pressed={savedVerdict === "good"}
               className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
-                verdict === "good" ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-emerald-50")}>
-        👍 Good
+                savedVerdict === "good" ? "bg-emerald-600 border-emerald-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-emerald-50")}>
+        {saving === "good" ? "Saving…" : "👍 Good"}
       </button>
-      <button type="button" disabled={saving} onClick={() => setVerdict("bad")}
+      <button type="button" disabled={!!saving} onClick={() => pick("bad")} aria-pressed={savedVerdict === "bad"}
               className={clsx("px-3 py-1 rounded-md text-xs font-medium border transition-colors",
-                verdict === "bad" ? "bg-rose-600 border-rose-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-rose-50")}>
-        👎 Bad
+                savedVerdict === "bad" ? "bg-rose-600 border-rose-600 text-white" : "bg-white border-stone-300 text-stone-700 hover:bg-rose-50")}>
+        {saving === "bad" ? "Saving…" : "👎 Bad"}
       </button>
       <input
         value={note}
         onChange={(e) => setNote(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && changed) submit(); }}
-        placeholder={placeholder}
+        onKeyDown={(e) => { if (e.key === "Enter") saveNote(); }}
+        placeholder={savedVerdict ? "Add a reason (optional), then press Enter" : placeholder}
+        aria-label="Reason (optional)"
         className="flex-1 min-w-[12rem] text-xs border border-stone-300 rounded-md px-2 py-1 bg-white"
       />
-      <button type="button" disabled={saving || !changed} onClick={submit}
-              className={clsx("px-3 py-1 rounded-md text-xs font-semibold transition-colors",
-                changed ? "bg-stone-900 text-white hover:bg-stone-700" : "bg-stone-200 text-stone-400 cursor-not-allowed")}>
-        {saving ? "Saving…" : savedVerdict && !changed ? "Saved" : "Submit"}
-      </button>
+      {noteChanged ? (
+        <button type="button" disabled={!savedVerdict || !!saving} onClick={saveNote}
+                title={savedVerdict ? "" : "Choose Good or Bad first"}
+                className={clsx("px-3 py-1 rounded-md text-xs font-semibold transition-colors",
+                  savedVerdict ? "bg-stone-900 text-white hover:bg-stone-700" : "bg-stone-200 text-stone-500 cursor-not-allowed")}>
+          {saving === "note" ? "Saving…" : "Save note"}
+        </button>
+      ) : savedVerdict ? (
+        <span className="px-2 py-1 text-xs font-medium text-emerald-700">✓ Saved</span>
+      ) : null}
     </div>
   );
 }
@@ -666,7 +672,11 @@ function TeamReel({
   };
   const totalProducts = rounds.reduce((n, r) => n + r.recommendations.length, 0);
   const totalToReview = rounds.reduce((n, r) => n + counts(r).toReview, 0);
-  const newestCounts = newest ? counts(newest) : null;
+  // The "rated" meter follows what the buyer is looking at (2026-11-22):
+  // the open round, or every round on the All rounds tab.
+  const meter = showAll
+    ? { label: "All rounds", products: totalProducts, toReview: totalToReview }
+    : active ? { label: `Round ${roundNo.get(active.id)}`, ...counts(active) } : null;
   let goodMarks = 0, badMarks = 0;
   for (const r of runs) {
     for (const item of [...r.recommendations, ...r.near_misses]) {
@@ -722,13 +732,15 @@ function TeamReel({
                 <Sparkle double className="w-[18px] h-[18px] text-amber-300" />
                 {starting ? "Starting…" : rounds.length === 0 ? "Find Products" : "Find More Products"}
               </button>
-              {newestCounts && newestCounts.products > 0 && (
-                <div className="flex items-center gap-2 text-[11px] text-stone-600" title="Rate the newest round to sharpen the next one">
+              {meter && meter.products > 0 && (
+                <div className="flex items-center gap-2 text-[11px] text-stone-600" title="Rate products Good or Bad to sharpen the next round">
                   <div className="flex-1 h-1.5 rounded-full bg-stone-200 overflow-hidden" aria-hidden="true">
                     <div className="h-full rounded-full bg-emerald-600 transition-all"
-                         style={{ width: `${Math.round(100 * (newestCounts.products - newestCounts.toReview) / newestCounts.products)}%` }} />
+                         style={{ width: `${Math.round(100 * (meter.products - meter.toReview) / meter.products)}%` }} />
                   </div>
-                  <span>{newestCounts.toReview === 0 ? `All ${newestCounts.products} rated` : `${newestCounts.products - newestCounts.toReview} of ${newestCounts.products} rated`}</span>
+                  <span className="whitespace-nowrap">
+                    {meter.label}: {meter.toReview === 0 ? `all ${meter.products} rated` : `${meter.products - meter.toReview} of ${meter.products} rated`}
+                  </span>
                 </div>
               )}
             </div>

@@ -280,17 +280,30 @@ async def add_feedback(rec_id: int, body: FeedbackBody, db: AsyncSession = Depen
     )).scalar_one_or_none()
     if not r:
         raise HTTPException(status_code=404, detail="Recommendation not found")
-    fb = AldiRecommendationFeedback(
-        recommendation_id=rec_id, verdict=verdict, note=(body.note or "").strip()[:1000] or None,
-        # Denormalised so the judgment outlives the report it came from.
-        team=r.team, session_id=r.session_id, product_name=r.product_name, retailer=r.retailer, url=r.url,
-        price_usd=r.price_usd, material_family=r.material_family, kind=r.kind or "pick", fails=r.fails,
-        theme_name=r.theme_name,
-    )
-    db.add(fb)
+    note = (body.note or "").strip()[:1000] or None
+    # One judgment per product (2026-11-22): Good / Bad now saves on click
+    # and a note saves separately, so a later save updates the existing row
+    # instead of adding another (which would count the product twice in
+    # the distillation log).
+    existing = sorted(r.feedback or [], key=lambda f: f.id)
+    if existing:
+        fb = existing[-1]
+        fb.verdict, fb.note = verdict, note
+        is_new = False
+    else:
+        fb = AldiRecommendationFeedback(
+            recommendation_id=rec_id, verdict=verdict, note=note,
+            # Denormalised so the judgment outlives the report it came from.
+            team=r.team, session_id=r.session_id, product_name=r.product_name, retailer=r.retailer, url=r.url,
+            price_usd=r.price_usd, material_family=r.material_family, kind=r.kind or "pick", fails=r.fails,
+            theme_name=r.theme_name,
+        )
+        db.add(fb)
+        is_new = True
     await db.commit()
     await db.refresh(r)
-    await _maybe_distill(db, r.team)
+    if is_new:
+        await _maybe_distill(db, r.team)
     return _rec_out(r)
 
 
