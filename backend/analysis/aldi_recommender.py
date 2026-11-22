@@ -679,6 +679,14 @@ class RunContext:
 
 # ── Stage 1: plan ────────────────────────────────────────────────────────────
 
+# Output room for every model call in the pipeline (2026-11-22). Current
+# models think by default and thinking counts against max_tokens; the old
+# 2500-6000 limits could leave no room for the answer, so a page check came
+# back empty (dropped as "not a product page") or planning had no JSON.
+# Unused allowance costs nothing.
+MAX_TOKENS = 16000
+
+
 async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = None) -> list[dict]:
     """`hints` (second round) are the reasons the first round's candidates
     failed, so the planner can steer toward products that will qualify."""
@@ -704,18 +712,29 @@ async def plan_queries(ctx: RunContext, n: int, hints: Optional[list[str]] = Non
         retailer_block=ctx.retailer_block(), avoid_block=avoid, feedback_block=ctx.feedback_block(),
         hints_block=hints_block, rotation_block=rotation_block, n=n, amazon_note=amazon_note,
     )
-    data = await messages_create(
-        {"model": ctx.fast_model, "max_tokens": 4000, "messages": [{"role": "user", "content": prompt}]},
-        feature="aldi_recommend_plan", ref_type="aldi_run", ref_id=ctx.run_id,
-    )
-    text_out = response_text(data)
-    try:
-        raw = parse_json(text_out)
-    except ValueError as exc:   # JSONDecodeError is a ValueError
-        log.error("aldi_recommend_plan_unparseable", run_id=ctx.run_id, team=ctx.team, error=str(exc),
-                  response=text_out[:2000])
-        raise RuntimeError(f"Query planning returned text that is not valid JSON ({exc}). "
-                           "Try Again usually succeeds.") from exc
+    # Room to think (2026-11-22): Sonnet 5.5 thinks by default and thinking
+    # counts against max_tokens. At 4000 the thinking sometimes used it all
+    # and the reply had no text ("no JSON in response"), mostly on the
+    # second planning round. One retry, and the stop reason is logged.
+    body = {"model": ctx.fast_model, "max_tokens": MAX_TOKENS, "messages": [{"role": "user", "content": prompt}]}
+    raw = None
+    for attempt in (1, 2):
+        data = await messages_create(body, feature="aldi_recommend_plan", ref_type="aldi_run", ref_id=ctx.run_id)
+        text_out = response_text(data)
+        try:
+            raw = parse_json(text_out)
+        except ValueError as exc:   # JSONDecodeError is a ValueError
+            raw = None
+            log.error("aldi_recommend_plan_unparseable", run_id=ctx.run_id, team=ctx.team, attempt=attempt,
+                      stop_reason=data.get("stop_reason"), error=str(exc), response=text_out[:2000])
+            continue
+        if isinstance(raw, dict):
+            raw = raw.get("queries") or []
+        if raw:
+            break
+    if not raw:
+        raise RuntimeError("Query planning did not return any searches after two attempts. "
+                           "Find More Products usually succeeds on the next try.")
     out: list[dict] = []
     seen: set[str] = set()
     for q in raw if isinstance(raw, list) else []:
@@ -750,7 +769,7 @@ async def discover(ctx: RunContext, queries: list[dict], on_query_done=None) -> 
     async def _one(q: dict) -> list[dict]:
         async with sem:
             body = {
-                "model": ctx.search_model, "max_tokens": 2500,
+                "model": ctx.search_model, "max_tokens": MAX_TOKENS,
                 "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1,
                            "user_location": {"type": "approximate", "country": "US"}}],
                 "messages": [{"role": "user", "content": ctx.text["discover"].format(query=q["query"])}],
@@ -819,7 +838,7 @@ async def rank(ctx: RunContext, candidates: list[dict], k: int) -> list[dict]:
         digest_short=ctx.digest_short(), candidate_block="\n".join(lines), feedback_block=ctx.feedback_block(), k=k,
     )
     data = await messages_create(
-        {"model": ctx.fast_model, "max_tokens": 3000, "messages": [{"role": "user", "content": prompt}]},
+        {"model": ctx.fast_model, "max_tokens": MAX_TOKENS, "messages": [{"role": "user", "content": prompt}]},
         feature="aldi_recommend_rank", ref_type="aldi_run", ref_id=ctx.run_id,
     )
     try:
@@ -867,7 +886,7 @@ async def verify(ctx: RunContext, candidates: list[dict], on_checked=None) -> di
             data = None
             for tool_type in ("web_fetch_20250910", "web_fetch_20260209"):
                 body = {
-                    "model": ctx.fast_model, "max_tokens": 2500,
+                    "model": ctx.fast_model, "max_tokens": MAX_TOKENS,
                     "tools": [{"type": tool_type, "name": "web_fetch", "max_uses": 1}],
                     "messages": [{"role": "user", "content": ctx.text["verify"].format(url=c["url"])}],
                 }
@@ -1010,7 +1029,7 @@ async def select(ctx: RunContext, verified: list[dict], n: int, fixed: Optional[
         n=n, gap_note=gap_note,
     )
     data = await messages_create(
-        {"model": ctx.strong_model, "max_tokens": 6000, "system": system,
+        {"model": ctx.strong_model, "max_tokens": MAX_TOKENS, "system": system,
          "messages": [{"role": "user", "content": user}]},
         feature="aldi_recommend_select", ref_type="aldi_run", ref_id=ctx.run_id,
     )
@@ -1146,7 +1165,7 @@ async def distill_rules(team: str, items: list[dict], current_rules: str, memo: 
     )
     try:
         data = await messages_create(
-            {"model": settings.aldi_distill_model, "max_tokens": 3000, "messages": [{"role": "user", "content": prompt}]},
+            {"model": settings.aldi_distill_model, "max_tokens": MAX_TOKENS, "messages": [{"role": "user", "content": prompt}]},
             feature="aldi_distill", ref_type="aldi_team", ref_id=ref_id,
         )
         out = parse_json(response_text(data))
@@ -1169,7 +1188,7 @@ async def check_link(url: str, *, ref_id: Optional[int] = None) -> dict:
     fetch was refused, which says nothing about the product."""
     data = None
     for tool_type in ("web_fetch_20250910", "web_fetch_20260209"):
-        body = {"model": settings.aldi_linkcheck_model, "max_tokens": 400,
+        body = {"model": settings.aldi_linkcheck_model, "max_tokens": 4000,
                 "tools": [{"type": tool_type, "name": "web_fetch", "max_uses": 1}],
                 "messages": [{"role": "user", "content": LINKCHECK_PROMPT.format(url=url)}]}
         try:
