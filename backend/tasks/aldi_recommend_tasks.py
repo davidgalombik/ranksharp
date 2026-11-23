@@ -125,9 +125,17 @@ def load_context(db, run: AldiRecommendationRun) -> rec.RunContext:
             n = sum(1 for q in previous_queries if pat.search(q))
             if n:
                 searched[r["name"]] = n
-    return rec.RunContext(run_id=run.id, session_id=run.session_id, team=run.team, digest=digest, prefs=prefs,
-                          retailers=retailers, shown=shown, feedback=feedback, previous_queries=previous_queries,
-                          approved=approved, rejected=rejected, searched_retailers=searched)
+    ctx = rec.RunContext(run_id=run.id, session_id=run.session_id, team=run.team, digest=digest, prefs=prefs,
+                         retailers=retailers, shown=shown, feedback=feedback, previous_queries=previous_queries,
+                         approved=approved, rejected=rejected, searched_retailers=searched)
+    # Earlier near misses count as shown too (2026-11-23), so a later round
+    # neither re-lists them nor picks them, except ones the buyer marked
+    # Good, which stay eligible as picks.
+    approved_ids = {a["candidate_id"] for a in approved}
+    for s in shown_rows:
+        if s.kind == "near_miss" and not (s.candidate_id and int(s.candidate_id) in approved_ids):
+            ctx.seen.add(s.url, s.product_name)
+    return ctx
 
 
 def _upsert_candidates(db, run: AldiRecommendationRun, found: list[dict]) -> None:
@@ -160,7 +168,9 @@ async def _select_round(db, run, ctx, shown_hashes: set[str]) -> tuple[list[dict
     """Select + enforce over the whole verified pool. Returns
     (accepted picks, near misses, verified_by_id, verified pool size)."""
     verified = [_as_dict(c) for c in _pool(db, run)
-                if c.verify_status == "verified" and c.url_hash not in shown_hashes]
+                if c.verify_status == "verified" and c.url_hash not in shown_hashes
+                and (c.id in ctx.approved_overrides
+                     or not ctx.seen.match(c.url, (c.facts or {}).get("product_name") or c.title))]
     verified_by_id = {c["id"]: c for c in verified}
     if not verified:
         return [], [], verified_by_id, 0
@@ -312,7 +322,8 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         stats["pool"] = len(pool)
 
         _set_stage(db, run, "ranking")
-        pending = [_as_dict(c) for c in pool if c.verify_status == "pending" and c.url_hash not in shown_hashes]
+        pending = [_as_dict(c) for c in pool if c.verify_status == "pending" and c.url_hash not in shown_hashes
+                   and not ctx.seen.match(c.url, c.title)]
         to_verify = await rec.rank(ctx, pending, settings.aldi_recommend_verify)
         stats["to_verify"] += len(to_verify)
         live.shortlisted(len(to_verify))
@@ -376,6 +387,10 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
     pool_by_id = {c.id: c for c in _pool(db, run)}
     named = []
     seen_miss: set[int] = set()
+    listed_now = rec.SeenProducts()
+    for p_ in picks_out:
+        pc = verified_by_id.get(p_["candidate_id"]) or {}
+        listed_now.add(pc.get("url"), (pc.get("facts") or {}).get("product_name") or pc.get("title"))
     chosen_ids = {p["candidate_id"] for p in picks_out}
     for m in near_misses:
         if len(named) >= 12:
@@ -387,6 +402,13 @@ async def run_pipeline(db, run: AldiRecommendationRun) -> None:
         c = pool_by_id.get(cid)
         if not c or cid in seen_miss or cid in chosen_ids:
             continue
+        # No repeats in the near-miss list (2026-11-23): not a product listed
+        # in an earlier round, nor a variant of a pick or near miss already
+        # listed in this one.
+        mname = (c.facts or {}).get("product_name") or c.title
+        if ctx.seen.match(c.url, mname) or listed_now.match(c.url, mname):
+            continue
+        listed_now.add(c.url, mname)
         seen_miss.add(cid)
         named.append({"candidate_id": cid, "product_name": (c.facts or {}).get("product_name") or c.title,
                       "retailer": (c.facts or {}).get("retailer") or c.domain, "url": c.url,
