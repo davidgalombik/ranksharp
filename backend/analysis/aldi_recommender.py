@@ -506,6 +506,69 @@ def url_hash(url: str) -> str:
     return hashlib.sha256(normalise_url(url).encode("utf-8")).hexdigest()
 
 
+_NAME_STOP = {"the", "a", "an", "and", "with", "for", "of", "in", "by", "to", "w", "set", "pc", "pcs", "piece", "pieces"}
+
+
+def _name_tokens(name: Optional[str]) -> set[str]:
+    """Distinctive words of a product name (no numbers, sizes or filler)."""
+    toks = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return {t for t in toks if len(t) > 1 and not t.isdigit() and t not in _NAME_STOP}
+
+
+def _path_key(url: Optional[str]) -> Optional[tuple[str, str]]:
+    """(domain, product path) ignoring the query string, so colour / size
+    options of one product page match. Only for paths specific enough to
+    name one product (a slug with a hyphen or digits), never "/product.aspx"."""
+    if not url:
+        return None
+    try:
+        parts = urlsplit(normalise_url(url))
+    except Exception:  # noqa: BLE001
+        return None
+    path = parts.path.rstrip("/").lower()
+    last = path.rsplit("/", 1)[-1]
+    if len(last) < 8 or not (("-" in last) or any(ch.isdigit() for ch in last)):
+        return None
+    return parts.netloc, path
+
+
+class SeenProducts:
+    """Products already shown for this report and team (2026-11-23). A
+    product counts as seen when it matches an earlier one by exact link, by
+    the same product page with different options, or by an essentially
+    identical name (e.g. the same canister in another colour), so later
+    rounds stop repeating earlier ones."""
+
+    def __init__(self) -> None:
+        self.hashes: set[str] = set()
+        self.paths: set[tuple[str, str]] = set()
+        self.names: list[set[str]] = []
+
+    def add(self, url: Optional[str], name: Optional[str]) -> None:
+        if url:
+            self.hashes.add(url_hash(url))
+            pk = _path_key(url)
+            if pk:
+                self.paths.add(pk)
+        toks = _name_tokens(name)
+        if len(toks) >= 4:
+            self.names.append(toks)
+
+    def match(self, url: Optional[str], name: Optional[str]) -> bool:
+        if url and url_hash(url) in self.hashes:
+            return True
+        pk = _path_key(url)
+        if pk and pk in self.paths:
+            return True
+        toks = _name_tokens(name)
+        if len(toks) >= 4:
+            for other in self.names:
+                shared = len(toks & other)
+                if shared >= 4 and shared / min(len(toks), len(other)) >= 0.85:
+                    return True
+        return False
+
+
 _LISTING_RE = re.compile(
     r"(/search\b|/s\?|[?&]q=|[?&]query=|[?&]keyword=|[?&]searchTerm=|/keyword\.php|/category/|"
     r"/categories/|/browse/|/collections?/(?![^/]+/products/)|/sch/|/market/)",
@@ -573,6 +636,11 @@ class RunContext:
         self.approved = approved or []         # [{candidate_id, product_name, retailer, fails, note}]
         self.rejected = rejected or []         # [{product_name, retailer, url, url_hash}]
         self.approved_overrides = {a["candidate_id"]: a["fails"] for a in self.approved}
+        # Everything listed in earlier rounds (picks and near misses) plus
+        # anything the buyer rejected; filled by the worker (2026-11-23).
+        self.seen = SeenProducts()
+        for s in shown + self.rejected:
+            self.seen.add(s.get("url"), s.get("product_name"))
         # Retailer name -> how many earlier queries for this report targeted it
         # (Phase 5 rotation: Try Again widens the search instead of circling).
         self.searched_retailers = searched_retailers or {}
@@ -1053,6 +1121,7 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
     pmin, pmax = float(ctx.prefs["price_min"]), float(ctx.prefs["price_max"])
     team_fams = set(ctx.team_cfg["families"])
     seen_ids: set[int] = set()
+    this_round = SeenProducts()
     for p in picks:
         try:
             cid = int(p.get("candidate_id"))
@@ -1074,8 +1143,10 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
         reason = None
         if c.get("status") != "verified" or not f.get("is_product_page"):
             reason = "page could not be verified"
-        elif c["url_hash"] in shown_hashes:
-            reason = "already shown"
+        elif c["url_hash"] in shown_hashes or (not override and ctx.seen.match(c.get("url"), f.get("product_name") or c.get("title"))):
+            reason = "already shown in an earlier round"
+        elif this_round.match(c.get("url"), f.get("product_name") or c.get("title")):
+            reason = "same product as another pick in this round"
         elif f.get("licensed_ip"):
             reason = "licensed character / branded IP"
         elif f.get("price_usd") is None and not override:
@@ -1106,6 +1177,7 @@ def enforce_rules(ctx: RunContext, picks: list[dict], verified_by_id: dict[int, 
             rejected.append({**p, "fails": reason, "candidate_id": cid})
             continue
         per_retailer[rkey] = per_retailer.get(rkey, 0) + 1
+        this_round.add(c.get("url"), f.get("product_name") or c.get("title"))
         accepted.append({**p, "candidate_id": cid, "retailer": rkey, "tier": tier})
     return accepted, rejected
 
